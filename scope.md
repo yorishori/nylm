@@ -11,7 +11,7 @@ document fixes the base they will be built on.
 - **Simplify everything.** Solve the problem in front of us, not the general case.
 - **Not a framework.** No abstraction layers "for later". Features are built as
   needed; refactor when duplication actually hurts.
-- **Few dependencies.** Four external libraries: three vendored as source,
+- **Few dependencies.** Three external libraries: two vendored as source,
   plus OpenSSL from the distro.
 - **Simple code, fewer bugs.** Less code means fewer places for bugs to hide.
 - **One-directional data flow.** The server serves files and data; it never
@@ -26,12 +26,11 @@ document fixes the base they will be built on.
 | HTTP       | Hand-written HTTP/1.1 subset over POSIX sockets               |
 | Database   | SQLite (amalgamation `sqlite3.c`, vendored, statically linked)|
 | JSON       | cJSON (`cJSON.c`/`cJSON.h`, vendored)                         |
-| Crypto     | Monocypher (`monocypher.c`/`.h`, vendored) — password hashing |
-| TLS        | OpenSSL (`libssl-dev` from Debian, dynamically linked)        |
+| TLS/crypto | OpenSSL 3.2+ (`libssl-dev` from Debian, dynamically linked)   |
 | Frontend   | Static HTML, CSS, vanilla JS — served by the C binary         |
 | Deployment | Docker, multi-stage build, single container                   |
 
-No other libraries. libc only beyond the four above.
+No other libraries. libc only beyond the three above.
 
 ## Architecture
 
@@ -93,17 +92,18 @@ limit gets `413`/`431`, never a buffer overrun.
 
 Single user (me), simple login.
 
-- **Library: Monocypher.** One `.c`/`.h` pair, audited, no dependencies.
-  Provides Argon2 (password hashing), BLAKE2b, and constant-time comparison.
-- **Randomness:** `getrandom(2)` from libc for salts and session tokens.
+- **Library: OpenSSL** (already used for TLS). Argon2id via `EVP_KDF`
+  for passwords, SHA-256 for session token hashes, `CRYPTO_memcmp` for
+  constant-time comparison.
+- **Randomness:** `RAND_bytes` for salts and session tokens.
 - **The user** is created/updated from the command line
   (`nylm set-password`), never over HTTP. No sign-up endpoint.
-- **Password storage:** Argon2 hash + random salt in SQLite.
+- **Password storage:** Argon2id hash + random salt in SQLite.
 - **Login:** `POST /api/login` checks the password; on success creates a
   session. A fixed delay on failure slows down guessing.
 - **Sessions:** 32 random bytes, sent as a cookie
   (`HttpOnly; Secure; SameSite=Strict; Path=/`).
-  Only a BLAKE2b hash of the token is stored in the DB, with an expiry.
+  Only a SHA-256 hash of the token is stored in the DB, with an expiry.
   `POST /api/logout` deletes it.
 - **Protection:** every `/api/*` route except `/api/login` requires a valid
   session. Static files are public (they contain no data).
@@ -188,8 +188,7 @@ nylm/
 ├── migrations/       # 001_init.sql, 002_...sql
 ├── vendor/
 │   ├── sqlite/       # sqlite3.c, sqlite3.h
-│   ├── cjson/        # cJSON.c, cJSON.h
-│   └── monocypher/   # monocypher.c, monocypher.h
+│   └── cjson/        # cJSON.c, cJSON.h
 ├── public/           # index.html, style.css, app.js
 └── tests/
     ├── test_*.c      # unit tests (plain asserts, no framework)
@@ -220,7 +219,7 @@ nylm/
 4. **Router + JSON** — route table, cJSON wired in, `GET /api/health`.
 5. **SQLite** — open DB, migrations, one example table with CRUD endpoints.
 6. **Frontend shell** — `index.html` + `app.js` that calls the API.
-7. **Auth** — Monocypher, `set-password` command, login/logout, session check.
+7. **Auth** — Argon2id via OpenSSL, `set-password` command, login/logout, session check.
 8. **TLS** — OpenSSL, port 80 redirect + ACME webroot, HSTS, self-signed
    cert for development.
 9. **Docker** — multi-stage image, volumes for DB and certs, runs as non-root.
