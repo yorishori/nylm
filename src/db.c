@@ -2,10 +2,6 @@
 
 #include <stdio.h>
 
-/* Generated from the migrations directory by tools/embed-migrations.sh. */
-extern const char *const migrations[];
-extern const int migration_count;
-
 sqlite3 *db;
 
 void db_log_error(const char *context)

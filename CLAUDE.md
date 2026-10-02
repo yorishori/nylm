@@ -51,8 +51,9 @@ If a rule blocks the task, stop and ask the user; do not work around it.
    `src/api_<feature>.c`, one file per feature, declared in `src/api.h`.
 5. New routes MUST have `public = 0` (login required). Making a route public
    requires the user's explicit approval.
-6. Schema changes go in a new file `migrations/NNN_<name>.sql` (next number).
-   NEVER edit or delete an existing migration. New tables are `STRICT`.
+6. Schema changes are a new entry appended to `migrations[]` in
+   `src/migrations.c`. NEVER edit, reorder or delete an existing entry.
+   New tables are `STRICT`.
 7. The server is single-threaded on purpose. NEVER add threads, forks for
    request handling, or async I/O without the user's approval.
 

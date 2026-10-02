@@ -31,8 +31,8 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 | `src/router.c`    | route table: method, path, handler, login required       |
 | `src/api_*.c`     | handlers, one file per feature                           |
 | `src/auth.c`      | password hashing (Argon2id), sessions                    |
-| `src/db.c`        | SQLite connection, migrations                            |
-| `migrations/`     | numbered `.sql` files, compiled into the binary          |
+| `src/db.c`        | SQLite connection, applies migrations                    |
+| `src/migrations.c`| the schema, one appended entry per change                |
 | `public/`         | `index.html`, `app.js`, `style.css`                      |
 | `tests/`          | unit tests (`test_*.c`), end-to-end (`smoke.sh`)         |
 | `deploy/`         | `install.sh`, systemd unit, root action scripts          |

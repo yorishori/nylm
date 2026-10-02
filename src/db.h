@@ -3,6 +3,10 @@
 
 #include <sqlite3.h>
 
+/* The schema, in order (src/migrations.c). */
+extern const char *const migrations[];
+extern const int migration_count;
+
 /* The one database connection, open for the life of the process. */
 extern sqlite3 *db;
 
