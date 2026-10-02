@@ -11,6 +11,7 @@ struct route {
     const char *method;
     const char *path; /* exact, or "/prefix/:" - see path_matches() */
     handler_fn handler;
+    int public; /* 1: no login needed */
 };
 
 #define ROUTE_NOT_FOUND          (-1)
@@ -20,7 +21,10 @@ struct route {
 int router_find(const struct route *routes, size_t n, const char *method,
                 const char *path, const char **param);
 
-/* Handles an /api/ request with the application's route table. */
+/*
+ * Handles an /api/ request with the application's route table. Routes not
+ * marked public answer 401 unless the request has a valid session.
+ */
 void router_dispatch(struct request *req, struct response *res);
 
 #endif

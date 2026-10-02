@@ -8,6 +8,7 @@
 
 const app = document.getElementById("app");
 const statusLine = document.getElementById("status");
+const logoutButton = document.getElementById("logout");
 
 /* ---- helpers ---------------------------------------------------------- */
 
@@ -130,17 +131,66 @@ async function deleteNote(id) {
   }
 }
 
+/* ---- session ---------------------------------------------------------- */
+
+function renderLogin() {
+  logoutButton.hidden = true;
+  const password = el("input", { type: "password", name: "password", required: true,
+                                 autocomplete: "current-password" });
+  const submit = el("button", { class: "btn primary", type: "submit" }, "log in");
+
+  app.replaceChildren(
+    el("form", {
+      class: "panel login",
+      onsubmit: async (e) => {
+        e.preventDefault();
+        submit.disabled = true;
+        setStatus("checking…");
+        try {
+          await api("POST", "/api/login", { password: password.value });
+          setStatus("");
+          await start();
+        } catch (err) {
+          password.value = "";
+          handleError(err);
+        } finally {
+          submit.disabled = false;
+          password.focus();
+        }
+      },
+    },
+      el("label", {}, el("span", {}, "password"), password),
+      el("div", { class: "actions" }, submit)));
+  password.focus();
+}
+
+logoutButton.addEventListener("click", async () => {
+  try {
+    await api("POST", "/api/logout");
+  } catch (err) {
+    /* logged out either way */
+  }
+  setStatus("logged out");
+  renderLogin();
+});
+
 /* ---- startup ---------------------------------------------------------- */
 
+/* Any 401 means the session is gone: show the login form. */
 function handleError(err) {
+  if (err instanceof ApiError && err.status === 401 && !app.querySelector(".login")) {
+    setStatus("please log in");
+    renderLogin();
+    return;
+  }
   setStatus(err.message || String(err), true);
 }
 
 async function start() {
   try {
     await loadNotes();
+    logoutButton.hidden = false;
     renderNotes();
-    setStatus("");
   } catch (err) {
     handleError(err);
   }

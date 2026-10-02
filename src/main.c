@@ -8,9 +8,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <termios.h>
 #include <unistd.h>
 
 #include "arena.h"
+#include "auth.h"
 #include "conn.h"
 #include "db.h"
 #include "http.h"
@@ -118,7 +120,65 @@ static void serve(int client, const char *ip)
     fflush(stdout);
 }
 
-int main(void)
+static const char *env_or(const char *name, const char *fallback)
+{
+    const char *v = getenv(name);
+    return v != NULL && *v != '\0' ? v : fallback;
+}
+
+/* Reads one line into buf without echo when stdin is a terminal. */
+static int read_password(const char *prompt, char *buf, size_t size)
+{
+    int tty = isatty(STDIN_FILENO);
+    struct termios old, quiet;
+    if (tty) {
+        fprintf(stderr, "%s", prompt);
+        tcgetattr(STDIN_FILENO, &old);
+        quiet = old;
+        quiet.c_lflag &= ~(tcflag_t)ECHO;
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &quiet);
+    }
+    char *line = fgets(buf, (int)size, stdin);
+    if (tty) {
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &old);
+        fprintf(stderr, "\n");
+    }
+    if (line == NULL)
+        return -1;
+    size_t len = strlen(buf);
+    if (len > 0 && buf[len - 1] == '\n')
+        buf[--len] = '\0';
+    else if (len == size - 1)
+        return -1; /* too long */
+    return 0;
+}
+
+static int cmd_set_password(void)
+{
+    char pw[AUTH_MAX_PASSWORD + 2], again[AUTH_MAX_PASSWORD + 2];
+    if (read_password("new password: ", pw, sizeof pw) != 0) {
+        fprintf(stderr, "could not read password (max %d bytes)\n", AUTH_MAX_PASSWORD);
+        return 1;
+    }
+    if (strlen(pw) < AUTH_MIN_PASSWORD) {
+        fprintf(stderr, "password must be at least %d bytes\n", AUTH_MIN_PASSWORD);
+        return 1;
+    }
+    if (isatty(STDIN_FILENO)) {
+        if (read_password("again: ", again, sizeof again) != 0 || strcmp(pw, again) != 0) {
+            fprintf(stderr, "passwords do not match\n");
+            return 1;
+        }
+    }
+    if (auth_set_password(pw) != 0) {
+        fprintf(stderr, "failed to set password\n");
+        return 1;
+    }
+    fprintf(stderr, "password set; all sessions logged out\n");
+    return 0;
+}
+
+static int cmd_serve(void)
 {
     int port = parse_port(getenv("NYLM_PORT"), DEFAULT_PORT);
     if (port < 0) {
@@ -126,21 +186,10 @@ int main(void)
         return 1;
     }
 
-    public_dir = getenv("NYLM_PUBLIC");
-    if (public_dir == NULL || *public_dir == '\0')
-        public_dir = "public";
-
-    const char *db_path = getenv("NYLM_DB");
-    if (db_path == NULL || *db_path == '\0')
-        db_path = "nylm.db";
-    if (db_open(db_path) != 0)
-        return 1;
-
     if (arena_init(ARENA_SIZE) != 0) {
         fprintf(stderr, "out of memory\n");
         return 1;
     }
-
     json_init();
 
     /* A client closing early must not kill the server. */
@@ -168,4 +217,30 @@ int main(void)
         serve(client, ip);
         arena_reset();
     }
+}
+
+static void usage(void)
+{
+    fprintf(stderr,
+            "usage: nylm                 run the server\n"
+            "       nylm set-password    set the login password (reads stdin)\n");
+}
+
+int main(int argc, char **argv)
+{
+    if (argc > 2 || (argc == 2 && strcmp(argv[1], "set-password") != 0)) {
+        usage();
+        return 2;
+    }
+
+    public_dir = env_or("NYLM_PUBLIC", "public");
+    int tls = strcmp(env_or("NYLM_TLS", "on"), "off") != 0;
+    auth_set_secure_cookie(tls);
+
+    if (db_open(env_or("NYLM_DB", "nylm.db")) != 0)
+        return 1;
+
+    int rc = argc == 2 ? cmd_set_password() : cmd_serve();
+    db_close();
+    return rc;
 }

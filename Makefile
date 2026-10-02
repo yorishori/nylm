@@ -2,7 +2,7 @@ CC      = gcc
 CFLAGS  = -std=c11 -Wall -Wextra -Werror -Wpedantic -Wshadow -Wconversion -MMD -MP \
           -isystem vendor/cjson -isystem vendor/sqlite
 LDFLAGS =
-LDLIBS  = -lm
+LDLIBS  = -lcrypto -lm
 
 SRC = $(wildcard src/*.c)
 
