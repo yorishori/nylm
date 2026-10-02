@@ -1,0 +1,26 @@
+#ifndef ROUTER_H
+#define ROUTER_H
+
+#include <stddef.h>
+
+#include "http.h"
+
+typedef void (*handler_fn)(struct request *req, struct response *res);
+
+struct route {
+    const char *method;
+    const char *path; /* exact, or "/prefix/:" - see path_matches() */
+    handler_fn handler;
+};
+
+#define ROUTE_NOT_FOUND          (-1)
+#define ROUTE_METHOD_NOT_ALLOWED (-2)
+
+/* Index of the matching route, or one of the ROUTE_* codes. */
+int router_find(const struct route *routes, size_t n, const char *method,
+                const char *path, const char **param);
+
+/* Handles an /api/ request with the application's route table. */
+void router_dispatch(struct request *req, struct response *res);
+
+#endif

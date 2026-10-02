@@ -13,6 +13,8 @@
 #include "arena.h"
 #include "conn.h"
 #include "http.h"
+#include "json.h"
+#include "router.h"
 #include "static.h"
 
 #define DEFAULT_PORT 8080
@@ -70,7 +72,7 @@ static int listen_on(int port)
 static void handle(struct request *req, struct response *res)
 {
     if (strncmp(req->path, "/api/", 5) == 0) {
-        http_text(res, 404, "404 Not Found\n");
+        router_dispatch(req, res);
     } else if (strcmp(req->method, "GET") == 0) {
         static_serve(public_dir, req->path, res);
     } else {
@@ -131,6 +133,8 @@ int main(void)
         fprintf(stderr, "out of memory\n");
         return 1;
     }
+
+    json_init();
 
     /* A client closing early must not kill the server. */
     signal(SIGPIPE, SIG_IGN);

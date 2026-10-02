@@ -1,6 +1,8 @@
 CC      = gcc
-CFLAGS  = -std=c11 -Wall -Wextra -Werror -Wpedantic -Wshadow -Wconversion -MMD -MP
+CFLAGS  = -std=c11 -Wall -Wextra -Werror -Wpedantic -Wshadow -Wconversion -MMD -MP \
+          -isystem vendor/cjson -isystem vendor/sqlite
 LDFLAGS =
+LDLIBS  =
 
 SRC = $(wildcard src/*.c)
 
@@ -10,14 +12,19 @@ REL_OBJ = $(SRC:src/%.c=build/release/%.o)
 DBG_OBJ = $(SRC:src/%.c=build/debug/%.o)
 SAN     = -fsanitize=address,undefined
 
+# Vendored code: upstream's own warnings are not ours to fix, so it gets
+# plain flags and is built once for both variants.
+VENDOR_OBJ = build/vendor/cJSON.o
+VENDOR_CFLAGS = -O2 -w
+
 release: nylm
 debug: nylm-debug
 
-nylm: $(REL_OBJ)
-	$(CC) $(LDFLAGS) -o $@ $^
+nylm: $(REL_OBJ) $(VENDOR_OBJ)
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-nylm-debug: $(DBG_OBJ)
-	$(CC) $(LDFLAGS) $(SAN) -o $@ $^
+nylm-debug: $(DBG_OBJ) $(VENDOR_OBJ)
+	$(CC) $(LDFLAGS) $(SAN) -o $@ $^ $(LDLIBS)
 
 build/release/%.o: src/%.c
 	@mkdir -p $(@D)
@@ -26,6 +33,10 @@ build/release/%.o: src/%.c
 build/debug/%.o: src/%.c
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -O0 -g $(SAN) -c -o $@ $<
+
+build/vendor/cJSON.o: vendor/cjson/cJSON.c
+	@mkdir -p $(@D)
+	$(CC) $(VENDOR_CFLAGS) -c -o $@ $<
 
 run: nylm-debug
 	./nylm-debug
