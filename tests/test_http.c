@@ -43,7 +43,8 @@ static void test_request_line(void)
     static char long_path[HTTP_MAX_PATH + 64];
     memcpy(long_path, "GET /", 5);
     memset(long_path + 5, 'a', HTTP_MAX_PATH);
-    strcpy(long_path + 5 + HTTP_MAX_PATH, " HTTP/1.1\r\n\r\n");
+    snprintf(long_path + 5 + HTTP_MAX_PATH, sizeof long_path - 5 - HTTP_MAX_PATH,
+             " HTTP/1.1\r\n\r\n");
     CHECK(parse(long_path, &req) == 414);
 }
 
@@ -91,23 +92,23 @@ static void test_url_decode(void)
 {
     char s[64];
 
-    strcpy(s, "/plain");
+    snprintf(s, sizeof s, "%s", "/plain");
     CHECK(http_url_decode(s) == 0);
     CHECK_STR(s, "/plain");
 
-    strcpy(s, "%41%42c%2F%2e");
+    snprintf(s, sizeof s, "%s", "%41%42c%2F%2e");
     CHECK(http_url_decode(s) == 0);
     CHECK_STR(s, "ABc/.");
 
-    strcpy(s, "a+b");
+    snprintf(s, sizeof s, "%s", "a+b");
     CHECK(http_url_decode(s) == 0);
     CHECK_STR(s, "a+b"); /* '+' is literal in paths */
 
-    strcpy(s, "%7f");
+    snprintf(s, sizeof s, "%s", "%7f");
     CHECK(http_url_decode(s) == -1);
-    strcpy(s, "%1");
+    snprintf(s, sizeof s, "%s", "%1");
     CHECK(http_url_decode(s) == -1);
-    strcpy(s, "%g0");
+    snprintf(s, sizeof s, "%s", "%g0");
     CHECK(http_url_decode(s) == -1);
 }
 

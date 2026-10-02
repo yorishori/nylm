@@ -54,7 +54,7 @@ install -m 755 nylm /usr/local/bin/nylm
 rm -rf "$SHARE"
 install -d -m 755 "$SHARE"
 cp -r public "$SHARE/public"
-cp deploy/README.md "$SHARE/README.md"
+cp README.md "$SHARE/README.md"
 chmod -R a+rX,go-w "$SHARE"
 if [ -d deploy/actions ]; then
     for f in deploy/actions/*; do
