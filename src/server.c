@@ -6,6 +6,7 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -23,6 +24,7 @@
 enum listener { APP, REDIRECT };
 
 static const struct server_config *cfg;
+static volatile sig_atomic_t stopping;
 static char acme_challenge_dir[1024];
 
 static int listen_on(int port)
@@ -209,9 +211,23 @@ static void accept_one(int listen_fd, enum listener which)
     arena_reset();
 }
 
+static void on_stop_signal(int sig)
+{
+    (void)sig;
+    stopping = 1;
+}
+
 int server_run(const struct server_config *config)
 {
     cfg = config;
+
+    /* SIGTERM (docker stop) / SIGINT: finish the current request, then return.
+     * No SA_RESTART, so a blocked poll() wakes up with EINTR. */
+    struct sigaction sa = { .sa_handler = on_stop_signal };
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGINT, &sa, NULL);
+
     http_set_hsts(cfg->tls);
     snprintf(acme_challenge_dir, sizeof acme_challenge_dir, "%s%.*s", cfg->acme_dir,
              (int)strlen(ACME_PREFIX) - 1, ACME_PREFIX);
@@ -236,7 +252,7 @@ int server_run(const struct server_config *config)
     fflush(stdout);
 
     fds[0].events = fds[1].events = POLLIN;
-    for (;;) {
+    while (!stopping) {
         if (poll(fds, nfds, -1) < 0) {
             if (errno != EINTR)
                 perror("poll");
@@ -247,4 +263,10 @@ int server_run(const struct server_config *config)
         if (nfds == 2 && (fds[1].revents & POLLIN))
             accept_one(fds[1].fd, REDIRECT);
     }
+    printf("nylm: shutting down\n");
+    fflush(stdout);
+    close(fds[0].fd);
+    if (fds[1].fd >= 0)
+        close(fds[1].fd);
+    return 0;
 }

@@ -11,7 +11,7 @@ struct server_config {
     int public_https_port;  /* port used in redirects (443 behind Docker) */
 };
 
-/* Listens and serves forever; returns only on startup failure. */
+/* Serves until SIGTERM/SIGINT (returns 0); -1 on startup failure. */
 int server_run(const struct server_config *cfg);
 
 /* Builds the https:// redirect target, or NULL if Host is unusable. */

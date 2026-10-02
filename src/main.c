@@ -119,8 +119,7 @@ static int cmd_serve(int tls)
     /* A client closing early must not kill the server. */
     signal(SIGPIPE, SIG_IGN);
 
-    server_run(&cfg);
-    return 1;
+    return server_run(&cfg) == 0 ? 0 : 1;
 }
 
 static void usage(void)

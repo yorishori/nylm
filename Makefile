@@ -56,8 +56,9 @@ build/gen/migrations.c: $(MIGRATIONS) tools/embed-migrations.sh
 build/gen/migrations.o: build/gen/migrations.c
 	$(CC) -std=c11 -c -o $@ $<
 
+# Development server over plain HTTP on :8080.
 run: nylm-debug
-	./nylm-debug
+	NYLM_TLS=off ./nylm-debug
 
 clean:
 	rm -rf build nylm nylm-debug

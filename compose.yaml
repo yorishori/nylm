@@ -1,0 +1,28 @@
+# Production: TLS on, certificates and ACME webroot from the host.
+# See deploy/README.md for the host-side setup.
+services:
+  nylm:
+    build: .
+    image: nylm
+    container_name: nylm
+    restart: unless-stopped
+    ports:
+      - "80:8080"
+      - "443:8443"
+    environment:
+      NYLM_TLS: ${NYLM_TLS:-on}
+    volumes:
+      - nylm-data:/data
+      - /srv/nylm/certs:/certs:ro
+      - /srv/nylm/acme:/acme:ro
+    # Nothing but /data (and /tmp for SQLite temp files) is writable.
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  nylm-data:
