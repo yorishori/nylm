@@ -99,7 +99,7 @@ Single user (me), simple login.
 - **Login:** `POST /api/login` checks the password; on success creates a
   session. A fixed delay on failure slows down guessing.
 - **Sessions:** 32 random bytes, sent as a cookie
-  (`HttpOnly; SameSite=Strict; Path=/`, plus `Secure` when behind TLS).
+  (`HttpOnly; Secure; SameSite=Strict; Path=/`).
   Only a BLAKE2b hash of the token is stored in the DB, with an expiry.
   `POST /api/logout` deletes it.
 - **Protection:** every `/api/*` route except `/api/login` requires a valid
@@ -109,25 +109,28 @@ Single user (me), simple login.
 
 ### Token theft
 
-A session cookie works like a key: whoever holds it is logged in. There are
-three main ways it can be stolen, and each one is blocked separately:
+A session cookie works like a key: whoever holds it is logged in. We keep the
+defences simple:
 
-| Way it is stolen               | Defence                                           |
-|--------------------------------|---------------------------------------------------|
-| Read off the network           | TLS whenever the app is reached by anything other than localhost; cookie marked `Secure` |
-| Read by injected JS (XSS)      | `HttpOnly` cookie; frontend never puts data into `innerHTML`, only `textContent`; `Content-Security-Policy: default-src 'self'` (no inline or third-party scripts) |
-| Guessed or planted             | 256-bit random tokens; a fresh token on every login; unknown tokens are rejected, never adopted |
+- `HttpOnly` + `Secure` cookie, served over TLS (see below).
+- Frontend inserts data with `textContent`, never `innerHTML`.
+- Random 256-bit tokens, a fresh one per login, single fixed expiry.
+- Logout deletes the session server-side.
 
-Limiting the damage if a token is stolen anyway:
+If a feature is ever sensitive enough to need more, we add a second layer:
+short-lived, single-use privileged tokens for that action only.
 
-- **Two expiries:** an absolute lifetime (e.g. 7 days) and an idle timeout
-  (e.g. 24 h without use), both checked by the server.
-- **Revocation:** `POST /api/logout` kills the current session;
-  `nylm logout-all` (CLI) deletes every session.
-- **No binding to IP or User-Agent:** IPs change (mobile, VPN) and
-  User-Agents are easy to fake, so this adds complexity without real security.
+## TLS
 
-Out of reach: someone with access to the unlocked machine or browser profile.
+The C binary speaks plain HTTP only. TLS is terminated by a reverse proxy
+(Caddy) running in its own container in front of it:
+
+- Caddy obtains and renews certificates automatically (Let's Encrypt).
+- The app container is not published to the host; only Caddy's 443/80 are.
+- No TLS library in our code, no certificate handling in C.
+
+The app's only TLS-related job: set the `Secure` cookie flag (enabled by
+default, disabled with an env var for local development over plain HTTP).
 
 ## Security baseline
 
@@ -169,6 +172,7 @@ nylm/
 ## Docker
 
 - **Build stage:** `debian:stable-slim` + `gcc`/`make`; builds a release binary.
+- **Compose:** `compose.yaml` with two services, `caddy` and `nylm`.
 - **Runtime stage:** `debian:stable-slim`, non-root user, copies the binary and
   `public/`. DB lives on a mounted volume (`/data`).
 - One `docker run` (or a minimal `compose.yaml`) is all it takes to start it.
