@@ -36,7 +36,6 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 | `public/`         | `index.html`, `app.js`, `style.css`                      |
 | `tests/`          | unit tests (`test_*.c`), end-to-end (`smoke.sh`)         |
 | `deploy/`         | `install.sh`, systemd unit, root action scripts          |
-| `vendor/`         | SQLite 3.53.4, cJSON 1.7.19 — upstream, never edited     |
 
 On the server: binary `/usr/local/bin/nylm`, config `/etc/nylm.conf`, data
 `/var/lib/nylm/`, frontend `/usr/local/share/nylm/public/`, actions
@@ -53,4 +52,5 @@ sudo -u nylm env NYLM_DB=/var/lib/nylm/nylm.db nylm set-password
 ```
 
 Configuration is environment variables; `nylm --help` lists them.
-Build needs `gcc`, `make`, OpenSSL 3.2+.
+Build needs `gcc`, `make` and the system libraries `sqlite` (3.38+), `cjson`
+and `openssl` (3.2+), linked dynamically: `pacman -Syu` brings their fixes.

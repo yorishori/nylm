@@ -1,7 +1,7 @@
 #ifndef JSON_H
 #define JSON_H
 
-#include <cJSON.h>
+#include <cjson/cJSON.h>
 
 #include "http.h"
 

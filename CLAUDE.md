@@ -29,13 +29,12 @@ If a rule blocks the task, stop and ask the user; do not work around it.
 
 ## 2. Dependencies
 
-1. The only libraries are: libc, SQLite (`vendor/sqlite`), cJSON
-   (`vendor/cjson`) and OpenSSL libcrypto (from the distro). NEVER add another
-   library, tool, framework, package manager or build step without the
-   user's explicit approval.
-2. NEVER edit files in `vendor/`. Upgrading means replacing them with upstream
-   files and updating the versions in `README.md`.
-3. Frontend: plain HTML, CSS and JavaScript only. NEVER add a framework,
+1. The only libraries are libc, SQLite, cJSON and OpenSSL libcrypto, all
+   linked dynamically from the distro packages (`sqlite`, `cjson`, `openssl`).
+   NEVER add another library, tool, framework, package manager or build step,
+   and NEVER copy library source into the repo, without the user's explicit
+   approval.
+2. Frontend: plain HTML, CSS and JavaScript only. NEVER add a framework,
    bundler, transpiler, npm package or CDN script.
 
 ## 3. Architecture

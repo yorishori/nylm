@@ -1,8 +1,8 @@
 CC      = gcc
-CFLAGS  = -std=c11 -Wall -Wextra -Werror -Wpedantic -Wshadow -Wconversion -MMD -MP \
-          -isystem vendor/cjson -isystem vendor/sqlite
+CFLAGS  = -std=c11 -Wall -Wextra -Werror -Wpedantic -Wshadow -Wconversion -MMD -MP
 LDFLAGS =
-LDLIBS  = -lcrypto -lm
+# System libraries (Arch packages: sqlite, cjson, openssl).
+LDLIBS  = -lsqlite3 -lcjson -lcrypto
 
 SRC = $(wildcard src/*.c)
 
@@ -12,21 +12,13 @@ REL_OBJ = $(SRC:src/%.c=build/release/%.o)
 DBG_OBJ = $(SRC:src/%.c=build/debug/%.o)
 SAN     = -fsanitize=address,undefined
 
-# Vendored code: upstream's own warnings are not ours to fix, so it gets
-# plain flags and is built once for both variants.
-VENDOR_OBJ = build/vendor/cJSON.o build/vendor/sqlite3.o
-VENDOR_CFLAGS = -O2 -w
-SQLITE_FLAGS = -DSQLITE_THREADSAFE=0 -DSQLITE_DQS=0 -DSQLITE_OMIT_LOAD_EXTENSION \
-               -DSQLITE_DEFAULT_FOREIGN_KEYS=1 -DSQLITE_DEFAULT_MEMSTATUS=0 \
-               -DSQLITE_OMIT_DEPRECATED -DSQLITE_LIKE_DOESNT_MATCH_BLOBS
-
 release: nylm
 debug: nylm-debug
 
-nylm: $(REL_OBJ) $(VENDOR_OBJ)
+nylm: $(REL_OBJ)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
-nylm-debug: $(DBG_OBJ) $(VENDOR_OBJ)
+nylm-debug: $(DBG_OBJ)
 	$(CC) $(LDFLAGS) $(SAN) -o $@ $^ $(LDLIBS)
 
 build/release/%.o: src/%.c
@@ -37,18 +29,10 @@ build/debug/%.o: src/%.c
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -O0 -g $(SAN) -c -o $@ $<
 
-build/vendor/cJSON.o: vendor/cjson/cJSON.c
-	@mkdir -p $(@D)
-	$(CC) $(VENDOR_CFLAGS) -c -o $@ $<
-
-build/vendor/sqlite3.o: vendor/sqlite/sqlite3.c
-	@mkdir -p $(@D)
-	$(CC) $(VENDOR_CFLAGS) $(SQLITE_FLAGS) -c -o $@ $<
-
 # Unit tests link every debug object except main.o.
 TEST_SRC = $(wildcard tests/test_*.c)
 TEST_BIN = $(TEST_SRC:tests/%.c=build/tests/%)
-TEST_OBJ = $(filter-out build/debug/main.o,$(DBG_OBJ)) $(VENDOR_OBJ)
+TEST_OBJ = $(filter-out build/debug/main.o,$(DBG_OBJ))
 
 build/tests/%: tests/%.c tests/test.h $(TEST_OBJ)
 	@mkdir -p $(@D)

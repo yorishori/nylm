@@ -36,7 +36,7 @@ iface_cidr() {
 }
 
 step "packages"
-pacman -S --needed --noconfirm gcc make openssl sudo curl iproute2
+pacman -S --needed --noconfirm gcc make openssl sqlite cjson sudo curl iproute2
 
 step "build and test"
 as_user make release

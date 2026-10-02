@@ -58,14 +58,36 @@ static int migrate(void)
     return 0;
 }
 
+/* Oldest SQLite with everything the schema uses: STRICT tables (3.37) and
+ * unixepoch() (3.38). */
+#define MIN_SQLITE_VERSION 3038000
+
 int db_open(const char *path)
 {
+    if (sqlite3_libversion_number() < MIN_SQLITE_VERSION) {
+        fprintf(stderr, "db: SQLite %s is too old, need 3.38 or newer\n", sqlite3_libversion());
+        return -1;
+    }
     if (sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL) !=
         SQLITE_OK) {
         db_log_error(path);
         return -1;
     }
-    sqlite3_busy_timeout(db, 5000);
+
+    /* The system library is built with general-purpose defaults. Turn off what
+     * we never want: double-quoted strings silently accepted as literals (hides
+     * typos in column names) and loading extensions from SQL. */
+    if (sqlite3_db_config(db, SQLITE_DBCONFIG_DQS_DML, 0, (int *)NULL) != SQLITE_OK ||
+        sqlite3_db_config(db, SQLITE_DBCONFIG_DQS_DDL, 0, (int *)NULL) != SQLITE_OK ||
+        sqlite3_db_config(db, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, (int *)NULL) !=
+            SQLITE_OK) {
+        db_log_error("sqlite3_db_config");
+        return -1;
+    }
+    if (sqlite3_busy_timeout(db, 5000) != SQLITE_OK) {
+        db_log_error("sqlite3_busy_timeout");
+        return -1;
+    }
     if (db_exec("PRAGMA journal_mode = WAL;"
              "PRAGMA synchronous = NORMAL;"
              "PRAGMA foreign_keys = ON;") != 0)

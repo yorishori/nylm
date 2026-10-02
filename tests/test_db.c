@@ -1,4 +1,4 @@
-/* Passwords and sessions against a real, temporary SQLite database. */
+/* Database settings, passwords and sessions, against a real temporary database. */
 #define _POSIX_C_SOURCE 200809L
 
 #include <stdlib.h>
@@ -32,6 +32,12 @@ int main(void)
         return 1;
     snprintf(path, sizeof path, "%s/t.db", dir);
     CHECK(db_open(path) == 0);
+
+    /* settings the system SQLite library must have after db_open() */
+    CHECK(db_exec("SELECT \"no_such_column\"") != 0); /* DQS off: not a string */
+    sqlite3_stmt *st = db_prepare("PRAGMA foreign_keys");
+    CHECK(st != NULL && sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1);
+    sqlite3_finalize(st);
 
     /* passwords */
     CHECK(auth_check_password("anything") == 0); /* none set yet */
