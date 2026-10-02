@@ -11,7 +11,8 @@ document fixes the base they will be built on.
 - **Simplify everything.** Solve the problem in front of us, not the general case.
 - **Not a framework.** No abstraction layers "for later". Features are built as
   needed; refactor when duplication actually hurts.
-- **Few dependencies.** Only three external libraries, all vendored as source.
+- **Few dependencies.** Four external libraries: three vendored as source,
+  plus OpenSSL from the distro.
 - **Simple code, fewer bugs.** Less code means fewer places for bugs to hide.
 - **One-directional data flow.** The server serves files and data; it never
   builds UI. Fewer paths for data to travel means fewer security holes.
@@ -26,21 +27,22 @@ document fixes the base they will be built on.
 | Database   | SQLite (amalgamation `sqlite3.c`, vendored, statically linked)|
 | JSON       | cJSON (`cJSON.c`/`cJSON.h`, vendored)                         |
 | Crypto     | Monocypher (`monocypher.c`/`.h`, vendored) — password hashing |
+| TLS        | OpenSSL (`libssl-dev` from Debian, dynamically linked)        |
 | Frontend   | Static HTML, CSS, vanilla JS — served by the C binary         |
 | Deployment | Docker, multi-stage build, single container                   |
 
-No other libraries. libc only beyond the three above.
+No other libraries. libc only beyond the four above.
 
 ## Architecture
 
 ```
-browser ──HTTP──> C binary ──> router ──> /api/*   handlers ──> SQLite file
+browser ──HTTPS─> C binary ──> router ──> /api/*   handlers ──> SQLite file
                                      └──> /*       static files from ./public
 ```
 
 - **One process, one binary.** Serves both the static frontend and the JSON API.
-- **Concurrency:** single-threaded loop — `accept`, read request, handle, write,
-  close. Socket timeouts so a slow client can't hang the server. This matches
+- **Concurrency:** single-threaded loop — `accept`, TLS handshake, read
+  request, handle, write, close. Socket timeouts so a slow client can't hang the server. This matches
   SQLite's single-writer model and is enough for one user. Revisit (`poll()` or
   a small thread pool) only if it becomes a measurable problem.
 - **Routing:** a static table of `{method, path, handler}` in one file. Exact
@@ -54,7 +56,8 @@ browser ──HTTP──> C binary ──> router ──> /api/*   handlers ─�
     and keeps itself in sync with the API. The backend never renders HTML.
 - **Memory:** a per-request arena allocator; everything allocated while handling
   a request is freed in one shot when the request ends.
-- **Config:** environment variables (port, DB path, static dir). No config files.
+- **Config:** environment variables (ports, DB path, static dir, cert/key
+  paths, TLS on/off). No config files.
 - **Logging:** one line per request to stdout (Docker collects it).
 
 ## HTTP — what we support
@@ -70,7 +73,7 @@ limit gets `413`/`431`, never a buffer overrun.
 
 ## Explicitly out of scope
 
-- TLS (terminate it in a reverse proxy if the app is ever exposed)
+- Reverse proxies; ACME / certificate renewal inside the binary
 - HTTP/2, keep-alive, chunked encoding, WebSockets
 - Multipart / file uploads (until a feature needs them)
 - Server-side templating — pages are static, data comes from the API
@@ -122,15 +125,38 @@ short-lived, single-use privileged tokens for that action only.
 
 ## TLS
 
-The C binary speaks plain HTTP only. TLS is terminated by a reverse proxy
-(Caddy) running in its own container in front of it:
+The binary terminates TLS itself, using OpenSSL. Responsibilities are split
+across three places:
 
-- Caddy obtains and renews certificates automatically (Let's Encrypt).
-- The app container is not published to the host; only Caddy's 443/80 are.
-- No TLS library in our code, no certificate handling in C.
+**C binary (`tls.c`)**
+- Listens on 443 (HTTPS) and 80 (HTTP).
+- Port 80 does exactly two things: serves `/.well-known/acme-challenge/*`
+  from a mounted directory (for certificate renewal) and redirects
+  everything else to HTTPS with `301`.
+- Loads certificate and key from paths given by env vars, at startup.
+- Minimum TLS 1.2; OpenSSL's default cipher list (no hand-tuning).
+- Handshake bounded by the same socket timeouts as reads/writes.
+- Sends `Strict-Transport-Security` on every HTTPS response.
+- `NYLM_TLS=off` for local development over plain HTTP (also drops the
+  `Secure` cookie flag).
 
-The app's only TLS-related job: set the `Secure` cookie flag (enabled by
-default, disabled with an env var for local development over plain HTTP).
+**Docker**
+- Runtime image installs `libssl3`; build image installs `libssl-dev`.
+- Publishes ports 80 and 443.
+- Mounts `/etc/letsencrypt` read-only and the ACME webroot directory.
+
+**Host server**
+- Domain name with DNS pointing to the server.
+- `certbot` (distro package, comes with a renewal timer) in `--webroot`
+  mode, writing challenges into the directory the app serves on port 80.
+- Renewal deploy hook: `docker restart nylm` so the new cert is loaded.
+- Firewall: only 80 and 443 open.
+
+**Development:** a self-signed cert made with the `openssl` CLI, or
+`NYLM_TLS=off`.
+
+Security updates for OpenSSL come from rebuilding the image on a fresh
+Debian base.
 
 ## Security baseline
 
@@ -157,6 +183,7 @@ nylm/
 │   ├── db.c/.h       # SQLite open, migrations, helpers
 │   ├── arena.c/.h    # per-request allocator
 │   ├── auth.c/.h     # password check, sessions
+│   ├── tls.c/.h      # OpenSSL context, handshake, read/write
 │   └── api_*.c       # one file per feature
 ├── migrations/       # 001_init.sql, 002_...sql
 ├── vendor/
@@ -172,10 +199,10 @@ nylm/
 ## Docker
 
 - **Build stage:** `debian:stable-slim` + `gcc`/`make`; builds a release binary.
-- **Compose:** `compose.yaml` with two services, `caddy` and `nylm`.
 - **Runtime stage:** `debian:stable-slim`, non-root user, copies the binary and
-  `public/`. DB lives on a mounted volume (`/data`).
-- One `docker run` (or a minimal `compose.yaml`) is all it takes to start it.
+  `public/`. DB lives on a mounted volume (`/data`); certificates and the
+  ACME webroot are mounted read-only (see TLS).
+- A minimal `compose.yaml` with one service is all it takes to start it.
 
 ## Testing
 
@@ -194,10 +221,12 @@ nylm/
 5. **SQLite** — open DB, migrations, one example table with CRUD endpoints.
 6. **Frontend shell** — `index.html` + `app.js` that calls the API.
 7. **Auth** — Monocypher, `set-password` command, login/logout, session check.
-8. **Docker** — multi-stage image, volume for the DB, runs as non-root.
-9. **Tests** — unit tests + smoke script, `make test`.
+8. **TLS** — OpenSSL, port 80 redirect + ACME webroot, HSTS, self-signed
+   cert for development.
+9. **Docker** — multi-stage image, volumes for DB and certs, runs as non-root.
+10. **Tests** — unit tests + smoke script, `make test`.
 
-After milestone 9 the base is done and we start adding actual tools.
+After milestone 10 the base is done and we start adding actual tools.
 
 ## Open questions
 
