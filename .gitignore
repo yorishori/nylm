@@ -1,6 +1,7 @@
 build/
 *.o
 /nylm
+/nylm-debug
 *.db
 *.db-wal
 *.db-shm
