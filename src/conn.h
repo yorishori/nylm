@@ -7,14 +7,13 @@
 /* One client connection. All socket I/O goes through here. */
 struct conn {
     int fd;
-    char ip[46];     /* client address, for the log */
     double deadline; /* monotonic time after which reads/writes fail */
 };
 
 double now_seconds(void); /* monotonic clock */
 
 /* Sets per-call socket timeouts and the whole-request deadline. */
-void conn_init(struct conn *c, int fd, const char *ip);
+void conn_init(struct conn *c, int fd);
 
 /* Like read(2); returns -1 on error, timeout or passed deadline. */
 ssize_t conn_read(struct conn *c, void *buf, size_t len);

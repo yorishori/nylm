@@ -89,8 +89,8 @@ static int cmd_set_password(void)
 }
 
 /*
- * Splits a space- or comma-separated env var and parses each item with
- * subnet_parse(). For NYLM_LISTEN only bare addresses are accepted.
+ * Splits a space-separated env var and parses each item with subnet_parse().
+ * For NYLM_LISTEN only bare addresses are accepted.
  */
 static int parse_list(const char *name, const char *value, struct subnet *out, int max,
                       int addresses_only)
@@ -102,8 +102,8 @@ static int parse_list(const char *name, const char *value, struct subnet *out, i
     }
     int n = 0;
     char *save = NULL;
-    for (char *item = strtok_r(copy, " ,", &save); item != NULL;
-         item = strtok_r(NULL, " ,", &save)) {
+    for (char *item = strtok_r(copy, " ", &save); item != NULL;
+         item = strtok_r(NULL, " ", &save)) {
         if (n == max) {
             fprintf(stderr, "%s: at most %d entries\n", name, max);
             return -1;

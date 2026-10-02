@@ -19,7 +19,6 @@ struct header {
 struct request {
     const char *method;
     const char *path;  /* URL-decoded, no query string */
-    const char *query; /* raw query string without '?', "" if none */
     struct header headers[HTTP_MAX_HEADERS];
     size_t nheaders;
     size_t content_length;

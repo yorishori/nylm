@@ -3,7 +3,6 @@
 #include "conn.h"
 
 #include <errno.h>
-#include <stdio.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <time.h>
@@ -21,10 +20,9 @@ double now_seconds(void)
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
-void conn_init(struct conn *c, int fd, const char *ip)
+void conn_init(struct conn *c, int fd)
 {
     c->fd = fd;
-    snprintf(c->ip, sizeof c->ip, "%s", ip);
     c->deadline = now_seconds() + REQUEST_SECONDS;
 
     struct timeval tv = { .tv_sec = IO_TIMEOUT_SECONDS };

@@ -93,13 +93,10 @@ static int parse_request_line(char *line, struct request *req)
     if (strlen(target) > HTTP_MAX_PATH)
         return 414;
 
+    /* No route uses a query string yet: cut it off and ignore it. */
     char *q = strchr(target, '?');
-    if (q != NULL) {
+    if (q != NULL)
         *q = '\0';
-        req->query = q + 1;
-    } else {
-        req->query = "";
-    }
     if (http_url_decode(target) != 0)
         return 400;
     req->path = target;
@@ -243,10 +240,8 @@ const char *http_status_text(int status)
     case 200: return "OK";
     case 201: return "Created";
     case 204: return "No Content";
-    case 301: return "Moved Permanently";
     case 400: return "Bad Request";
     case 401: return "Unauthorized";
-    case 403: return "Forbidden";
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
     case 408: return "Request Timeout";

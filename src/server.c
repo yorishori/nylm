@@ -114,7 +114,7 @@ static void serve(int client, const char *ip)
 {
     double start = now_seconds();
     struct conn c;
-    conn_init(&c, client, ip);
+    conn_init(&c, client);
 
     struct request req;
     struct response res;
