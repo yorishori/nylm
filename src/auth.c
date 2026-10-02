@@ -57,13 +57,9 @@ static int sha256(const void *data, size_t len, unsigned char out[32])
     return EVP_Digest(data, len, out, NULL, EVP_sha256(), NULL) == 1 ? 0 : -1;
 }
 
-int auth_set_password(const char *password)
+/* Stores the password row. Runs inside auth_set_password's transaction. */
+static int store_password(const unsigned char *salt, const unsigned char *hash)
 {
-    unsigned char salt[SALT_LEN], hash[HASH_LEN];
-    if (RAND_bytes(salt, sizeof salt) != 1 ||
-        argon2id(password, salt, ARGON2_MEMCOST_KIB, ARGON2_ITERATIONS, hash) != 0)
-        return -1;
-
     sqlite3_stmt *st = db_prepare(
         "INSERT INTO user (id, salt, hash, memcost, iterations) VALUES (1, ?, ?, ?, ?) "
         "ON CONFLICT (id) DO UPDATE SET salt = excluded.salt, hash = excluded.hash, "
@@ -71,20 +67,36 @@ int auth_set_password(const char *password)
         "updated_at = unixepoch()");
     if (st == NULL)
         return -1;
-    sqlite3_bind_blob(st, 1, salt, sizeof salt, SQLITE_STATIC);
-    sqlite3_bind_blob(st, 2, hash, sizeof hash, SQLITE_STATIC);
-    sqlite3_bind_int(st, 3, ARGON2_MEMCOST_KIB);
-    sqlite3_bind_int(st, 4, ARGON2_ITERATIONS);
-    int rc = sqlite3_step(st);
+    int rc = sqlite3_bind_blob(st, 1, salt, SALT_LEN, SQLITE_STATIC);
+    if (rc == SQLITE_OK)
+        rc = sqlite3_bind_blob(st, 2, hash, HASH_LEN, SQLITE_STATIC);
+    if (rc == SQLITE_OK)
+        rc = sqlite3_bind_int(st, 3, ARGON2_MEMCOST_KIB);
+    if (rc == SQLITE_OK)
+        rc = sqlite3_bind_int(st, 4, ARGON2_ITERATIONS);
+    if (rc == SQLITE_OK)
+        rc = sqlite3_step(st);
     sqlite3_finalize(st);
     if (rc != SQLITE_DONE) {
-        db_log_error("auth_set_password");
+        db_log_error("store_password");
         return -1;
     }
+    return 0;
+}
 
-    /* A new password logs out everything. */
-    if (sqlite3_exec(db, "DELETE FROM sessions", NULL, NULL, NULL) != SQLITE_OK) {
-        db_log_error("auth_set_password");
+int auth_set_password(const char *password)
+{
+    unsigned char salt[SALT_LEN], hash[HASH_LEN];
+    if (RAND_bytes(salt, sizeof salt) != 1 ||
+        argon2id(password, salt, ARGON2_MEMCOST_KIB, ARGON2_ITERATIONS, hash) != 0)
+        return -1;
+
+    /* New password and logging out every session happen together or not at all. */
+    if (db_exec("BEGIN IMMEDIATE") != 0)
+        return -1;
+    if (store_password(salt, hash) != 0 || db_exec("DELETE FROM sessions") != 0 ||
+        db_exec("COMMIT") != 0) {
+        db_exec("ROLLBACK");
         return -1;
     }
     return 0;
@@ -188,17 +200,19 @@ int auth_start_session(struct response *res)
     if (RAND_bytes(token, sizeof token) != 1 || sha256(token, sizeof token, hash) != 0)
         return -1;
 
-    /* Housekeeping: drop expired sessions whenever someone logs in. */
-    sqlite3_exec(db, "DELETE FROM sessions WHERE expires_at <= unixepoch()", NULL, NULL,
-                 NULL);
+    /* Housekeeping: drop expired sessions whenever someone logs in. A failure
+     * here is logged (by db_exec) but does not block the login. */
+    db_exec("DELETE FROM sessions WHERE expires_at <= unixepoch()");
 
     sqlite3_stmt *st = db_prepare("INSERT INTO sessions (token_hash, expires_at) "
                                   "VALUES (?, unixepoch() + ?)");
     if (st == NULL)
         return -1;
-    sqlite3_bind_blob(st, 1, hash, sizeof hash, SQLITE_STATIC);
-    sqlite3_bind_int(st, 2, SESSION_SECONDS);
-    int rc = sqlite3_step(st);
+    int rc = sqlite3_bind_blob(st, 1, hash, sizeof hash, SQLITE_STATIC);
+    if (rc == SQLITE_OK)
+        rc = sqlite3_bind_int(st, 2, SESSION_SECONDS);
+    if (rc == SQLITE_OK)
+        rc = sqlite3_step(st);
     sqlite3_finalize(st);
     if (rc != SQLITE_DONE) {
         db_log_error("auth_start_session");
@@ -213,23 +227,27 @@ int auth_start_session(struct response *res)
     /* No Secure attribute: nylm is plain HTTP, reachable only via LAN/WireGuard. */
     snprintf(cookie, 256, "%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Strict",
              AUTH_COOKIE, hex, SESSION_SECONDS);
-    http_add_header(res, "Set-Cookie", cookie);
-    return 0;
+    return http_add_header(res, "Set-Cookie", cookie);
 }
 
-void auth_end_session(const struct request *req, struct response *res)
+int auth_end_session(const struct request *req, struct response *res)
 {
     unsigned char hash[32];
     if (request_token_hash(req, hash) == 0) {
         sqlite3_stmt *st = db_prepare("DELETE FROM sessions WHERE token_hash = ?");
-        if (st != NULL) {
-            sqlite3_bind_blob(st, 1, hash, sizeof hash, SQLITE_STATIC);
-            sqlite3_step(st);
-            sqlite3_finalize(st);
+        if (st == NULL)
+            return -1;
+        int rc = sqlite3_bind_blob(st, 1, hash, sizeof hash, SQLITE_STATIC);
+        if (rc == SQLITE_OK)
+            rc = sqlite3_step(st);
+        sqlite3_finalize(st);
+        if (rc != SQLITE_DONE) {
+            db_log_error("auth_end_session");
+            return -1;
         }
     }
-    http_add_header(res, "Set-Cookie",
-                    AUTH_COOKIE "=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict");
+    return http_add_header(res, "Set-Cookie",
+                           AUTH_COOKIE "=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict");
 }
 
 int auth_session_valid(const struct request *req)
@@ -240,9 +258,15 @@ int auth_session_valid(const struct request *req)
     sqlite3_stmt *st = db_prepare("SELECT 1 FROM sessions "
                                   "WHERE token_hash = ? AND expires_at > unixepoch()");
     if (st == NULL)
-        return 0;
-    sqlite3_bind_blob(st, 1, hash, sizeof hash, SQLITE_STATIC);
-    int valid = sqlite3_step(st) == SQLITE_ROW;
+        return -1;
+    int rc = sqlite3_bind_blob(st, 1, hash, sizeof hash, SQLITE_STATIC);
+    if (rc == SQLITE_OK)
+        rc = sqlite3_step(st);
     sqlite3_finalize(st);
-    return valid;
+    if (rc == SQLITE_ROW)
+        return 1;
+    if (rc == SQLITE_DONE)
+        return 0;
+    db_log_error("auth_session_valid");
+    return -1;
 }

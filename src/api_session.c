@@ -39,7 +39,10 @@ void session_login(struct request *req, struct response *res)
 
 void session_logout(struct request *req, struct response *res)
 {
-    auth_end_session(req, res);
+    if (auth_end_session(req, res) != 0) {
+        json_error(res, 500, "logout failed");
+        return;
+    }
     res->status = 204;
 }
 

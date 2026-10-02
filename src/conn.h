@@ -12,8 +12,8 @@ struct conn {
 
 double now_seconds(void); /* monotonic clock */
 
-/* Sets per-call socket timeouts and the whole-request deadline. */
-void conn_init(struct conn *c, int fd);
+/* Sets per-call socket timeouts and the whole-request deadline. 0 or -1. */
+int conn_init(struct conn *c, int fd);
 
 /* Like read(2); returns -1 on error, timeout or passed deadline. */
 ssize_t conn_read(struct conn *c, void *buf, size_t len);

@@ -14,6 +14,9 @@ extern sqlite3 *db;
 int db_open(const char *path);
 void db_close(void);
 
+/* Runs SQL without parameters (no data!); logs and returns -1 on failure. */
+int db_exec(const char *sql);
+
 /* sqlite3_prepare_v2 on db; logs and returns NULL on failure. */
 sqlite3_stmt *db_prepare(const char *sql);
 

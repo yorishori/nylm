@@ -43,8 +43,15 @@ void router_dispatch(struct request *req, struct response *res)
         json_error(res, 404, "not found");
     else if (i == ROUTE_METHOD_NOT_ALLOWED)
         json_error(res, 405, "method not allowed");
-    else if (!routes[i].public && !auth_session_valid(req))
-        json_error(res, 401, "login required");
-    else
+    else if (routes[i].public)
         routes[i].handler(req, res);
+    else {
+        int valid = auth_session_valid(req);
+        if (valid < 0)
+            json_error(res, 500, "internal error");
+        else if (valid == 0)
+            json_error(res, 401, "login required");
+        else
+            routes[i].handler(req, res);
+    }
 }

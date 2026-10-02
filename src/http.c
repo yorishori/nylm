@@ -263,13 +263,16 @@ void http_response_init(struct response *res)
     res->file_fd = -1;
 }
 
-void http_add_header(struct response *res, const char *name, const char *value)
+int http_add_header(struct response *res, const char *name, const char *value)
 {
-    if (res->nextra < HTTP_MAX_EXTRA) {
-        res->extra[res->nextra].name = name;
-        res->extra[res->nextra].value = value;
-        res->nextra++;
+    if (res->nextra == HTTP_MAX_EXTRA) {
+        fprintf(stderr, "http: too many response headers, dropped %s\n", name);
+        return -1;
     }
+    res->extra[res->nextra].name = name;
+    res->extra[res->nextra].value = value;
+    res->nextra++;
+    return 0;
 }
 
 void http_text(struct response *res, int status, const char *text)

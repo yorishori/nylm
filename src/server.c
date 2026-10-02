@@ -106,7 +106,8 @@ static void handle(struct request *req, struct response *res)
         static_serve(cfg->public_dir, req->path, res);
     } else {
         http_text(res, 405, "405 Method Not Allowed\n");
-        http_add_header(res, "Allow", "GET");
+        if (http_add_header(res, "Allow", "GET") != 0)
+            http_text(res, 500, "500 Internal Server Error\n");
     }
 }
 
@@ -114,7 +115,10 @@ static void serve(int client, const char *ip)
 {
     double start = now_seconds();
     struct conn c;
-    conn_init(&c, client);
+    if (conn_init(&c, client) != 0) {
+        conn_close(&c);
+        return;
+    }
 
     struct request req;
     struct response res;

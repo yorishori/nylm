@@ -59,7 +59,8 @@ const char *http_header(const struct request *req, const char *name);
 const char *http_status_text(int status);
 
 void http_response_init(struct response *res);
-void http_add_header(struct response *res, const char *name, const char *value);
+/* Adds a response header; -1 if all HTTP_MAX_EXTRA slots are used. */
+int http_add_header(struct response *res, const char *name, const char *value);
 void http_text(struct response *res, int status, const char *text);
 
 /* Writes the response; returns bytes of body sent, or -1 on error. */

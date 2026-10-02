@@ -8,6 +8,16 @@
 
 #include "arena.h"
 
+/* 1 if needle occurs anywhere in buf[0..len). */
+static int contains(const char *buf, size_t len, const char *needle)
+{
+    size_t n = strlen(needle);
+    for (size_t i = 0; i + n <= len; i++)
+        if (memcmp(buf + i, needle, n) == 0)
+            return 1;
+    return 0;
+}
+
 static void no_free(void *p)
 {
     (void)p; /* freed with the arena at the end of the request */
@@ -53,6 +63,14 @@ cJSON *json_body(const struct request *req, struct response *res)
         json_error(res, 400, "missing body");
         return NULL;
     }
+    /* cJSON ends strings at a NUL, so "a\u0000b" would silently become "a".
+     * Reject NUL in any form rather than store something other than what was
+     * sent. (This also rejects the harmless text "\\u0000"; that is fine.) */
+    if (memchr(req->body, '\0', req->body_len) != NULL ||
+        contains(req->body, req->body_len, "\\u0000")) {
+        json_error(res, 400, "body must not contain NUL characters");
+        return NULL;
+    }
     cJSON *obj = cJSON_ParseWithLength(req->body, req->body_len);
     if (!cJSON_IsObject(obj)) {
         json_error(res, 400, "body must be a JSON object");
@@ -64,17 +82,20 @@ cJSON *json_body(const struct request *req, struct response *res)
 const char *json_get_string(const cJSON *obj, const char *key, size_t min, size_t max,
                             const char **out)
 {
-    static char msg[128];
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
-    if (!cJSON_IsString(item)) {
-        snprintf(msg, sizeof msg, "'%s' must be a string", key);
-        return msg;
+    int is_string = cJSON_IsString(item);
+    size_t len = is_string ? strlen(item->valuestring) : 0;
+    if (is_string && len >= min && len <= max) {
+        *out = item->valuestring;
+        return NULL;
     }
-    size_t len = strlen(item->valuestring);
-    if (len < min || len > max) {
-        snprintf(msg, sizeof msg, "'%s' must be %zu to %zu bytes", key, min, max);
-        return msg;
-    }
-    *out = item->valuestring;
-    return NULL;
+
+    char *msg = arena_alloc(128);
+    if (msg == NULL)
+        return "invalid field";
+    if (!is_string)
+        snprintf(msg, 128, "'%s' must be a string", key);
+    else
+        snprintf(msg, 128, "'%s' must be %zu to %zu bytes", key, min, max);
+    return msg;
 }

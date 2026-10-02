@@ -9,7 +9,7 @@ void db_log_error(const char *context)
     fprintf(stderr, "db: %s: %s\n", context, sqlite3_errmsg(db));
 }
 
-static int exec(const char *sql)
+int db_exec(const char *sql)
 {
     char *err = NULL;
     if (sqlite3_exec(db, sql, NULL, NULL, &err) != SQLITE_OK) {
@@ -44,14 +44,14 @@ static int migrate(void)
     for (int i = version; i < migration_count; i++) {
         char set_version[64];
         snprintf(set_version, sizeof set_version, "PRAGMA user_version = %d", i + 1);
-        if (exec("BEGIN IMMEDIATE") != 0)
+        if (db_exec("BEGIN IMMEDIATE") != 0)
             return -1;
-        if (exec(migrations[i]) != 0 || exec(set_version) != 0) {
+        if (db_exec(migrations[i]) != 0 || db_exec(set_version) != 0) {
             fprintf(stderr, "db: migration %d failed\n", i + 1);
-            exec("ROLLBACK");
+            db_exec("ROLLBACK");
             return -1;
         }
-        if (exec("COMMIT") != 0)
+        if (db_exec("COMMIT") != 0)
             return -1;
         printf("db: applied migration %d\n", i + 1);
     }
@@ -66,7 +66,7 @@ int db_open(const char *path)
         return -1;
     }
     sqlite3_busy_timeout(db, 5000);
-    if (exec("PRAGMA journal_mode = WAL;"
+    if (db_exec("PRAGMA journal_mode = WAL;"
              "PRAGMA synchronous = NORMAL;"
              "PRAGMA foreign_keys = ON;") != 0)
         return -1;

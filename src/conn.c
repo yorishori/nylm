@@ -3,6 +3,7 @@
 #include "conn.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <time.h>
@@ -20,14 +21,19 @@ double now_seconds(void)
     return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
 }
 
-void conn_init(struct conn *c, int fd)
+int conn_init(struct conn *c, int fd)
 {
     c->fd = fd;
     c->deadline = now_seconds() + REQUEST_SECONDS;
 
+    /* Without these a silent client could block the server forever. */
     struct timeval tv = { .tv_sec = IO_TIMEOUT_SECONDS };
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv) != 0 ||
+        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv) != 0) {
+        perror("conn: setsockopt timeout");
+        return -1;
+    }
+    return 0;
 }
 
 ssize_t conn_read(struct conn *c, void *buf, size_t len)

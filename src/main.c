@@ -42,15 +42,23 @@ static int read_password(const char *prompt, char *buf, size_t size)
     int tty = isatty(STDIN_FILENO);
     struct termios old, quiet;
     if (tty) {
-        fprintf(stderr, "%s", prompt);
-        tcgetattr(STDIN_FILENO, &old);
+        /* Never read a password from a terminal that would echo it. */
+        if (tcgetattr(STDIN_FILENO, &old) != 0) {
+            perror("tcgetattr");
+            return -1;
+        }
         quiet = old;
         quiet.c_lflag &= ~(tcflag_t)ECHO;
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &quiet);
+        if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &quiet) != 0) {
+            perror("tcsetattr");
+            return -1;
+        }
+        fprintf(stderr, "%s", prompt);
     }
     char *line = fgets(buf, (int)size, stdin);
     if (tty) {
-        tcsetattr(STDIN_FILENO, TCSAFLUSH, &old);
+        if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &old) != 0)
+            perror("tcsetattr: terminal echo may still be off");
         fprintf(stderr, "\n");
     }
     if (line == NULL)
