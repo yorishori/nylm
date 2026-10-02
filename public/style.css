@@ -1,11 +1,20 @@
 /*
- * Soft dark: one slate surface; shapes are raised out of it or pressed into
- * it with a light and a dark shadow. Pastel colours carry meaning only:
+ * Soft dark. One slate surface, and three kinds of shape:
+ *   raised   (shadow out of the surface)  = you can press it: buttons, tiles,
+ *                                           tabs, and the panels of forms
+ *   card     (flat panel with a thin edge) = information, not pressable
+ *   pressed  (shadow into the surface)    = where you type or choose
+ * Pastel colours carry meaning only:
  *   rose = late, peach = today, lavender = this week, sky = later,
- *   mint = done / positive action, muted grey = paused or nothing scheduled.
+ *   mint = done / positive action, grey = paused or nothing scheduled.
+ *
+ * Three layouts: wide (>= 56rem: two columns), vertical (one column),
+ * small (<= 21rem, e.g. 3-inch phones: tighter, stacked buttons).
  */
 :root {
   --surface: #2b2e3b;
+  --panel: #303344;
+  --edge: #3d4156;
   --shade: #1e2029;
   --light: #383c4d;
   --text: #e6e4f2;
@@ -16,33 +25,39 @@
   --sky: #9fcbef;
   --mint: #a6dfc3;
 
-  --raised: 6px 6px 14px var(--shade), -6px -6px 14px var(--light);
+  --lift: 6px;
+  --raised: var(--lift) var(--lift) calc(var(--lift) * 2.3) var(--shade),
+            calc(var(--lift) * -1) calc(var(--lift) * -1) calc(var(--lift) * 2.3) var(--light);
   --raised-small: 3px 3px 7px var(--shade), -3px -3px 7px var(--light);
   --pressed: inset 3px 3px 7px var(--shade), inset -3px -3px 7px var(--light);
 
-  --font: ui-rounded, "SF Pro Rounded", "Nunito", "Quicksand", system-ui, sans-serif;
+  --font: "JetBrains Mono", "IBM Plex Mono", "Fira Code", "Cascadia Mono",
+          "DejaVu Sans Mono", ui-monospace, monospace;
+  --gap: 1rem;
   color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
 
+html { font-size: 15px; }
+
 html, body {
   margin: 0;
   background: var(--surface);
   color: var(--text);
-  font: 16px/1.5 var(--font);
-  font-variant-numeric: tabular-nums;
+  font-family: var(--font);
+  line-height: 1.5;
 }
 
 [hidden] { display: none !important; }
 
-h1, h2, h3 { margin: 0; font-weight: 650; line-height: 1.25; }
-h1 { font-size: 1.95rem; }
-h2 { font-size: 1.25rem; }
+h1, h2, h3 { margin: 0; font-weight: 700; line-height: 1.25; }
+h1 { font-size: 1.75rem; }
+h2 { font-size: 1.2rem; }
 h3 { font-size: 1rem; }
 p { margin: 0; }
+strong { font-weight: 700; }
 
-a { color: var(--sky); }
 a:focus-visible, button:focus-visible, input:focus-visible,
 select:focus-visible, textarea:focus-visible {
   outline: 2px solid var(--lavender);
@@ -53,25 +68,21 @@ select:focus-visible, textarea:focus-visible {
 
 .bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 1rem;
+  gap: 0.5rem var(--gap);
   max-width: 46rem;
   margin: 0 auto;
-  padding: 1rem 1rem 0.5rem;
+  padding: 1rem var(--gap) 0.5rem;
 }
-.brand {
-  color: var(--text);
-  font-weight: 700;
-  font-size: 1.25rem;
-  text-decoration: none;
-}
-.status { flex: 1; color: var(--muted); font-size: 0.85rem; min-height: 1.3em; }
+.brand { font-weight: 700; font-size: 1.2rem; }
+.status { flex: 1 1 8rem; color: var(--muted); font-size: 0.85rem; min-height: 1.3em; }
 .status.error { color: var(--rose); }
 
 main {
   max-width: 46rem;
   margin: 0 auto;
-  padding: 1rem 1rem 4rem;
+  padding: var(--gap) var(--gap) 4rem;
 }
 
 /* ---- controls ------------------------------------------------------------ */
@@ -80,6 +91,7 @@ input, select, textarea, button { font: inherit; color: inherit; }
 
 input, select, textarea {
   width: 100%;
+  min-width: 0;
   padding: 0.55rem 0.8rem;
   border: 0;
   border-radius: 12px;
@@ -90,28 +102,32 @@ textarea { min-height: 5rem; resize: vertical; }
 input[type="number"] { width: 6rem; }
 select { cursor: pointer; }
 
+/* Everything that does something or goes somewhere. Links share the look:
+ * text itself is never a link. */
 .btn {
+  display: inline-block;
   padding: 0.5rem 1.1rem;
   border: 0;
   border-radius: 999px;
   background: var(--surface);
   box-shadow: var(--raised-small);
+  color: var(--text);
+  text-align: center;
+  text-decoration: none;
   cursor: pointer;
   white-space: nowrap;
   transition: box-shadow 120ms ease;
 }
 .btn:active { box-shadow: var(--pressed); }
 .btn:disabled { opacity: 0.5; cursor: default; }
-.btn.go { color: var(--mint); font-weight: 600; }
+.btn.go { color: var(--mint); font-weight: 700; }
 .btn.danger { color: var(--rose); }
-.btn.quiet { box-shadow: none; color: var(--muted); padding-inline: 0.6rem; }
-.btn.quiet:hover { color: var(--text); }
 
 .actions { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
 
 .field { display: grid; gap: 0.3rem; }
 .field > span { color: var(--muted); font-size: 0.85rem; }
-.form { display: grid; gap: 1rem; }
+.form { display: grid; gap: var(--gap); }
 .form .row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
 .form .row > .field { flex: 1 1 12rem; }
 .form .row > input:not([type="number"]) { flex: 1 1 10rem; width: auto; }
@@ -119,64 +135,85 @@ select { cursor: pointer; }
 .form-error:empty { display: none; }
 .hint { color: var(--muted); font-size: 0.85rem; }
 
+fieldset { margin: 0; border: 0; min-width: 0; }
+legend { padding: 0; }
 .choice { display: flex; gap: 0.6rem; align-items: center; cursor: pointer; }
 .choice input { width: auto; box-shadow: none; accent-color: var(--lavender); }
 
 /* ---- surfaces ------------------------------------------------------------ */
 
+/* Information: flat, with a thin edge. */
 .card {
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  border-radius: 14px;
+  padding: 1rem 1.1rem;
+}
+/* Forms: raised out of the surface. */
+.raised {
   background: var(--surface);
   border-radius: 18px;
   box-shadow: var(--raised);
   padding: 1.1rem 1.25rem;
 }
+/* Groups of inputs: pressed in. */
 .well {
-  border-radius: 16px;
+  border-radius: 14px;
   box-shadow: var(--pressed);
-  padding: 1rem 1.1rem;
+  padding: 0.9rem 1rem;
 }
-.stack { display: grid; gap: 1.25rem; }
-.section { display: grid; gap: 0.9rem; margin-top: 2rem; }
+
+.stack { display: grid; gap: var(--gap); }
+.section { display: grid; gap: 0.9rem; align-content: start; margin-top: 2rem; }
 .section:first-child { margin-top: 0; }
-.section > header { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
+.section > header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+}
+.title { font-size: 1.5rem; }
 .count { color: var(--muted); font-weight: 400; }
 .muted { color: var(--muted); }
-.empty { color: var(--muted); padding: 1rem 0; }
-.list { list-style: none; margin: 0; padding: 0; display: grid; gap: 1rem; }
+.empty { display: grid; gap: 0.75rem; color: var(--muted); padding: 0.5rem 0; }
+.list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--gap); }
 
 /* ---- status colour ------------------------------------------------------- */
 
-.pill {
-  display: inline-block;
-  padding: 0.2rem 0.7rem;
-  border-radius: 999px;
-  font-size: 0.85rem;
-  font-weight: 600;
-  box-shadow: var(--pressed);
-  white-space: nowrap;
-}
 .tone-late     { --tone: var(--rose); }
 .tone-today    { --tone: var(--peach); }
 .tone-soon     { --tone: var(--lavender); }
 .tone-later    { --tone: var(--sky); }
 .tone-done     { --tone: var(--mint); }
 .tone-paused   { --tone: var(--muted); }
-.pill[class*="tone-"] { color: var(--tone); }
 
-/* A coloured edge on items whose status matters at a glance. */
-.marked { border-left: 5px solid var(--tone, transparent); }
+/* A label, not a control: tinted, no shadow. */
+.pill {
+  display: inline-block;
+  padding: 0.15rem 0.65rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  white-space: nowrap;
+  color: var(--tone, var(--muted));
+  background: color-mix(in srgb, var(--tone, var(--muted)) 15%, transparent);
+}
+
+/* The status stripe on cards whose status matters at a glance. */
+.card.marked { border-left: 5px solid var(--tone, var(--edge)); }
 
 /* ---- home ---------------------------------------------------------------- */
 
 .tiles {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 14rem), 1fr));
   gap: 1.75rem;
-  margin-top: 1rem;
+  margin-top: var(--gap);
 }
 .tile {
   display: grid;
-  gap: 1rem;
+  gap: var(--gap);
   min-height: 9rem;
   align-content: space-between;
   padding: 1.4rem;
@@ -187,7 +224,7 @@ select { cursor: pointer; }
   text-decoration: none;
 }
 .tile:active { box-shadow: var(--pressed); }
-.tile h2 { font-size: 1.55rem; }
+.tile h2 { font-size: 1.45rem; }
 .tile .pills { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 
 /* ---- app shell ----------------------------------------------------------- */
@@ -199,12 +236,11 @@ select { cursor: pointer; }
   padding: 0.35rem;
   border-radius: 999px;
   box-shadow: var(--pressed);
-  overflow-x: auto;
 }
 .tabs a {
   flex: 1;
   text-align: center;
-  padding: 0.5rem 0.9rem;
+  padding: 0.5rem 0.75rem;
   border-radius: 999px;
   color: var(--muted);
   text-decoration: none;
@@ -212,59 +248,95 @@ select { cursor: pointer; }
 }
 .tabs a[aria-current="page"] {
   color: var(--text);
-  font-weight: 600;
+  font-weight: 700;
+  background: var(--surface);
   box-shadow: var(--raised-small);
 }
 
-/* ---- due ----------------------------------------------------------------- */
+/* ---- items --------------------------------------------------------------- */
 
-.due-row {
+/* Name on the left, status on the right, buttons underneath. */
+.due-row, .plant-card {
   display: grid;
   grid-template-columns: 1fr auto;
-  gap: 0.75rem 1rem;
+  gap: 0.5rem 1rem;
   align-items: center;
 }
-.due-row .what { display: grid; gap: 0.15rem; }
-.due-row .what a { color: var(--text); font-weight: 600; text-decoration: none; }
-.due-row .what a:hover { text-decoration: underline; }
-.due-row .done { grid-column: 1 / -1; display: grid; gap: 0.75rem; }
-.due-row .when { justify-self: end; }
+.due-row .what { display: grid; gap: 0.1rem; }
+.due-row .done, .plant-card .actions, .plant-card .muted { grid-column: 1 / -1; }
+.due-row .done { display: grid; gap: 0.75rem; margin-top: 0.25rem; }
+.plant-card .actions { margin-top: 0.25rem; }
+.when { justify-self: end; }
 
-/* ---- plants -------------------------------------------------------------- */
-
-.plant-card {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 0.25rem 1rem;
+.item {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
   align-items: center;
-  color: var(--text);
-  text-decoration: none;
+  gap: 0.75rem;
 }
-.plant-card:active { box-shadow: var(--pressed); }
-.plant-card h3 { font-size: 1.1rem; }
 
 .rule { display: grid; gap: 0.6rem; }
-.rule > header { display: flex; justify-content: space-between; gap: 1rem; align-items: center; }
+.rule > header { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 0.5rem 1rem; align-items: center; }
 .seasons { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.2rem; color: var(--muted); font-size: 0.9rem; }
 
 .season-row { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
 .season-row select { width: auto; }
 .season-row input[type="number"] { width: 4.5rem; }
 
-/* ---- journal ------------------------------------------------------------- */
-
 .entry { display: grid; gap: 0.5rem; }
 .entry > header { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
 .entry .note { white-space: pre-wrap; overflow-wrap: anywhere; }
 
-/* ---- login --------------------------------------------------------------- */
+.picker { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; margin-bottom: 2rem; }
+.picker .field { flex: 1 1 14rem; }
 
-.login { max-width: 22rem; margin: 4rem auto; }
+.split, .side { display: grid; gap: 2rem; align-content: start; }
+/* The split's gap spaces its columns; sections need no margin of their own. */
+.split > .section, .side > .section { margin-top: 0; }
+/* A side column that matters first on a narrow screen (e.g. "New entry"). */
+.side.first { order: -1; }
 
-@media (max-width: 30rem) {
-  h1 { font-size: 1.55rem; }
-  .card { padding: 1rem; }
-  .tabs a { padding-inline: 0.6rem; }
+.login { max-width: 24rem; margin: 4rem auto; }
+
+/* ---- wide: two columns --------------------------------------------------- */
+
+@media (min-width: 56rem) {
+  .bar, main { max-width: 74rem; padding-inline: 2rem; }
+  .list.cols { grid-template-columns: repeat(auto-fill, minmax(21rem, 1fr)); }
+  .split {
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+    gap: 2.5rem;
+    align-items: start;
+  }
+  .split > .side { position: sticky; top: 1rem; }
+  .side.first { order: 0; }
+  .split .list.cols { grid-template-columns: 1fr; }
+  .tabs { max-width: 40rem; }
+}
+
+/* ---- small: 3-inch phones ------------------------------------------------ */
+
+@media (max-width: 21rem) {
+  html { font-size: 13px; }
+  :root { --gap: 0.75rem; --lift: 4px; }
+  .bar { padding: 0.6rem var(--gap) 0.25rem; }
+  main { padding: 0.5rem var(--gap) 3rem; }
+  h1 { font-size: 1.4rem; }
+  .title { font-size: 1.25rem; }
+  .app-head { margin-bottom: 1.25rem; }
+  /* Four tabs as a 2 x 2 grid instead of a cramped row. */
+  .tabs { display: grid; grid-template-columns: 1fr 1fr; border-radius: 18px; }
+  .card, .raised { padding: 0.8rem; border-radius: 12px; }
+  .tile { min-height: 6rem; padding: 1rem; border-radius: 16px; }
+  /* Buttons stack full width: easier to hit with a thumb. */
+  main .actions { display: grid; grid-template-columns: 1fr; gap: 0.6rem; }
+  main .btn { width: 100%; }
+  .bar .btn { padding: 0.4rem 0.8rem; }
+  .due-row, .plant-card { grid-template-columns: 1fr; }
+  .when { justify-self: start; }
+  .section { margin-top: 1.5rem; }
+  .season-row { gap: 0.4rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {

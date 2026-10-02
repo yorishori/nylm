@@ -11,9 +11,12 @@
 </head>
 <body>
 <header class="bar">
-  <a class="brand" href="#/">nylm</a>
+  <span class="brand">nylm</span>
   <p id="status" class="status" role="status"></p>
-  <button id="logout" class="btn" type="button" hidden>Log out</button>
+  <nav class="actions" aria-label="Site">
+    <a id="home" class="btn" href="#/" hidden>Home</a>
+    <button id="logout" class="btn" type="button" hidden>Log out</button>
+  </nav>
 </header>
 
 <main id="app">
