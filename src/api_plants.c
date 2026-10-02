@@ -273,10 +273,21 @@ static const char *get_month_day(const cJSON *obj, const char *mkey, const char 
     return NULL;
 }
 
+/* Reads obj["color"], one of the palette names. */
+static const char *get_color(const cJSON *obj, const char **out)
+{
+    const char *s;
+    if (json_get_string(obj, "color", 1, 16, &s) == NULL && care_color_valid(s)) {
+        *out = s;
+        return NULL;
+    }
+    return "'color' must be one of: " CARE_COLOR_NAMES;
+}
+
 /* ---- plants ------------------------------------------------------------- */
 
 struct plant_fields {
-    const char *name, *species, *location, *acquired, *notes;
+    const char *name, *species, *location, *acquired, *notes, *color;
 };
 
 static const char *get_plant_fields(const cJSON *obj, struct plant_fields *p)
@@ -286,7 +297,8 @@ static const char *get_plant_fields(const cJSON *obj, struct plant_fields *p)
         (err = json_get_text(obj, "species", 0, PLANT_FIELD_MAX, 0, &p->species)) != NULL ||
         (err = json_get_text(obj, "location", 0, PLANT_FIELD_MAX, 0, &p->location)) != NULL ||
         (err = get_past_date(obj, "acquired", 1, &p->acquired)) != NULL ||
-        (err = json_get_text(obj, "notes", 0, NOTES_MAX, 1, &p->notes)) != NULL)
+        (err = json_get_text(obj, "notes", 0, NOTES_MAX, 1, &p->notes)) != NULL ||
+        (err = get_color(obj, &p->color)) != NULL)
         return err;
     return NULL;
 }
@@ -337,32 +349,35 @@ void plants_list(struct request *req, struct response *res)
     cJSON *obj = cJSON_CreateObject();
     if (obj == NULL ||
         add_list(obj, "plants",
-                 "SELECT id, name, species, location, acquired, notes, archived FROM plants"
+                 "SELECT id, name, species, location, acquired, notes, color, archived"
+                 " FROM plants"
                  " ORDER BY name COLLATE NOCASE, id") != 0 ||
         add_list(obj, "care_types",
-                 "SELECT id, name, archived FROM care_types ORDER BY name COLLATE NOCASE") != 0) {
+                 "SELECT id, name, color, archived FROM care_types"
+                 " ORDER BY name COLLATE NOCASE") != 0) {
         json_error(res, 500, "internal error");
         return;
     }
     json_reply(res, 200, obj);
 }
 
-/* POST /api/plants/add {name, species, location, acquired, notes} -> 201 {id} */
+/* POST /api/plants/add {name, species, location, acquired, notes, color} -> 201 {id} */
 void plants_add(struct request *req, struct response *res)
 {
     cJSON *obj = json_body(req, res);
     struct plant_fields p;
     if (obj == NULL || bad_request(res, get_plant_fields(obj, &p)))
         return;
-    if (run("INSERT INTO plants (name, species, location, acquired, notes) VALUES (?, ?, ?, ?, ?)",
-            "ttttt", p.name, p.species, p.location, p.acquired, p.notes) != 0) {
+    if (run("INSERT INTO plants (name, species, location, acquired, notes, color)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            "tttttt", p.name, p.species, p.location, p.acquired, p.notes, p.color) != 0) {
         json_error(res, 500, "internal error");
         return;
     }
     reply_created(res);
 }
 
-/* POST /api/plants/update {id, name, species, location, acquired, notes} */
+/* POST /api/plants/update {id, name, species, location, acquired, notes, color} */
 void plants_update(struct request *req, struct response *res)
 {
     cJSON *obj = json_body(req, res);
@@ -371,9 +386,9 @@ void plants_update(struct request *req, struct response *res)
     if (obj == NULL || bad_request(res, get_id(obj, "id", 0, &id)) ||
         bad_request(res, get_plant_fields(obj, &p)))
         return;
-    if (run("UPDATE plants SET name = ?, species = ?, location = ?, acquired = ?, notes = ?"
-            " WHERE id = ?",
-            "ttttti", p.name, p.species, p.location, p.acquired, p.notes, id) != 0) {
+    if (run("UPDATE plants SET name = ?, species = ?, location = ?, acquired = ?, notes = ?,"
+            " color = ? WHERE id = ?",
+            "tttttti", p.name, p.species, p.location, p.acquired, p.notes, p.color, id) != 0) {
         json_error(res, 500, "internal error");
         return;
     }
@@ -413,14 +428,15 @@ void plants_archive(struct request *req, struct response *res)
 
 /* ---- care types --------------------------------------------------------- */
 
-/* POST /api/plants/types/add {name} -> 201 {id} */
+/* POST /api/plants/types/add {name, color} -> 201 {id} */
 void plants_type_add(struct request *req, struct response *res)
 {
     cJSON *obj = json_body(req, res);
-    const char *name;
-    if (obj == NULL || bad_request(res, json_get_text(obj, "name", 1, TYPE_NAME_MAX, 0, &name)))
+    const char *name, *color;
+    if (obj == NULL || bad_request(res, json_get_text(obj, "name", 1, TYPE_NAME_MAX, 0, &name)) ||
+        bad_request(res, get_color(obj, &color)))
         return;
-    int rc = run("INSERT INTO care_types (name) VALUES (?)", "t", name);
+    int rc = run("INSERT INTO care_types (name, color) VALUES (?, ?)", "tt", name, color);
     if (rc != 0) {
         json_error(res, rc == 1 ? 409 : 500,
                    rc == 1 ? "a care type with this name exists" : "internal error");
@@ -429,16 +445,17 @@ void plants_type_add(struct request *req, struct response *res)
     reply_created(res);
 }
 
-/* POST /api/plants/types/update {id, name} */
+/* POST /api/plants/types/update {id, name, color} */
 void plants_type_update(struct request *req, struct response *res)
 {
     cJSON *obj = json_body(req, res);
-    const char *name;
+    const char *name, *color;
     long id;
     if (obj == NULL || bad_request(res, get_id(obj, "id", 0, &id)) ||
-        bad_request(res, json_get_text(obj, "name", 1, TYPE_NAME_MAX, 0, &name)))
+        bad_request(res, json_get_text(obj, "name", 1, TYPE_NAME_MAX, 0, &name)) ||
+        bad_request(res, get_color(obj, &color)))
         return;
-    int rc = run("UPDATE care_types SET name = ? WHERE id = ?", "ti", name, id);
+    int rc = run("UPDATE care_types SET name = ?, color = ? WHERE id = ?", "tti", name, color, id);
     if (rc != 0) {
         json_error(res, rc == 1 ? 409 : 500,
                    rc == 1 ? "a care type with this name exists" : "internal error");
@@ -555,13 +572,14 @@ static cJSON *add_int_or_null(cJSON *obj, const char *key, int v)
 
 /* The JSON for one rule of a plant (see plants_get). */
 static cJSON *rule_object(const struct loaded_rule *r, long type_id, const char *type_name,
-                          long today)
+                          const char *type_color, long today)
 {
     const struct care_rule *rule = &r->rule;
     cJSON *obj = cJSON_CreateObject();
     int ok = obj != NULL;
     ok = ok && cJSON_AddNumberToObject(obj, "care_type_id", (double)type_id) != NULL;
     ok = ok && cJSON_AddStringToObject(obj, "care_type", type_name) != NULL;
+    ok = ok && cJSON_AddStringToObject(obj, "care_type_color", type_color) != NULL;
     ok = ok && add_int_or_null(obj, "interval_days", rule->interval) != NULL;
     ok = ok && add_int_or_null(obj, "yearly_month", rule->yearly_month) != NULL;
     ok = ok && add_int_or_null(obj, "yearly_day", rule->yearly_day) != NULL;
@@ -590,8 +608,8 @@ void plants_get(struct request *req, struct response *res)
     if (query_id(req, res, "id", 0, &id) != 0)
         return;
 
-    sqlite3_stmt *st = prepare("SELECT id, name, species, location, acquired, notes, archived"
-                               " FROM plants WHERE id = ?", "i", id);
+    sqlite3_stmt *st = prepare("SELECT id, name, species, location, acquired, notes, color,"
+                               " archived FROM plants WHERE id = ?", "i", id);
     if (st == NULL) {
         json_error(res, 500, "internal error");
         return;
@@ -611,7 +629,7 @@ void plants_get(struct request *req, struct response *res)
     cJSON_DetachItemViaPointer(plant, obj);
 
     cJSON *rules = cJSON_AddArrayToObject(obj, "rules");
-    st = rules != NULL ? prepare("SELECT r.care_type_id, t.name, " RULE_COLUMNS
+    st = rules != NULL ? prepare("SELECT r.care_type_id, t.name, t.color, " RULE_COLUMNS
                                  " FROM care_rules r JOIN care_types t ON t.id = r.care_type_id"
                                  " WHERE r.plant_id = ? ORDER BY t.name COLLATE NOCASE", "i", id)
                        : NULL;
@@ -624,9 +642,10 @@ void plants_get(struct request *req, struct response *res)
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         struct loaded_rule r;
         long type_id = sqlite3_column_int64(st, 0);
-        if (load_rule(st, 2, id, type_id, &r) != 0)
+        if (load_rule(st, 3, id, type_id, &r) != 0)
             break;
-        cJSON *rule = rule_object(&r, type_id, (const char *)sqlite3_column_text(st, 1), today);
+        cJSON *rule = rule_object(&r, type_id, (const char *)sqlite3_column_text(st, 1),
+                                  (const char *)sqlite3_column_text(st, 2), today);
         if (rule == NULL || !cJSON_AddItemToArray(rules, rule)) {
             fprintf(stderr, "plants: out of memory building rules\n");
             break;
@@ -645,7 +664,7 @@ void plants_get(struct request *req, struct response *res)
 /* One line of the due list. */
 struct due_item {
     long plant_id, type_id, due;
-    const char *plant, *type;
+    const char *plant, *type, *plant_color, *type_color;
 };
 
 static int due_cmp(const void *a, const void *b)
@@ -681,8 +700,8 @@ void plants_due(struct request *req, struct response *res)
     }
 
     struct due_item *items = arena_alloc((max > 0 ? max : 1) * sizeof *items);
-    st = items != NULL ? prepare("SELECT r.plant_id, p.name, r.care_type_id, t.name, "
-                                 RULE_COLUMNS DUE_FROM, "")
+    st = items != NULL ? prepare("SELECT r.plant_id, p.name, r.care_type_id, t.name, p.color,"
+                                 " t.color, " RULE_COLUMNS DUE_FROM, "")
                        : NULL;
     if (st == NULL) {
         json_error(res, 500, "internal error");
@@ -701,11 +720,14 @@ void plants_due(struct request *req, struct response *res)
         it->type_id = sqlite3_column_int64(st, 2);
         it->plant = column_dup(st, 1);
         it->type = column_dup(st, 3);
-        if (it->plant == NULL || it->type == NULL) {
+        it->plant_color = column_dup(st, 4);
+        it->type_color = column_dup(st, 5);
+        if (it->plant == NULL || it->type == NULL || it->plant_color == NULL ||
+            it->type_color == NULL) {
             fprintf(stderr, "plants: out of memory reading the due list\n");
             break;
         }
-        if (load_rule(st, 4, it->plant_id, it->type_id, &r) != 0)
+        if (load_rule(st, 6, it->plant_id, it->type_id, &r) != 0)
             break;
         it->due = r.due;
         if (r.due != CARE_NEVER)
@@ -727,8 +749,10 @@ void plants_due(struct request *req, struct response *res)
         int ok = o != NULL && cJSON_AddItemToArray(list, o);
         ok = ok && cJSON_AddNumberToObject(o, "plant_id", (double)items[i].plant_id) != NULL;
         ok = ok && cJSON_AddStringToObject(o, "plant", items[i].plant) != NULL;
+        ok = ok && cJSON_AddStringToObject(o, "plant_color", items[i].plant_color) != NULL;
         ok = ok && cJSON_AddNumberToObject(o, "care_type_id", (double)items[i].type_id) != NULL;
         ok = ok && cJSON_AddStringToObject(o, "care_type", items[i].type) != NULL;
+        ok = ok && cJSON_AddStringToObject(o, "care_type_color", items[i].type_color) != NULL;
         ok = ok && add_due(o, items[i].due, today) == 0;
         if (!ok)
             list = NULL;

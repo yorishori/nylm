@@ -69,6 +69,11 @@ fixed date. Logging a care entry makes the next due date count from that day;
 nothing comes due during a pause. Due dates are computed on every read, from
 the server's local date (the system time zone).
 
+Each plant and care type has a colour from a fixed palette (butter, lime,
+mint, teal, sky, periwinkle, lavender, orchid). In the app a plant's colour
+is the stripe on its card and the dot before its name, a care type's colour
+is its chip, and only late (rose) and today (peach) colour the due label.
+
 ## Commands
 
 ```sh

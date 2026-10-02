@@ -4,9 +4,12 @@
  *                                           tabs, and the panels of forms
  *   card     (flat panel with a thin edge) = information, not pressable
  *   pressed  (shadow into the surface)    = where you type or choose
- * Pastel colours carry meaning only:
- *   rose = late, peach = today, lavender = this week, sky = later,
- *   mint = done / positive action, grey = paused or nothing scheduled.
+ * Colour has three jobs, each with its own shape:
+ *   plant      = stripe on its card's left edge + dot before its name
+ *   care type  = filled chip with its name
+ *   urgency    = text of the due label only: rose late, peach today
+ * Plants and care types pick from 8 pastels that avoid rose and peach;
+ * mint text on a button means a positive action.
  *
  * Three layouts: wide (>= 56rem: two columns), vertical (one column),
  * small (<= 21rem, e.g. 3-inch phones: tighter, stacked buttons).
@@ -19,11 +22,21 @@
   --light: #383c4d;
   --text: #e6e4f2;
   --muted: #9c9fb5;
+  --ink: #22242f;   /* text on a coloured chip */
+
+  /* urgency */
   --rose: #f4a7b5;
   --peach: #f6c79e;
-  --lavender: #bcb3f6;
-  --sky: #9fcbef;
+
+  /* identity palette (names match CARE_COLOR_NAMES in src/care.h) */
+  --butter: #efe39a;
+  --lime: #c8e59a;
   --mint: #a6dfc3;
+  --teal: #8fd8d2;
+  --sky: #9fcbef;
+  --periwinkle: #a9b7f5;
+  --lavender: #c3b3f6;
+  --orchid: #e0b0ef;
 
   --lift: 6px;
   --raised: var(--lift) var(--lift) calc(var(--lift) * 2.3) var(--shade),
@@ -173,22 +186,58 @@ legend { padding: 0; }
   align-items: center;
   gap: 0.75rem;
 }
-.title { font-size: 1.5rem; }
+.section > .plant-name, header.section > h2 { font-size: 1.5rem; }
 .count { color: var(--muted); font-weight: 400; }
 .muted { color: var(--muted); }
 .empty { display: grid; gap: 0.75rem; color: var(--muted); padding: 0.5rem 0; }
 .list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--gap); }
 
-/* ---- status colour ------------------------------------------------------- */
+/* ---- identity colour ----------------------------------------------------- */
 
-.tone-late     { --tone: var(--rose); }
-.tone-today    { --tone: var(--peach); }
-.tone-soon     { --tone: var(--lavender); }
-.tone-later    { --tone: var(--sky); }
-.tone-done     { --tone: var(--mint); }
-.tone-paused   { --tone: var(--muted); }
+.c-butter     { --c: var(--butter); }
+.c-lime       { --c: var(--lime); }
+.c-mint       { --c: var(--mint); }
+.c-teal       { --c: var(--teal); }
+.c-sky        { --c: var(--sky); }
+.c-periwinkle { --c: var(--periwinkle); }
+.c-lavender   { --c: var(--lavender); }
+.c-orchid     { --c: var(--orchid); }
 
-/* A label, not a control: tinted, no shadow. */
+/* A plant's card: stripe in the plant's colour. */
+.card.marked { border-left: 6px solid var(--c, var(--edge)); }
+
+/* A plant's name: dot in the plant's colour. */
+.plant-name { display: inline-flex; align-items: center; gap: 0.5em; }
+.dot {
+  flex: none;
+  width: 0.75em;
+  height: 0.75em;
+  border-radius: 50%;
+  background: var(--c);
+}
+
+/* A care type: filled chip in its colour. */
+.chip {
+  display: inline-block;
+  padding: 0.1rem 0.65rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 700;
+  white-space: nowrap;
+  background: var(--c);
+  color: var(--ink);
+}
+.chip.note { background: none; color: var(--muted); border: 1px dashed var(--edge); }
+
+/* ---- urgency ------------------------------------------------------------- */
+
+/* The due label: plain unless late (rose) or today (peach). */
+.due { font-weight: 700; white-space: nowrap; }
+.due.late { color: var(--rose); }
+.due.today { color: var(--peach); }
+.due.paused { color: var(--muted); font-weight: 400; }
+
+/* Counts on the home tile, tinted only when urgent. */
 .pill {
   display: inline-block;
   padding: 0.15rem 0.65rem;
@@ -196,12 +245,28 @@ legend { padding: 0; }
   font-size: 0.85rem;
   font-weight: 700;
   white-space: nowrap;
-  color: var(--tone, var(--muted));
-  background: color-mix(in srgb, var(--tone, var(--muted)) 15%, transparent);
+  color: var(--muted);
+  background: color-mix(in srgb, var(--muted) 12%, transparent);
 }
+.pill.late { color: var(--rose); background: color-mix(in srgb, var(--rose) 15%, transparent); }
+.pill.today { color: var(--peach); background: color-mix(in srgb, var(--peach) 15%, transparent); }
 
-/* The status stripe on cards whose status matters at a glance. */
-.card.marked { border-left: 5px solid var(--tone, var(--edge)); }
+/* ---- colour picker ------------------------------------------------------- */
+
+.swatches { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
+.swatches legend { width: 100%; margin-bottom: 0.4rem; }
+.swatch {
+  position: relative;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  background: var(--c);
+  box-shadow: var(--raised-small);
+  cursor: pointer;
+}
+.swatch input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.swatch:has(input:checked) { outline: 3px solid var(--text); outline-offset: 3px; }
+.swatch:has(input:focus-visible) { outline: 2px solid var(--lavender); outline-offset: 3px; }
 
 /* ---- home ---------------------------------------------------------------- */
 
@@ -263,7 +328,9 @@ legend { padding: 0; }
   align-items: center;
 }
 .due-row .what { display: grid; gap: 0.1rem; }
-.due-row .done, .plant-card .actions, .plant-card .muted { grid-column: 1 / -1; }
+.due-row .done, .plant-card .actions, .plant-card .muted, .plant-card .next {
+  grid-column: 1 / -1;
+}
 .due-row .done { display: grid; gap: 0.75rem; margin-top: 0.25rem; }
 .plant-card .actions { margin-top: 0.25rem; }
 .when { justify-self: end; }
@@ -288,7 +355,8 @@ legend { padding: 0; }
 .entry > header { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
 .entry .note { white-space: pre-wrap; overflow-wrap: anywhere; }
 
-.picker { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: end; margin-bottom: 2rem; }
+.picker { display: flex; flex-wrap: wrap; gap: 0.75rem 1.25rem; align-items: end; margin-bottom: 2rem; }
+.picker > h2 { flex: 1 1 100%; }
 .picker .field { flex: 1 1 14rem; }
 
 .split, .side { display: grid; gap: 2rem; align-content: start; }
@@ -323,7 +391,7 @@ legend { padding: 0; }
   .bar { padding: 0.6rem var(--gap) 0.25rem; }
   main { padding: 0.5rem var(--gap) 3rem; }
   h1 { font-size: 1.4rem; }
-  .title { font-size: 1.25rem; }
+  header.section > h2 { font-size: 1.25rem; }
   .app-head { margin-bottom: 1.25rem; }
   /* Four tabs as a 2 x 2 grid instead of a cramped row. */
   .tabs { display: grid; grid-template-columns: 1fr 1fr; border-radius: 18px; }

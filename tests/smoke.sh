@@ -180,7 +180,7 @@ for route in "GET /api/plants" "GET /api/plants/due" "GET /api/plants/plant?id=1
 done
 
 # plants
-P='"species":"Monstera deliciosa","location":"living room","acquired":null,"notes":"line 1\nline 2"'
+P='"species":"Monstera deliciosa","location":"living room","acquired":null,"notes":"line 1\nline 2","color":"mint"'
 post "plant add"               201 /api/plants/add "{\"name\":\"Monty\",$P}"
 expect_body '"id":1' "plant add returns id"
 post "plant add (2)"           201 /api/plants/add "{\"name\":\"Fern\",$P}"
@@ -193,16 +193,25 @@ post "plant add empty name"    400 /api/plants/add "{\"name\":\"\",$P}"
 post "plant add long name"     400 /api/plants/add "{\"name\":\"$LONG101\",$P}"
 post "plant add name newline"  400 /api/plants/add "{\"name\":\"a\nb\",$P}"
 post "plant add bad utf-8"     400 /api/plants/add "{\"name\":\"\ud800\",$P}"
-post "plant add species type"  400 /api/plants/add '{"name":"x","species":1,"location":"","acquired":null,"notes":""}'
-post "plant add no location"   400 /api/plants/add '{"name":"x","species":"","acquired":null,"notes":""}'
-post "plant add notes long"    400 /api/plants/add "{\"name\":\"x\",\"species\":\"\",\"location\":\"\",\"acquired\":null,\"notes\":\"$LONG4001\"}"
-post "plant add notes tab"     400 /api/plants/add '{"name":"x","species":"","location":"","acquired":null,"notes":"a\tb"}'
-post "plant add acquired"      201 /api/plants/add "{\"name\":\"Cactus\",\"species\":\"\",\"location\":\"\",\"acquired\":\"$TODAY\",\"notes\":\"\"}"
-post "plant add future date"   400 /api/plants/add "{\"name\":\"x\",\"species\":\"\",\"location\":\"\",\"acquired\":\"$TOMORROW\",\"notes\":\"\"}"
-post "plant add bad date"      400 /api/plants/add '{"name":"x","species":"","location":"","acquired":"2024-02-30","notes":""}'
-post "plant add date number"   400 /api/plants/add '{"name":"x","species":"","location":"","acquired":20240101,"notes":""}'
+post "plant add species type"  400 /api/plants/add '{"name":"x","species":1,"location":"","acquired":null,"notes":"","color":"mint"}'
+post "plant add no location"   400 /api/plants/add '{"name":"x","species":"","acquired":null,"notes":"","color":"mint"}'
+post "plant add notes long"    400 /api/plants/add "{\"name\":\"x\",\"species\":\"\",\"location\":\"\",\"acquired\":null,\"notes\":\"$LONG4001\",\"color\":\"mint\"}"
+post "plant add notes tab"     400 /api/plants/add '{"name":"x","species":"","location":"","acquired":null,"notes":"a\tb","color":"mint"}'
+post "plant add acquired"      201 /api/plants/add "{\"name\":\"Cactus\",\"species\":\"\",\"location\":\"\",\"acquired\":\"$TODAY\",\"notes\":\"\",\"color\":\"mint\"}"
+post "plant add future date"   400 /api/plants/add "{\"name\":\"x\",\"species\":\"\",\"location\":\"\",\"acquired\":\"$TOMORROW\",\"notes\":\"\",\"color\":\"mint\"}"
+post "plant add bad date"      400 /api/plants/add '{"name":"x","species":"","location":"","acquired":"2024-02-30","notes":"","color":"mint"}'
+post "plant add date number"   400 /api/plants/add '{"name":"x","species":"","location":"","acquired":20240101,"notes":"","color":"mint"}'
+N='"species":"","location":"","acquired":null,"notes":""'
+post "plant add no color"      400 /api/plants/add "{\"name\":\"x\",$N}"
+expect_body "'color' must be one of: butter, lime, mint, teal, sky, periwinkle, lavender, orchid" "plant color message"
+post "plant add urgent color"  400 /api/plants/add "{\"name\":\"x\",$N,\"color\":\"rose\"}"
+post "plant add peach"         400 /api/plants/add "{\"name\":\"x\",$N,\"color\":\"peach\"}"
+post "plant add color case"    400 /api/plants/add "{\"name\":\"x\",$N,\"color\":\"Mint\"}"
+post "plant add color number"  400 /api/plants/add "{\"name\":\"x\",$N,\"color\":3}"
+post "plant add color empty"   400 /api/plants/add "{\"name\":\"x\",$N,\"color\":\"\"}"
 
-post "plant update"            204 /api/plants/update "{\"id\":1,\"name\":\"Monty II\",$P}"
+post "plant update"            204 /api/plants/update "{\"id\":1,\"name\":\"Monty II\",$N,\"color\":\"teal\",\"notes\":\"line 1\nline 2\"}"
+post "plant update bad color"  400 /api/plants/update "{\"id\":1,\"name\":\"Monty II\",$N,\"color\":\"red\"}"
 post "plant update missing"    404 /api/plants/update "{\"id\":999,\"name\":\"x\",$P}"
 post "plant update id 0"       400 /api/plants/update "{\"id\":0,\"name\":\"x\",$P}"
 post "plant update id string"  400 /api/plants/update "{\"id\":\"1\",\"name\":\"x\",$P}"
@@ -217,40 +226,45 @@ post "plant archive no id"     400 /api/plants/archive '{"archived":true}'
 expect 200 "plant list"        -b "$JAR" "$B/api/plants"
 expect_body '"name":"Monty II"' "plant list has the update"
 expect_body '"notes":"line 1\nline 2"' "plant list keeps notes"
-expect_body '"name":"Fern","species":"Monstera deliciosa","location":"living room","acquired":null,"notes":"line 1\nline 2","archived":true' "plant list shows archived"
+expect_body '"name":"Fern","species":"Monstera deliciosa","location":"living room","acquired":null,"notes":"line 1\nline 2","color":"mint","archived":true' "plant list shows archived"
 expect_body "\"acquired\":\"$TODAY\"" "plant list has acquired"
 
 # care types
-post "type add"                201 /api/plants/types/add '{"name":"Watering"}'
-post "type add (2)"            201 /api/plants/types/add '{"name":"Fertilising"}'
-post "type add (3)"            201 /api/plants/types/add '{"name":"Repotting"}'
-post "type add (4)"            201 /api/plants/types/add '{"name":"Misting"}'
-post "type add duplicate"      409 /api/plants/types/add '{"name":"watering"}'
-post "type add empty"          400 /api/plants/types/add '{"name":""}'
-post "type add long"           400 /api/plants/types/add "{\"name\":\"$(printf '%051d' 0)\"}"
-post "type add not string"     400 /api/plants/types/add '{"name":5}'
-post "type update"             204 /api/plants/types/update '{"id":2,"name":"Fertilizing"}'
-post "type update duplicate"   409 /api/plants/types/update '{"id":2,"name":"Watering"}'
-post "type update missing"     404 /api/plants/types/update '{"id":999,"name":"x"}'
-post "type update bad name"    400 /api/plants/types/update '{"id":2,"name":"a\nb"}'
+post "type add"                201 /api/plants/types/add '{"name":"Watering","color":"sky"}'
+post "type add (2)"            201 /api/plants/types/add '{"name":"Fertilising","color":"lime"}'
+post "type add (3)"            201 /api/plants/types/add '{"name":"Repotting","color":"butter"}'
+post "type add (4)"            201 /api/plants/types/add '{"name":"Misting","color":"lavender"}'
+post "type add duplicate"      409 /api/plants/types/add '{"name":"watering","color":"sky"}'
+post "type add empty"          400 /api/plants/types/add '{"name":"","color":"sky"}'
+post "type add long"           400 /api/plants/types/add "{\"name\":\"$(printf '%051d' 0)\",\"color\":\"sky\"}"
+post "type add not string"     400 /api/plants/types/add '{"name":5,"color":"sky"}'
+post "type add no color"       400 /api/plants/types/add '{"name":"Pruning"}'
+post "type add bad color"      400 /api/plants/types/add '{"name":"Pruning","color":"rose"}'
+expect_body "'color' must be one of" "type color message"
+post "type update"             204 /api/plants/types/update '{"id":2,"name":"Fertilizing","color":"lime"}'
+post "type update duplicate"   409 /api/plants/types/update '{"id":2,"name":"Watering","color":"lime"}'
+post "type update missing"     404 /api/plants/types/update '{"id":999,"name":"x","color":"lime"}'
+post "type update bad name"    400 /api/plants/types/update '{"id":2,"name":"a\nb","color":"lime"}'
+post "type update bad color"   400 /api/plants/types/update '{"id":2,"name":"Fertilizing","color":"peach"}'
+post "type update no color"    400 /api/plants/types/update '{"id":2,"name":"Fertilizing"}'
 post "type archive"            204 /api/plants/types/archive '{"id":4,"archived":true}'
 post "type archive missing"    404 /api/plants/types/archive '{"id":999,"archived":false}'
 post "type archive not bool"   400 /api/plants/types/archive '{"id":4,"archived":"yes"}'
 expect 200 "type list"         -b "$JAR" "$B/api/plants"
-expect_body '"care_types":[{"id":2,"name":"Fertilizing","archived":false},{"id":4,"name":"Misting","archived":true}' "type list sorted, archived"
+expect_body '"care_types":[{"id":2,"name":"Fertilizing","color":"lime","archived":false},{"id":4,"name":"Misting","color":"lavender","archived":true}' "type list sorted, archived"
 
 # rules
 R='"plant_id":1,"care_type_id":1'
 post "rule save"               204 /api/plants/rules/save "{$R,\"interval_days\":4,\"yearly_month\":null,\"yearly_day\":null,\"periods\":[]}"
 expect 200 "plant get"         -b "$JAR" "$B/api/plants/plant?id=1"
-expect_body "\"care_type\":\"Watering\",\"interval_days\":4,\"yearly_month\":null,\"yearly_day\":null,\"periods\":[],\"created\":\"$TODAY\",\"last_done\":null,\"due\":\"$TODAY\",\"days_left\":0" "new rule is due today"
+expect_body "\"care_type\":\"Watering\",\"care_type_color\":\"sky\",\"interval_days\":4,\"yearly_month\":null,\"yearly_day\":null,\"periods\":[],\"created\":\"$TODAY\",\"last_done\":null,\"due\":\"$TODAY\",\"days_left\":0" "new rule is due today"
 post "rule save periods"       204 /api/plants/rules/save "{$R,\"interval_days\":4,\"yearly_month\":null,\"yearly_day\":null,\"periods\":[{\"start_month\":11,\"start_day\":1,\"end_month\":2,\"end_day\":29,\"interval_days\":10},{\"start_month\":7,\"start_day\":1,\"end_month\":7,\"end_day\":31,\"interval_days\":null}]}"
 expect 200 "plant get periods" -b "$JAR" "$B/api/plants/plant?id=1"
 expect_body '"periods":[{"start_month":11,"start_day":1,"end_month":2,"end_day":29,"interval_days":10},{"start_month":7,"start_day":1,"end_month":7,"end_day":31,"interval_days":null}]' "periods stored"
 post "rule save yearly"        204 /api/plants/rules/save '{"plant_id":1,"care_type_id":3,"interval_days":null,"yearly_month":2,"yearly_day":29,"periods":[]}'
 post "rule save paused default" 204 /api/plants/rules/save '{"plant_id":1,"care_type_id":2,"interval_days":null,"yearly_month":null,"yearly_day":null,"periods":[{"start_month":1,"start_day":1,"end_month":12,"end_day":31,"interval_days":14}]}'
 expect 200 "plant get yearly"  -b "$JAR" "$B/api/plants/plant?id=1"
-expect_body '"care_type":"Repotting","interval_days":null,"yearly_month":2,"yearly_day":29' "yearly rule stored"
+expect_body '"care_type":"Repotting","care_type_color":"butter","interval_days":null,"yearly_month":2,"yearly_day":29' "yearly rule stored"
 
 post "rule overlap"            400 /api/plants/rules/save "{$R,\"interval_days\":4,\"yearly_month\":null,\"yearly_day\":null,\"periods\":[{\"start_month\":11,\"start_day\":1,\"end_month\":2,\"end_day\":28,\"interval_days\":10},{\"start_month\":2,\"start_day\":1,\"end_month\":3,\"end_day\":1,\"interval_days\":null}]}"
 expect_body "periods must not overlap" "rule overlap message"
@@ -291,7 +305,7 @@ L="\"plant_id\":1,\"care_type_id\":1,\"date\":\"$TODAY\""
 post "log add"                 201 /api/plants/log/add "{$L,\"note\":\"\"}"
 expect_body '"id":1' "log add returns id"
 expect 200 "due after log"     -b "$JAR" "$B/api/plants/plant?id=1"
-expect_body "\"care_type\":\"Watering\",\"interval_days\":4,\"yearly_month\":null,\"yearly_day\":null,\"periods\":[],\"created\":\"$TODAY\",\"last_done\":\"$TODAY\",\"due\":\"$IN4\",\"days_left\":4" "logging moves the due date"
+expect_body "\"care_type\":\"Watering\",\"care_type_color\":\"sky\",\"interval_days\":4,\"yearly_month\":null,\"yearly_day\":null,\"periods\":[],\"created\":\"$TODAY\",\"last_done\":\"$TODAY\",\"due\":\"$IN4\",\"days_left\":4" "logging moves the due date"
 post "log add note"            201 /api/plants/log/add "{\"plant_id\":1,\"care_type_id\":null,\"date\":\"$TODAY\",\"note\":\"new leaf\nunfurling\"}"
 post "log add archived plant"  201 /api/plants/log/add "{\"plant_id\":2,\"care_type_id\":null,\"date\":\"$TODAY\",\"note\":\"\"}"
 post "log add future"          400 /api/plants/log/add "{\"plant_id\":1,\"care_type_id\":1,\"date\":\"$TOMORROW\",\"note\":\"\"}"
@@ -350,7 +364,7 @@ expect 404 "plant get missing" -b "$JAR" "$B/api/plants/plant?id=999"
 
 post "rule on archived plant"  204 /api/plants/rules/save '{"plant_id":2,"care_type_id":1,"interval_days":4,"yearly_month":null,"yearly_day":null,"periods":[]}'
 expect 200 "due list"          -b "$JAR" "$B/api/plants/due"
-expect_body "{\"plant_id\":1,\"plant\":\"Monty II\",\"care_type_id\":1,\"care_type\":\"Watering\",\"due\":\"$TODAY\",\"days_left\":0}" "due list has the rule"
+expect_body "{\"plant_id\":1,\"plant\":\"Monty II\",\"plant_color\":\"teal\",\"care_type_id\":1,\"care_type\":\"Watering\",\"care_type_color\":\"sky\",\"due\":\"$TODAY\",\"days_left\":0}" "due list has the rule"
 if grep -q '"plant_id":2' "$TMP/body"; then
     FAILED=$((FAILED + 1)); echo "FAIL: due list shows an archived plant"
 else PASSED=$((PASSED + 1)); fi

@@ -11,6 +11,11 @@
  *   #/plants/plants[/ID]    plants, or one plant with its care rules
  *   #/plants/journal[/ID]   a plant's care log and notes
  *   #/plants/types          care types
+ *
+ * Colour has three jobs, each with its own shape:
+ *   a plant's colour      = stripe on its card's left edge, dot before its name
+ *   a care type's colour  = filled chip with its name
+ *   urgency               = the due label's text: rose late, peach today
  */
 
 const app = document.getElementById("app");
@@ -155,17 +160,55 @@ function dueText(daysLeft, due) {
   return showDate(due);
 }
 
-/* The colour class for how soon something is due. */
+/* Urgency colours only late and today; everything else is plain text. */
 function dueTone(daysLeft) {
-  if (daysLeft == null) return "tone-paused";
-  if (daysLeft < 0) return "tone-late";
-  if (daysLeft === 0) return "tone-today";
-  if (daysLeft <= 7) return "tone-soon";
-  return "tone-later";
+  if (daysLeft == null) return "paused";
+  if (daysLeft < 0) return "late";
+  if (daysLeft === 0) return "today";
+  return "";
 }
 
-function duePill(daysLeft, due) {
-  return el("span", { class: "pill " + dueTone(daysLeft) }, dueText(daysLeft, due));
+function dueLabel(daysLeft, due) {
+  const tone = dueTone(daysLeft);
+  return el("span", { class: tone ? "due " + tone : "due" }, dueText(daysLeft, due));
+}
+
+/* ---- identity colours -------------------------------------------------- */
+
+/* Must match CARE_COLOR_NAMES in src/care.h. */
+const COLORS = ["butter", "lime", "mint", "teal", "sky", "periwinkle", "lavender", "orchid"];
+
+/* A plant's name with its colour dot. */
+function plantName(name, color, tag) {
+  return el(tag || "span", { class: "plant-name" },
+    el("span", { class: `dot c-${color}`, "aria-hidden": "true" }), name);
+}
+
+/* A care type as a chip in its colour; null type is a plain note. */
+function careChip(name, color) {
+  if (name == null) return el("span", { class: "chip note" }, "Note");
+  return el("span", { class: `chip c-${color}` }, name);
+}
+
+/* The first palette colour not in used (or the least used one). */
+function nextColor(used) {
+  const counts = new Map(COLORS.map((c) => [c, 0]));
+  for (const c of used) if (counts.has(c)) counts.set(c, counts.get(c) + 1);
+  return COLORS.reduce((best, c) => (counts.get(c) < counts.get(best) ? c : best));
+}
+
+/* Round colour swatches to pick from; .value is the chosen name. */
+let pickerSeq = 0;
+function colorPicker(selected) {
+  const name = `color-${++pickerSeq}`;
+  const node = el("fieldset", { class: "swatches" },
+    el("legend", { class: "hint" }, "Colour"),
+    COLORS.map((c) => el("label", { class: `swatch c-${c}` },
+      el("input", { type: "radio", name, value: c, checked: c === selected, "aria-label": c }))));
+  Object.defineProperty(node, "value", {
+    get: () => node.querySelector(`input[name=${name}]:checked`).value,
+  });
+  return node;
 }
 
 function plural(n, one, many) {
@@ -220,12 +263,12 @@ function dueSummary(due) {
   const now = due.filter((d) => d.days_left === 0).length;
   const week = due.filter((d) => d.days_left > 0 && d.days_left <= 7).length;
   if (late + now + week === 0) {
-    return [el("span", { class: "pill tone-done" }, "Nothing due this week")];
+    return [el("span", { class: "pill" }, "Nothing due this week")];
   }
   return [
-    late ? el("span", { class: "pill tone-late" }, `${late} late`) : null,
-    now ? el("span", { class: "pill tone-today" }, `${now} today`) : null,
-    week ? el("span", { class: "pill tone-soon" }, `${week} this week`) : null,
+    late ? el("span", { class: "pill late" }, `${late} late`) : null,
+    now ? el("span", { class: "pill today" }, `${now} today`) : null,
+    week ? el("span", { class: "pill" }, `${week} this week`) : null,
   ];
 }
 
@@ -314,11 +357,11 @@ const DUE_GROUPS = [
 ];
 
 function dueRow(item) {
-  return el("li", { class: "card marked due-row " + dueTone(item.days_left) },
+  return el("li", { class: `card marked due-row c-${item.plant_color}` },
     el("div", { class: "what" },
-      el("strong", {}, item.plant),
-      el("span", { class: "muted" }, item.care_type)),
-    el("span", { class: "when" }, duePill(item.days_left, item.due)),
+      plantName(item.plant, item.plant_color, "strong"),
+      el("span", {}, careChip(item.care_type, item.care_type_color))),
+    el("span", { class: "when" }, dueLabel(item.days_left, item.due)),
     el("div", { class: "done" },
       doneButtons(item.plant_id, item.plant, item.care_type_id, item.care_type,
                   navButton("Open plant", `#/plants/plants/${item.plant_id}`))));
@@ -346,10 +389,11 @@ async function duePage() {
 
 const PLANT_LIMITS = { name: 100, species: 100, location: 100, notes: 4000 };
 
-/* Inputs for a plant's details, filled from plant (or empty). */
-function plantInputs(plant) {
+/* Inputs for a plant's details, filled from plant (or empty, with color). */
+function plantInputs(plant, color) {
   const p = plant || {};
   return {
+    color: colorPicker(p.color || color),
     name: el("input", { name: "name", required: true, maxlength: PLANT_LIMITS.name,
                         value: p.name || "" }),
     species: el("input", { name: "species", maxlength: PLANT_LIMITS.species,
@@ -369,6 +413,7 @@ function plantFields(inputs) {
        field("Location", inputs.location)),
     field("Acquired", inputs.acquired, "Leave empty if you don't know."),
     field("Notes", inputs.notes),
+    inputs.color,
   ];
 }
 
@@ -379,6 +424,7 @@ function plantBody(inputs) {
     location: inputs.location.value.trim(),
     acquired: inputs.acquired.value || null,
     notes: inputs.notes.value,
+    color: inputs.color.value,
   };
 }
 
@@ -394,19 +440,19 @@ function mostUrgent(due) {
 
 function plantCard(plant, urgent) {
   const where = [plant.species, plant.location].filter(Boolean).join(", ");
-  return el("li", { class: "card marked plant-card " +
-                     (urgent ? dueTone(urgent.days_left) : "tone-paused") },
-    el("h3", {}, plant.name),
+  return el("li", { class: `card marked plant-card c-${plant.color}` },
+    plantName(plant.name, plant.color, "h3"),
     urgent
-      ? el("span", { class: "when" }, duePill(urgent.days_left, urgent.due))
-      : el("span", { class: "when pill tone-paused" }, "Nothing scheduled"),
+      ? el("span", { class: "when" }, dueLabel(urgent.days_left, urgent.due))
+      : el("span", { class: "when due paused" }, "Nothing scheduled"),
+    urgent ? el("span", { class: "next" }, careChip(urgent.care_type, urgent.care_type_color))
+           : null,
     where ? el("span", { class: "muted" }, where) : null,
-    urgent ? el("span", { class: "muted" }, `Next: ${urgent.care_type}`) : null,
     el("div", { class: "actions" }, navButton("Open", `#/plants/plants/${plant.id}`)));
 }
 
-function addPlantForm() {
-  const inputs = plantInputs(null);
+function addPlantForm(color) {
+  const inputs = plantInputs(null, color);
   const node = form({ class: "raised", hidden: true }, async () => {
     const created = await api("POST", "/api/plants/add", plantBody(inputs));
     setStatus(`Added ${inputs.name.value.trim()}`);
@@ -433,7 +479,7 @@ async function plantsPage() {
   const urgent = mostUrgent(due);
   const active = data.plants.filter((p) => !p.archived);
   const archived = data.plants.filter((p) => p.archived);
-  const addForm = addPlantForm();
+  const addForm = addPlantForm(nextColor(data.plants.map((p) => p.color)));
 
   return plantsShell("plants",
     el("section", { class: "section" },
@@ -450,8 +496,8 @@ async function plantsPage() {
       ? el("section", { class: "section" },
           el("header", {}, el("h2", {}, "Archived ", el("span", { class: "count" }, archived.length))),
           el("ul", { class: "list cols" }, archived.map((p) =>
-            el("li", { class: "card item" },
-              el("strong", {}, p.name),
+            el("li", { class: `card marked item c-${p.color}` },
+              plantName(p.name, p.color, "strong"),
               el("div", { class: "actions" },
                 navButton("Open", `#/plants/plants/${p.id}`),
                 el("button", { class: "btn", type: "button",
@@ -480,8 +526,8 @@ function ruleCard(plant, rule, types) {
   const editor = el("div", { hidden: true });
   const view = el("div", { class: "rule" },
     el("header", {},
-      el("h3", {}, rule.care_type),
-      duePill(rule.days_left, rule.due)),
+      el("h3", {}, careChip(rule.care_type, rule.care_type_color)),
+      dueLabel(rule.days_left, rule.due)),
     el("p", {}, scheduleText(rule)),
     rule.periods.length
       ? el("ul", { class: "seasons" }, rule.periods.map((p) => el("li", {}, seasonText(p))))
@@ -514,7 +560,7 @@ function ruleCard(plant, rule, types) {
           handleError(err);
         }
       } }, "Delete rule")));
-  return el("li", { class: "card marked " + dueTone(rule.days_left) }, view, editor);
+  return el("li", { class: "card" }, view, editor);
 }
 
 function monthSelect(value) {
@@ -656,7 +702,7 @@ async function plantPage(id) {
   return plantsShell("plants",
     el("div", { class: "actions" }, navButton("All plants", "#/plants/plants")),
     el("header", { class: "section" },
-      el("h2", { class: "title" }, plant.name),
+      plantName(plant.name, plant.color, "h2"),
       plant.archived ? el("p", { class: "muted" }, "Archived: not shown in Due.") : null),
 
     el("div", { class: "split" },
@@ -733,16 +779,15 @@ function entryBody(inputs) {
   };
 }
 
-function entryCard(entry, typeNames, types) {
-  const name = entry.care_type_id == null ? null : typeNames.get(entry.care_type_id);
+function entryCard(entry, typeById, types) {
+  const type = entry.care_type_id == null ? null : typeById.get(entry.care_type_id);
   /* An entry may keep an archived type, so offer it while editing. */
   const editTypes = types.filter((t) => !t.archived || t.id === entry.care_type_id);
   const editor = el("div", { hidden: true });
   const view = el("div", { class: "entry" },
     el("header", {},
       el("strong", {}, showDate(entry.date)),
-      name ? el("span", { class: "pill tone-done" }, name)
-           : el("span", { class: "pill tone-paused" }, "Note")),
+      type ? careChip(type.name, type.color) : careChip(null)),
     entry.note ? el("p", { class: "note" }, entry.note) : null,
     el("div", { class: "actions" },
       el("button", { class: "btn", type: "button", onclick: () => {
@@ -792,7 +837,7 @@ async function journalPage(id) {
 
   const log = await api("GET", `/api/plants/log?plant_id=${plant.id}`);
   const types = data.care_types;
-  const typeNames = new Map(types.map((t) => [t.id, t.name]));
+  const typeById = new Map(types.map((t) => [t.id, t]));
   const active = types.filter((t) => !t.archived);
 
   const picker = el("select", {
@@ -813,14 +858,14 @@ async function journalPage(id) {
     el("div", { class: "actions" },
       el("button", { class: "btn go", type: "submit" }, "Add entry")));
 
-  const list = el("ul", { class: "list" }, log.entries.map((e) => entryCard(e, typeNames, types)));
+  const list = el("ul", { class: "list" }, log.entries.map((e) => entryCard(e, typeById, types)));
   let more = log.more;
   const olderButton = el("button", { class: "btn", type: "button", onclick: async () => {
     olderButton.disabled = true;
     try {
       const last = list.lastElementChild.entryId;
       const older = await api("GET", `/api/plants/log?plant_id=${plant.id}&before=${last}`);
-      for (const e of older.entries) list.append(withId(entryCard(e, typeNames, types), e.id));
+      for (const e of older.entries) list.append(withId(entryCard(e, typeById, types), e.id));
       more = older.more;
       olderButton.hidden = !more;
     } catch (err) {
@@ -833,8 +878,9 @@ async function journalPage(id) {
   olderButton.hidden = !more;
 
   return plantsShell("journal",
-    el("div", { class: "picker" },
-      field("Plant", picker),
+    el("div", { class: `card marked picker c-${plant.color}` },
+      plantName(plant.name, plant.color, "h2"),
+      field("Show another plant", picker),
       navButton("Open plant", `#/plants/plants/${plant.id}`)),
     el("div", { class: "split" },
       el("section", { class: "section" },
@@ -861,15 +907,25 @@ async function setTypeArchived(type, archived) {
 function typeRow(type) {
   const name = el("input", { value: type.name, required: true, maxlength: 50,
                              "aria-label": "Name" });
+  const color = colorPicker(type.color);
+  color.hidden = true;
+  const showColors = el("button", { class: "btn", type: "button", onclick: () => {
+    color.hidden = false;
+    showColors.hidden = true;
+  } }, "Change colour");
   return el("li", { class: "card" },
     form({}, async () => {
-      await api("POST", "/api/plants/types/update", { id: type.id, name: name.value.trim() });
-      setStatus(`Renamed to ${name.value.trim()}`);
+      await api("POST", "/api/plants/types/update",
+                { id: type.id, name: name.value.trim(), color: color.value });
+      setStatus(`Saved ${name.value.trim()}`);
       route();
     },
-      el("div", { class: "row" },
-        name,
-        el("button", { class: "btn", type: "submit" }, "Rename"),
+      careChip(type.name, type.color),
+      name,
+      color,
+      el("div", { class: "actions" },
+        el("button", { class: "btn", type: "submit" }, "Save"),
+        showColors,
         el("button", { class: "btn danger", type: "button",
                        onclick: () => setTypeArchived(type, true).catch(handleError) },
            "Archive"))));
@@ -881,18 +937,21 @@ async function typesPage() {
   const archived = data.care_types.filter((t) => t.archived);
   const name = el("input", { required: true, maxlength: 50, "aria-label": "New care type",
                              placeholder: "e.g. Watering" });
+  const color = colorPicker(nextColor(data.care_types.map((t) => t.color)));
 
   return plantsShell("types",
     el("section", { class: "section" },
       el("p", { class: "hint" },
          "Care types are what you do to plants. Each plant gets its own rule per type."),
       form({ class: "raised" }, async () => {
-        await api("POST", "/api/plants/types/add", { name: name.value.trim() });
+        await api("POST", "/api/plants/types/add",
+                  { name: name.value.trim(), color: color.value });
         setStatus(`Added ${name.value.trim()}`);
         route();
       },
-        el("div", { class: "row" },
-          name,
+        name,
+        color,
+        el("div", { class: "actions" },
           el("button", { class: "btn go", type: "submit" }, "Add care type")))),
     el("section", { class: "section" },
       el("header", {}, el("h2", {}, "Care types ", el("span", { class: "count" }, active.length))),
@@ -904,7 +963,7 @@ async function typesPage() {
           el("header", {}, el("h2", {}, "Archived ", el("span", { class: "count" }, archived.length))),
           el("ul", { class: "list cols" }, archived.map((t) =>
             el("li", { class: "card item" },
-              el("strong", {}, t.name),
+              careChip(t.name, t.color),
               el("div", { class: "actions" },
                 el("button", { class: "btn", type: "button",
                                onclick: () => setTypeArchived(t, false).catch(handleError) },

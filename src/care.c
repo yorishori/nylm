@@ -6,6 +6,17 @@
 #include <string.h>
 #include <time.h>
 
+int care_color_valid(const char *name)
+{
+    static const char *const colors[] = {
+        "butter", "lime", "mint", "teal", "sky", "periwinkle", "lavender", "orchid",
+    };
+    for (size_t i = 0; i < sizeof colors / sizeof colors[0]; i++)
+        if (strcmp(name, colors[i]) == 0)
+            return 1;
+    return 0;
+}
+
 /* Gregorian calendar <-> day number, after Howard Hinnant's algorithms
  * ("chrono-Compatible Low-Level Date Algorithms"), for year >= 0. */
 long care_day(long year, long month, long day)

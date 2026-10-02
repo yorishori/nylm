@@ -203,8 +203,26 @@ static void test_yearly(void)
     CHECK_STR(due(&nye, "2020-01-01", "2026-12-31"), "2027-12-31");
 }
 
+static void test_colors(void)
+{
+    static const char *const ok[] = {
+        "butter", "lime", "mint", "teal", "sky", "periwinkle", "lavender", "orchid",
+    };
+    for (size_t i = 0; i < sizeof ok / sizeof ok[0]; i++)
+        CHECK(care_color_valid(ok[i]));
+    CHECK(!care_color_valid(""));
+    CHECK(!care_color_valid("rose"));  /* urgency colours are not for plants */
+    CHECK(!care_color_valid("peach"));
+    CHECK(!care_color_valid("Mint"));
+    CHECK(!care_color_valid("mint "));
+    CHECK(!care_color_valid("mintx"));
+    CHECK(!care_color_valid("min"));
+    CHECK(!care_color_valid("#a6dfc3"));
+}
+
 int main(void)
 {
+    test_colors();
     test_parse_date();
     test_month_day();
     test_overlap();

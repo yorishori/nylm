@@ -80,6 +80,15 @@ const char *const plants_migrations[] = {
     ") STRICT;"
     "CREATE INDEX care_log_by_plant ON care_log (plant_id, date, id);"
     "CREATE INDEX care_log_by_rule ON care_log (plant_id, care_type_id, date);",
+
+    /* 2: a colour per plant and care type, from a fixed palette, so the
+     * frontend can show at a glance which plant and which care. */
+    "ALTER TABLE plants ADD COLUMN color TEXT NOT NULL DEFAULT 'mint'"
+    "    CHECK (color IN ('butter', 'lime', 'mint', 'teal', 'sky', 'periwinkle',"
+    "                     'lavender', 'orchid'));"
+    "ALTER TABLE care_types ADD COLUMN color TEXT NOT NULL DEFAULT 'sky'"
+    "    CHECK (color IN ('butter', 'lime', 'mint', 'teal', 'sky', 'periwinkle',"
+    "                     'lavender', 'orchid'));",
 };
 
 const int plants_migration_count = sizeof plants_migrations / sizeof plants_migrations[0];

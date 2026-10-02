@@ -15,6 +15,15 @@
 #define CARE_MAX_PERIODS   12   /* seasonal periods per rule */
 #define CARE_NEVER         (-1000000L) /* "no due date": paused all year */
 
+/*
+ * Colours for plants and care types: pastels that stay clear of the two
+ * urgency colours (late, today) the frontend uses for due dates.
+ */
+#define CARE_COLOR_NAMES "butter, lime, mint, teal, sky, periwinkle, lavender, orchid"
+
+/* 1 if name is one of CARE_COLOR_NAMES. */
+int care_color_valid(const char *name);
+
 /* Parses a valid calendar date "YYYY-MM-DD" (CARE_MIN_YEAR..CARE_MAX_YEAR). 0 or -1. */
 int care_parse_date(const char *s, long *day);
 
