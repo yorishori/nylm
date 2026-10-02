@@ -1,0 +1,6 @@
+build/
+*.o
+/nylm
+*.db
+*.db-wal
+*.db-shm
