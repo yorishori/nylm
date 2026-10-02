@@ -12,6 +12,7 @@
 
 #include "arena.h"
 #include "conn.h"
+#include "db.h"
 #include "http.h"
 #include "json.h"
 #include "router.h"
@@ -128,6 +129,12 @@ int main(void)
     public_dir = getenv("NYLM_PUBLIC");
     if (public_dir == NULL || *public_dir == '\0')
         public_dir = "public";
+
+    const char *db_path = getenv("NYLM_DB");
+    if (db_path == NULL || *db_path == '\0')
+        db_path = "nylm.db";
+    if (db_open(db_path) != 0)
+        return 1;
 
     if (arena_init(ARENA_SIZE) != 0) {
         fprintf(stderr, "out of memory\n");

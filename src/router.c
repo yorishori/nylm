@@ -2,6 +2,7 @@
 
 #include <string.h>
 
+#include "api.h"
 #include "json.h"
 
 static void health(struct request *req, struct response *res)
@@ -13,7 +14,13 @@ static void health(struct request *req, struct response *res)
 }
 
 static const struct route routes[] = {
-    { "GET", "/api/health", health },
+    { "GET",    "/api/health",   health },
+
+    { "GET",    "/api/notes",    notes_list },
+    { "POST",   "/api/notes",    notes_create },
+    { "GET",    "/api/notes/:",  notes_get },
+    { "PUT",    "/api/notes/:",  notes_update },
+    { "DELETE", "/api/notes/:",  notes_delete },
 };
 
 /*
