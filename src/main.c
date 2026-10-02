@@ -1,28 +1,25 @@
 #define _POSIX_C_SOURCE 200809L
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include "arena.h"
+#include "conn.h"
+#include "http.h"
+
 #define DEFAULT_PORT 8080
+#define ARENA_SIZE   (16 * 1024 * 1024)
 
-static const char RESPONSE[] =
-    "HTTP/1.1 200 OK\r\n"
-    "Content-Type: text/plain\r\n"
-    "Content-Length: 6\r\n"
-    "Connection: close\r\n"
-    "\r\n"
-    "hello\n";
-
-static int parse_port(const char *s)
+static int parse_port(const char *s, int fallback)
 {
     if (s == NULL || *s == '\0')
-        return DEFAULT_PORT;
+        return fallback;
 
     char *end;
     errno = 0;
@@ -66,36 +63,58 @@ static int listen_on(int port)
     return fd;
 }
 
-static void write_all(int fd, const char *buf, size_t len)
+static void handle(struct request *req, struct response *res)
 {
-    while (len > 0) {
-        ssize_t n = write(fd, buf, len);
-        if (n < 0) {
-            if (errno == EINTR)
-                continue;
-            return;
-        }
-        buf += n;
-        len -= (size_t)n;
-    }
+    (void)req;
+    http_text(res, 200, "hello\n");
 }
 
-static void handle(int client)
+static void serve(int client, const char *ip)
 {
-    /* Request is read and ignored for now; parsing comes in milestone 2. */
-    char buf[4096];
-    ssize_t n = read(client, buf, sizeof buf);
-    if (n <= 0)
-        return;
+    double start = now_seconds();
+    struct conn c;
+    conn_init(&c, client, ip);
 
-    write_all(client, RESPONSE, sizeof RESPONSE - 1);
+    struct request req;
+    struct response res;
+    http_response_init(&res);
+
+    int status = http_read_request(&c, &req);
+    if (status < 0) {
+        conn_close(&c);
+        return;
+    }
+    if (status > 0) {
+        char *text = arena_alloc(64);
+        if (text != NULL)
+            snprintf(text, 64, "%d %s\n", status, http_status_text(status));
+        http_text(&res, status, text != NULL ? text : "error\n");
+        req.method = "-";
+        req.path = "-";
+    } else {
+        handle(&req, &res);
+    }
+
+    long sent = http_send(&c, &res);
+    if (res.file_fd >= 0)
+        close(res.file_fd);
+    conn_close(&c);
+
+    printf("%s %s %s %d %ld %.1fms\n", ip, req.method, req.path, res.status, sent,
+           (now_seconds() - start) * 1000.0);
+    fflush(stdout);
 }
 
 int main(void)
 {
-    int port = parse_port(getenv("NYLM_PORT"));
+    int port = parse_port(getenv("NYLM_PORT"), DEFAULT_PORT);
     if (port < 0) {
         fprintf(stderr, "invalid NYLM_PORT\n");
+        return 1;
+    }
+
+    if (arena_init(ARENA_SIZE) != 0) {
+        fprintf(stderr, "out of memory\n");
         return 1;
     }
 
@@ -110,13 +129,18 @@ int main(void)
     fflush(stdout);
 
     for (;;) {
-        int client = accept(server, NULL, NULL);
+        struct sockaddr_in addr;
+        socklen_t addr_len = sizeof addr;
+        int client = accept(server, (struct sockaddr *)&addr, &addr_len);
         if (client < 0) {
             if (errno != EINTR)
                 perror("accept");
             continue;
         }
-        handle(client);
-        close(client);
+        char ip[INET_ADDRSTRLEN] = "?";
+        inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof ip);
+
+        serve(client, ip);
+        arena_reset();
     }
 }
