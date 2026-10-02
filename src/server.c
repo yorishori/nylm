@@ -4,6 +4,7 @@
 
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
@@ -53,7 +54,9 @@ static int listen_on(int port)
         return -1;
     }
 
-    if (listen(fd, 16) < 0) {
+    /* Non-blocking, so accept() after poll() can't hang if the client already
+     * left. Accepted sockets do not inherit this on Linux. */
+    if (listen(fd, 16) < 0 || fcntl(fd, F_SETFL, O_NONBLOCK) < 0) {
         perror("listen");
         close(fd);
         return -1;
@@ -200,7 +203,7 @@ static void accept_one(int listen_fd, enum listener which)
     socklen_t addr_len = sizeof addr;
     int client = accept(listen_fd, (struct sockaddr *)&addr, &addr_len);
     if (client < 0) {
-        if (errno != EINTR)
+        if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
             perror("accept");
         return;
     }

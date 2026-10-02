@@ -40,12 +40,15 @@ browser ──HTTPS─> C binary ──> router ──> /api/*   handlers ──
 ```
 
 - **One process, one binary.** Serves both the static frontend and the JSON API.
-- **Concurrency:** single-threaded loop — `accept`, TLS handshake, read
-  request, handle, write, close. Socket timeouts so a slow client can't hang the server. This matches
-  SQLite's single-writer model and is enough for one user. Revisit (`poll()` or
-  a small thread pool) only if it becomes a measurable problem.
-- **Routing:** a static table of `{method, path, handler}` in one file. Exact
-  matches, plus simple prefix match for routes with an ID (`/api/notes/42`).
+- **Concurrency:** single-threaded loop — `poll()` on the listening sockets,
+  then `accept`, TLS handshake, read request, handle, write, close, one
+  connection at a time. Each read/write may block at most 5 s and a whole
+  request at most 15 s, so a slow client can delay others but not hang the
+  server. This matches SQLite's single-writer model and is enough for one
+  user. Revisit (a small thread pool) only if it becomes a measurable problem.
+- **Routing:** a static table of `{method, path, handler, public}` in
+  `router.c`. Exact matches, or a pattern ending in `/:` that captures one
+  more segment (`/api/notes/:` matches `/api/notes/42`).
 - **API:** JSON in, JSON out. Frontend talks to it with `fetch()`.
 - **Split of responsibilities:**
   - *Backend* serves static files unchanged, and stores and returns data.
@@ -55,8 +58,18 @@ browser ──HTTPS─> C binary ──> router ──> /api/*   handlers ──
     and keeps itself in sync with the API. The backend never renders HTML.
 - **Memory:** a per-request arena allocator; everything allocated while handling
   a request is freed in one shot when the request ends.
-- **Config:** environment variables (ports, DB path, static dir, cert/key
-  paths, TLS on/off). No config files.
+- **Config:** environment variables, no config files (`nylm --help` lists them):
+
+  | Variable                 | Default          | Meaning                                  |
+  |--------------------------|------------------|------------------------------------------|
+  | `NYLM_DB`                | `nylm.db`        | SQLite file                              |
+  | `NYLM_PUBLIC`            | `public`         | static files directory                   |
+  | `NYLM_TLS`               | `on`             | `off` = plain HTTP for development       |
+  | `NYLM_HTTP_PORT`         | `8080`           | app (TLS off) or redirect + ACME (TLS on)|
+  | `NYLM_HTTPS_PORT`        | `8443`           | app when TLS is on                       |
+  | `NYLM_CERT` / `NYLM_KEY` | `certs/*.pem`    | PEM certificate chain and key            |
+  | `NYLM_ACME_DIR`          | `acme`           | certbot `--webroot` directory            |
+  | `NYLM_PUBLIC_HTTPS_PORT` | `443`            | port written into redirects              |
 - **Logging:** one line per request to stdout (Docker collects it).
 
 ## HTTP — what we support
@@ -67,8 +80,26 @@ bodies; query strings; URL decoding; cookies (if auth needs them).
 Out: status line, headers, body; `Connection: close`; correct `Content-Type`
 for a small fixed set of extensions (html, css, js, json, svg, png, ico).
 
-Hard limits: max header size, max body size, max path length. Anything over a
-limit gets `413`/`431`, never a buffer overrun.
+Hard limits: 8 KiB of headers (64 max), 1 MiB body, 2 KiB path. Anything over
+a limit gets `413`/`414`/`431`, never a buffer overrun. Unsupported methods and
+`Transfer-Encoding` get `501`.
+
+## API
+
+| Method | Path             | Login | Notes                                     |
+|--------|------------------|-------|-------------------------------------------|
+| GET    | `/api/health`    | no    | `{"status":"ok"}`                         |
+| POST   | `/api/login`     | no    | `{"password"}` → `204` + session cookie   |
+| POST   | `/api/logout`    | no    | deletes the session, clears the cookie    |
+| GET    | `/api/session`   | yes   | `204` if logged in, else `401`            |
+| GET    | `/api/notes`     | yes   | example feature: list                     |
+| POST   | `/api/notes`     | yes   | `{"title","body"}` → `201` note           |
+| GET    | `/api/notes/:id` | yes   |                                           |
+| PUT    | `/api/notes/:id` | yes   | `{"title","body"}`                        |
+| DELETE | `/api/notes/:id` | yes   | `204`                                     |
+
+Errors are `{"error": "message"}` with a matching status code. Requests
+with a body must send `Content-Type: application/json` (else `415`).
 
 ## Explicitly out of scope
 
@@ -86,7 +117,7 @@ limit gets `413`/`431`, never a buffer overrun.
   order at startup, tracked with `PRAGMA user_version`.
 - **Always** prepared statements with bound parameters. Never build SQL with
   string formatting.
-- `PRAGMA journal_mode=WAL`, `foreign_keys=ON`.
+- `PRAGMA journal_mode=WAL`, `foreign_keys=ON`, `STRICT` tables.
 
 ## Authentication
 
@@ -98,15 +129,18 @@ Single user (me), simple login.
 - **Randomness:** `RAND_bytes` for salts and session tokens.
 - **The user** is created/updated from the command line
   (`nylm set-password`), never over HTTP. No sign-up endpoint.
-- **Password storage:** Argon2id hash + random salt in SQLite.
+- **Password storage:** Argon2id (19 MiB, 2 passes) hash + random salt in
+  SQLite; the cost parameters are stored with the hash so they can change.
+  Setting a new password logs out every session.
 - **Login:** `POST /api/login` checks the password; on success creates a
-  session. A fixed delay on failure slows down guessing.
+  session. A failed attempt sleeps 1 s (the whole server waits — fine for
+  one user, and it caps guessing at about one per second).
 - **Sessions:** 32 random bytes, sent as a cookie
   (`HttpOnly; Secure; SameSite=Strict; Path=/`).
-  Only a SHA-256 hash of the token is stored in the DB, with an expiry.
+  Only a SHA-256 hash of the token is stored in the DB, with a 7-day expiry.
   `POST /api/logout` deletes it.
-- **Protection:** every `/api/*` route except `/api/login` requires a valid
-  session. Static files are public (they contain no data).
+- **Protection:** every `/api/*` route not marked public in the route table
+  requires a valid session. Static files are public (they contain no data).
 - **CSRF:** `SameSite=Strict` plus API only accepting
   `Content-Type: application/json`.
 
@@ -128,8 +162,8 @@ short-lived, single-use privileged tokens for that action only.
 The binary terminates TLS itself, using OpenSSL. Responsibilities are split
 across three places:
 
-**C binary (`tls.c`)**
-- Listens on 443 (HTTPS) and 80 (HTTP).
+**C binary (`tls.c`, `server.c`)**
+- Listens on 8443 (HTTPS) and 8080 (HTTP); Docker maps them to 443 and 80.
 - Port 80 does exactly two things: serves `/.well-known/acme-challenge/*`
   from a mounted directory (for certificate renewal) and redirects
   everything else to HTTPS with `301`.
@@ -141,19 +175,23 @@ across three places:
   `Secure` cookie flag).
 
 **Docker**
-- Runtime image installs `libssl3`; build image installs `libssl-dev`.
+- Runtime image installs `libssl3t64`; build image installs `libssl-dev`.
 - Publishes ports 80 and 443.
-- Mounts `/etc/letsencrypt` read-only and the ACME webroot directory.
+- Mounts `/srv/nylm/certs` and the ACME webroot `/srv/nylm/acme` read-only.
 
 **Host server**
 - Domain name with DNS pointing to the server.
 - `certbot` (distro package, comes with a renewal timer) in `--webroot`
   mode, writing challenges into the directory the app serves on port 80.
-- Renewal deploy hook: `docker restart nylm` so the new cert is loaded.
+- Renewal deploy hook (`deploy/certbot-deploy-hook.sh`): copies the cert and
+  key to `/srv/nylm/certs` readable by the container's uid 10001 (certbot's
+  keys are root-only), then `docker restart nylm`.
+- First certificate: `certbot --standalone` (nylm cannot start without one),
+  then `certbot reconfigure` to webroot. Step by step in `deploy/README.md`.
 - Firewall: only 80 and 443 open.
 
-**Development:** a self-signed cert made with the `openssl` CLI, or
-`NYLM_TLS=off`.
+**Development:** `make cert` (self-signed for localhost), or `NYLM_TLS=off`
+(`make run`).
 
 Security updates for OpenSSL come from rebuilding the image on a fresh
 Debian base.
@@ -165,7 +203,8 @@ Even for a personal app:
 - Static file serving rejects `..` and resolves paths inside the public dir only.
 - All input lengths checked; all buffers bounded.
 - Debug builds run with `-fsanitize=address,undefined`.
-- Container runs as a non-root user.
+- Container runs as a non-root user with a read-only root filesystem and
+  all capabilities dropped.
 - Every response sets `Content-Security-Policy`, `X-Content-Type-Options:
   nosniff` and `Referrer-Policy: no-referrer`.
 
@@ -174,43 +213,57 @@ Even for a personal app:
 ```
 nylm/
 ├── scope.md
-├── Makefile
+├── Makefile           # make, make debug, make run, make test, make cert
 ├── Dockerfile
+├── compose.yaml
 ├── src/
-│   ├── main.c        # startup, config, accept loop
-│   ├── http.c/.h     # request parsing, response writing
-│   ├── router.c/.h   # route table
-│   ├── db.c/.h       # SQLite open, migrations, helpers
-│   ├── arena.c/.h    # per-request allocator
-│   ├── auth.c/.h     # password check, sessions
-│   ├── tls.c/.h      # OpenSSL context, handshake, read/write
-│   └── api_*.c       # one file per feature
-├── migrations/       # 001_init.sql, 002_...sql
+│   ├── main.c         # env config, CLI (serve / set-password)
+│   ├── server.c/.h    # listeners, accept loop, app vs redirect handling
+│   ├── conn.c/.h      # socket I/O (plain or TLS), timeouts
+│   ├── tls.c/.h       # OpenSSL context and handshake
+│   ├── http.c/.h      # request parsing, response writing
+│   ├── static.c/.h    # safe static file serving
+│   ├── router.c/.h    # route table, auth check
+│   ├── json.c/.h      # cJSON on the arena, reply/validation helpers
+│   ├── db.c/.h        # SQLite open, pragmas, migrations
+│   ├── arena.c/.h     # per-request allocator
+│   ├── auth.c/.h      # Argon2id passwords, sessions, cookies
+│   ├── api.h          # handler declarations
+│   └── api_*.c        # one file per feature (session, notes, ...)
+├── migrations/        # 001_notes.sql, 002_auth.sql, ... (compiled in)
+├── tools/
+│   └── embed-migrations.sh
 ├── vendor/
-│   ├── sqlite/       # sqlite3.c, sqlite3.h
-│   └── cjson/        # cJSON.c, cJSON.h
-├── public/           # index.html, style.css, app.js
+│   ├── sqlite/        # sqlite3.c, sqlite3.h (3.53.4)
+│   └── cjson/         # cJSON.c, cJSON.h (1.7.19)
+├── public/            # index.html, style.css, app.js, favicon.svg
+├── deploy/            # host setup guide, certbot deploy hook
 └── tests/
-    ├── test_*.c      # unit tests (plain asserts, no framework)
-    └── smoke.sh      # curl against a running server
+    ├── test.h         # CHECK macros
+    ├── test_*.c       # unit tests, one binary each
+    └── smoke.sh       # curl against a running server, HTTP and TLS
 ```
 
 ## Docker
 
-- **Build stage:** `debian:stable-slim` + `gcc`/`make`; builds a release binary.
-- **Runtime stage:** `debian:stable-slim`, non-root user, copies the binary and
-  `public/`. DB lives on a mounted volume (`/data`); certificates and the
-  ACME webroot are mounted read-only (see TLS).
-- A minimal `compose.yaml` with one service is all it takes to start it.
+- **Build stage:** `debian:trixie-slim` + `gcc`/`make`/`libssl-dev`; vendored
+  objects are built in their own layer, then the release binary.
+- **Runtime stage:** `debian:trixie-slim` + `libssl3t64`, user `nylm`
+  (uid 10001), the binary and `public/`. DB on a named volume (`/data`).
+- `compose.yaml`: one service, ports 80/443, read-only root, `/tmp` tmpfs.
+- `SIGTERM` finishes the current request and exits cleanly.
 
 ## Testing
 
 - Unit tests for the parts that are easy to get wrong: HTTP parsing, URL
-  decoding, path sanitising, routing.
-- `smoke.sh`: start the binary, hit every route with `curl`, check status codes.
+  decoding, path sanitising, routing, cookie parsing, redirect targets.
+- `smoke.sh`: start the binary in plain and TLS mode, hit every route with
+  `curl`, check status codes and headers, fail on any sanitizer report.
 - `make test` runs both. No test framework.
 
 ## Milestones
+
+All done (2026-10-02).
 
 1. **Skeleton** — Makefile, `main.c`, server answers every request with
    `200 hello`. Builds clean with warnings-as-errors.
