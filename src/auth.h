@@ -9,9 +9,6 @@
 #define AUTH_MAX_PASSWORD 1024
 #define AUTH_COOKIE "nylm_session"
 
-/* Whether the session cookie gets the Secure attribute (on with TLS). */
-void auth_set_secure_cookie(int on);
-
 /* Stores a new password and logs out every existing session. */
 int auth_set_password(const char *password);
 

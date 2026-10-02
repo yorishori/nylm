@@ -9,6 +9,7 @@
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
@@ -18,18 +19,50 @@
 #include "http.h"
 #include "router.h"
 #include "static.h"
-#include "tls.h"
-
-#define ACME_PREFIX "/.well-known/acme-challenge/"
-
-enum listener { APP, REDIRECT };
 
 static const struct server_config *cfg;
 static volatile sig_atomic_t stopping;
-static char acme_challenge_dir[1024];
 
-static int listen_on(int port)
+int subnet_parse(const char *s, struct subnet *out)
 {
+    char addr_text[INET_ADDRSTRLEN];
+    const char *slash = strchr(s, '/');
+    size_t addr_len = slash ? (size_t)(slash - s) : strlen(s);
+    if (addr_len == 0 || addr_len >= sizeof addr_text)
+        return -1;
+    memcpy(addr_text, s, addr_len);
+    addr_text[addr_len] = '\0';
+
+    struct in_addr in;
+    if (inet_pton(AF_INET, addr_text, &in) != 1)
+        return -1;
+
+    long bits = 32;
+    if (slash != NULL) {
+        char *end;
+        bits = strtol(slash + 1, &end, 10);
+        if (slash[1] == '\0' || *end != '\0' || bits < 0 || bits > 32)
+            return -1;
+    }
+    out->mask = bits == 0 ? 0 : 0xffffffffu << (32 - bits);
+    out->addr = ntohl(in.s_addr) & out->mask;
+    return 0;
+}
+
+int subnet_allowed(const struct subnet *list, int n, uint32_t addr)
+{
+    for (int i = 0; i < n; i++)
+        if ((addr & list[i].mask) == list[i].addr)
+            return 1;
+    return 0;
+}
+
+static int listen_on(uint32_t addr, int port)
+{
+    char text[INET_ADDRSTRLEN];
+    struct in_addr in = { .s_addr = htonl(addr) };
+    inet_ntop(AF_INET, &in, text, sizeof text);
+
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         perror("socket");
@@ -43,13 +76,13 @@ static int listen_on(int port)
         return -1;
     }
 
-    struct sockaddr_in addr = {
+    struct sockaddr_in sa = {
         .sin_family = AF_INET,
         .sin_port = htons((uint16_t)port),
-        .sin_addr.s_addr = htonl(INADDR_ANY),
+        .sin_addr = in,
     };
-    if (bind(fd, (struct sockaddr *)&addr, sizeof addr) < 0) {
-        fprintf(stderr, "bind port %d: %s\n", port, strerror(errno));
+    if (bind(fd, (struct sockaddr *)&sa, sizeof sa) < 0) {
+        fprintf(stderr, "bind %s:%d: %s\n", text, port, strerror(errno));
         close(fd);
         return -1;
     }
@@ -61,10 +94,11 @@ static int listen_on(int port)
         close(fd);
         return -1;
     }
+    printf("nylm: listening on http://%s:%d\n", text, port);
     return fd;
 }
 
-static void handle_app(struct request *req, struct response *res)
+static void handle(struct request *req, struct response *res)
 {
     if (strncmp(req->path, "/api/", 5) == 0) {
         router_dispatch(req, res);
@@ -76,94 +110,11 @@ static void handle_app(struct request *req, struct response *res)
     }
 }
 
-/* Appends s to out, %-encoding anything outside the allowed set. */
-static size_t append_encoded(char *out, size_t pos, size_t cap, const char *s,
-                             const char *allowed)
-{
-    static const char hex[] = "0123456789ABCDEF";
-    for (; *s != '\0' && pos + 4 < cap; s++) {
-        unsigned char c = (unsigned char)*s;
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-            strchr(allowed, c) != NULL) {
-            out[pos++] = (char)c;
-        } else {
-            out[pos++] = '%';
-            out[pos++] = hex[c >> 4];
-            out[pos++] = hex[c & 15];
-        }
-    }
-    out[pos] = '\0';
-    return pos;
-}
-
-char *server_redirect_location(const char *host, const char *path, const char *query,
-                               int https_port)
-{
-    if (host == NULL)
-        return NULL;
-    size_t host_len = strcspn(host, ":"); /* drop any port */
-    if (host_len == 0 || host_len > 253)
-        return NULL;
-    for (size_t i = 0; i < host_len; i++) {
-        char c = host[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
-              c == '.' || c == '-'))
-            return NULL;
-    }
-
-    size_t cap = 512 + 3 * (strlen(path) + strlen(query));
-    char *out = arena_alloc(cap);
-    if (out == NULL)
-        return NULL;
-    int n = https_port == 443
-                ? snprintf(out, cap, "https://%.*s", (int)host_len, host)
-                : snprintf(out, cap, "https://%.*s:%d", (int)host_len, host, https_port);
-    size_t pos = append_encoded(out, (size_t)n, cap, path, "-._~/!$&'()*+,;=:@");
-    if (*query != '\0') {
-        out[pos++] = '?';
-        append_encoded(out, pos, cap, query, "-._~/!$&'()*+,;=:@?%");
-    }
-    return out;
-}
-
-/* Port 80 when TLS is on: ACME challenges, everything else goes to HTTPS. */
-static void handle_redirect(struct request *req, struct response *res)
-{
-    if (strncmp(req->path, ACME_PREFIX, strlen(ACME_PREFIX)) == 0) {
-        const char *token = req->path + strlen(ACME_PREFIX);
-        char rel[256];
-        if (strcmp(req->method, "GET") != 0 || strlen(token) + 2 > sizeof rel ||
-            strspn(token, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_") !=
-                strlen(token)) {
-            http_text(res, 404, "404 Not Found\n");
-            return;
-        }
-        snprintf(rel, sizeof rel, "/%s", token);
-        static_serve(acme_challenge_dir, rel, res);
-        res->content_type = "text/plain";
-        return;
-    }
-
-    char *location = server_redirect_location(http_header(req, "Host"), req->path,
-                                              req->query, cfg->public_https_port);
-    if (location == NULL) {
-        http_text(res, 400, "400 Bad Request\n");
-        return;
-    }
-    http_text(res, 301, "Moved to HTTPS\n");
-    http_add_header(res, "Location", location);
-}
-
-static void serve(int client, const char *ip, enum listener which)
+static void serve(int client, const char *ip)
 {
     double start = now_seconds();
     struct conn c;
     conn_init(&c, client, ip);
-
-    if (which == APP && cfg->tls && tls_accept(&c) != 0) {
-        conn_close(&c);
-        return;
-    }
 
     struct request req;
     struct response res;
@@ -181,10 +132,8 @@ static void serve(int client, const char *ip, enum listener which)
         http_text(&res, status, text != NULL ? text : "error\n");
         req.method = "-";
         req.path = "-";
-    } else if (which == APP) {
-        handle_app(&req, &res);
     } else {
-        handle_redirect(&req, &res);
+        handle(&req, &res);
     }
 
     long sent = http_send(&c, &res);
@@ -192,12 +141,12 @@ static void serve(int client, const char *ip, enum listener which)
         close(res.file_fd);
     conn_close(&c);
 
-    printf("%s %s %s %s %d %ld %.1fms\n", ip, which == APP ? "app" : "redirect", req.method,
-           req.path, res.status, sent, (now_seconds() - start) * 1000.0);
+    printf("%s %s %s %d %ld %.1fms\n", ip, req.method, req.path, res.status, sent,
+           (now_seconds() - start) * 1000.0);
     fflush(stdout);
 }
 
-static void accept_one(int listen_fd, enum listener which)
+static void accept_one(int listen_fd)
 {
     struct sockaddr_in addr;
     socklen_t addr_len = sizeof addr;
@@ -210,7 +159,15 @@ static void accept_one(int listen_fd, enum listener which)
     char ip[INET_ADDRSTRLEN] = "?";
     inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof ip);
 
-    serve(client, ip, which);
+    /* Second line of defence after binding only to LAN/VPN addresses. */
+    if (!subnet_allowed(cfg->allow, cfg->nallow, ntohl(addr.sin_addr.s_addr))) {
+        close(client);
+        printf("%s rejected: not in NYLM_ALLOW\n", ip);
+        fflush(stdout);
+        return;
+    }
+
+    serve(client, ip);
     arena_reset();
 }
 
@@ -224,52 +181,36 @@ int server_run(const struct server_config *config)
 {
     cfg = config;
 
-    /* SIGTERM (docker stop) / SIGINT: finish the current request, then return.
-     * No SA_RESTART, so a blocked poll() wakes up with EINTR. */
+    /* SIGTERM (systemctl stop) / SIGINT: finish the current request, then
+     * return. No SA_RESTART, so a blocked poll() wakes up with EINTR. */
     struct sigaction sa = { .sa_handler = on_stop_signal };
     sigemptyset(&sa.sa_mask);
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT, &sa, NULL);
 
-    http_set_hsts(cfg->tls);
-    snprintf(acme_challenge_dir, sizeof acme_challenge_dir, "%s%.*s", cfg->acme_dir,
-             (int)strlen(ACME_PREFIX) - 1, ACME_PREFIX);
-
-    /* fds[0] serves the app; fds[1] (TLS only) is the port-80 redirector. */
-    struct pollfd fds[2] = { { .fd = -1 }, { .fd = -1 } };
-    nfds_t nfds = 1;
-    if (cfg->tls) {
-        fds[0].fd = listen_on(cfg->https_port);
-        fds[1].fd = listen_on(cfg->http_port);
-        nfds = 2;
-        if (fds[0].fd < 0 || fds[1].fd < 0)
+    struct pollfd fds[SERVER_MAX_LISTEN];
+    for (int i = 0; i < cfg->nlisten; i++) {
+        fds[i].fd = listen_on(cfg->listen[i], cfg->port);
+        fds[i].events = POLLIN;
+        if (fds[i].fd < 0)
             return -1;
-        printf("nylm: https on %d, http->https redirect on %d\n", cfg->https_port,
-               cfg->http_port);
-    } else {
-        fds[0].fd = listen_on(cfg->http_port);
-        if (fds[0].fd < 0)
-            return -1;
-        printf("nylm: plain http on %d (NYLM_TLS=off)\n", cfg->http_port);
     }
     fflush(stdout);
 
-    fds[0].events = fds[1].events = POLLIN;
     while (!stopping) {
-        if (poll(fds, nfds, -1) < 0) {
+        if (poll(fds, (nfds_t)cfg->nlisten, -1) < 0) {
             if (errno != EINTR)
                 perror("poll");
             continue;
         }
-        if (fds[0].revents & POLLIN)
-            accept_one(fds[0].fd, APP);
-        if (nfds == 2 && (fds[1].revents & POLLIN))
-            accept_one(fds[1].fd, REDIRECT);
+        for (int i = 0; i < cfg->nlisten; i++)
+            if (fds[i].revents & POLLIN)
+                accept_one(fds[i].fd);
     }
+
     printf("nylm: shutting down\n");
     fflush(stdout);
-    close(fds[0].fd);
-    if (fds[1].fd >= 0)
-        close(fds[1].fd);
+    for (int i = 0; i < cfg->nlisten; i++)
+        close(fds[i].fd);
     return 0;
 }

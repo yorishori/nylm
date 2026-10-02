@@ -5,5 +5,3 @@ build/
 *.db
 *.db-wal
 *.db-shm
-certs/
-acme/

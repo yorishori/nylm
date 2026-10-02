@@ -1,0 +1,24 @@
+[Unit]
+Description=nylm personal server tools
+Documentation=file:///usr/local/share/nylm/README.md
+Wants=network-online.target
+# Ordering only: harmless if WireGuard is managed some other way.
+After=network-online.target wg-quick@wg0.service
+
+[Service]
+User=nylm
+Group=nylm
+EnvironmentFile=/etc/nylm.conf
+ExecStart=/usr/local/bin/nylm
+WorkingDirectory=/var/lib/nylm
+# If an address in NYLM_LISTEN is not up yet (e.g. wg0), bind fails: retry.
+Restart=on-failure
+RestartSec=5
+
+# No filesystem sandboxing (ProtectSystem=, PrivateTmp=, NoNewPrivileges=)
+# on purpose: those also apply to the root actions run through sudo, which
+# must be able to back up, update and reboot the real system. The limits
+# are: unprivileged user + only the scripts in /usr/local/lib/nylm/actions/.
+
+[Install]
+WantedBy=multi-user.target

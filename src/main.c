@@ -13,7 +13,6 @@
 #include "db.h"
 #include "json.h"
 #include "server.h"
-#include "tls.h"
 
 #define ARENA_SIZE (16 * 1024 * 1024)
 
@@ -89,26 +88,59 @@ static int cmd_set_password(void)
     return 0;
 }
 
-static int cmd_serve(int tls)
+/*
+ * Splits a space- or comma-separated env var and parses each item with
+ * subnet_parse(). For NYLM_LISTEN only bare addresses are accepted.
+ */
+static int parse_list(const char *name, const char *value, struct subnet *out, int max,
+                      int addresses_only)
+{
+    char copy[512];
+    if (snprintf(copy, sizeof copy, "%s", value) >= (int)sizeof copy) {
+        fprintf(stderr, "%s is too long\n", name);
+        return -1;
+    }
+    int n = 0;
+    char *save = NULL;
+    for (char *item = strtok_r(copy, " ,", &save); item != NULL;
+         item = strtok_r(NULL, " ,", &save)) {
+        if (n == max) {
+            fprintf(stderr, "%s: at most %d entries\n", name, max);
+            return -1;
+        }
+        if ((addresses_only && strchr(item, '/') != NULL) || subnet_parse(item, &out[n]) != 0) {
+            fprintf(stderr, "%s: invalid entry '%s'\n", name, item);
+            return -1;
+        }
+        n++;
+    }
+    if (n == 0) {
+        fprintf(stderr, "%s is empty\n", name);
+        return -1;
+    }
+    return n;
+}
+
+static int cmd_serve(void)
 {
     struct server_config cfg = {
         .public_dir = env_or("NYLM_PUBLIC", "public"),
-        .tls = tls,
-        .http_port = parse_port(getenv("NYLM_HTTP_PORT"), 8080),
-        .https_port = parse_port(getenv("NYLM_HTTPS_PORT"), 8443),
-        .acme_dir = env_or("NYLM_ACME_DIR", "acme"),
-        .public_https_port = parse_port(getenv("NYLM_PUBLIC_HTTPS_PORT"), 443),
+        .port = parse_port(getenv("NYLM_PORT"), 8080),
     };
-    if (cfg.http_port < 0 || cfg.https_port < 0 || cfg.public_https_port < 0) {
-        fprintf(stderr, "invalid port in NYLM_*_PORT\n");
+    if (cfg.port < 0) {
+        fprintf(stderr, "invalid NYLM_PORT\n");
         return 1;
     }
 
-    if (tls && tls_init(env_or("NYLM_CERT", "certs/cert.pem"),
-                        env_or("NYLM_KEY", "certs/key.pem")) != 0) {
-        fprintf(stderr, "TLS setup failed (set NYLM_CERT/NYLM_KEY, or NYLM_TLS=off)\n");
+    struct subnet listen[SERVER_MAX_LISTEN];
+    cfg.nlisten = parse_list("NYLM_LISTEN", env_or("NYLM_LISTEN", "127.0.0.1"), listen,
+                             SERVER_MAX_LISTEN, 1);
+    cfg.nallow = parse_list("NYLM_ALLOW", env_or("NYLM_ALLOW", "127.0.0.0/8"), cfg.allow,
+                            SERVER_MAX_ALLOW, 0);
+    if (cfg.nlisten < 0 || cfg.nallow < 0)
         return 1;
-    }
+    for (int i = 0; i < cfg.nlisten; i++)
+        cfg.listen[i] = listen[i].addr;
 
     if (arena_init(ARENA_SIZE) != 0) {
         fprintf(stderr, "out of memory\n");
@@ -129,11 +161,11 @@ static void usage(void)
             "       nylm set-password    set the login password (reads stdin)\n"
             "\n"
             "environment (defaults in brackets):\n"
-            "  NYLM_DB [nylm.db]  NYLM_PUBLIC [public]  NYLM_TLS [on] | off\n"
-            "  NYLM_HTTP_PORT [8080]   app when TLS is off, else redirect + ACME\n"
-            "  NYLM_HTTPS_PORT [8443]  app when TLS is on\n"
-            "  NYLM_CERT [certs/cert.pem]  NYLM_KEY [certs/key.pem]\n"
-            "  NYLM_ACME_DIR [acme]  NYLM_PUBLIC_HTTPS_PORT [443]\n");
+            "  NYLM_DB      [nylm.db]      SQLite database file\n"
+            "  NYLM_PUBLIC  [public]       static files directory\n"
+            "  NYLM_PORT    [8080]         port to listen on\n"
+            "  NYLM_LISTEN  [127.0.0.1]    addresses to listen on, e.g. \"10.0.0.1 192.168.1.5\"\n"
+            "  NYLM_ALLOW   [127.0.0.0/8]  client subnets accepted, e.g. \"10.0.0.0/24 192.168.1.0/24\"\n");
 }
 
 int main(int argc, char **argv)
@@ -147,13 +179,10 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    int tls = strcmp(env_or("NYLM_TLS", "on"), "off") != 0;
-    auth_set_secure_cookie(tls);
-
     if (db_open(env_or("NYLM_DB", "nylm.db")) != 0)
         return 1;
 
-    int rc = argc == 2 ? cmd_set_password() : cmd_serve(tls);
+    int rc = argc == 2 ? cmd_set_password() : cmd_serve();
     db_close();
     return rc;
 }

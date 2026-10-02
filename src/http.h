@@ -40,9 +40,6 @@ struct response {
     size_t nextra;
 };
 
-/* Settings that apply to every response. */
-void http_set_hsts(int on);
-
 /*
  * Parses the request head in buf (len bytes, ending in "\r\n\r\n") into req.
  * Modifies buf in place. Returns 0 on success or the HTTP status to reply with.

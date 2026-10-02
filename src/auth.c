@@ -25,13 +25,6 @@
 
 #define SESSION_SECONDS (7 * 24 * 60 * 60)
 
-static int secure_cookie = 1;
-
-void auth_set_secure_cookie(int on)
-{
-    secure_cookie = on;
-}
-
 static int argon2id(const char *password, const unsigned char *salt, uint32_t memcost,
                     uint32_t iterations, unsigned char out[HASH_LEN])
 {
@@ -217,8 +210,9 @@ int auth_start_session(struct response *res)
     char *cookie = arena_alloc(256);
     if (cookie == NULL)
         return -1;
-    snprintf(cookie, 256, "%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Strict%s",
-             AUTH_COOKIE, hex, SESSION_SECONDS, secure_cookie ? "; Secure" : "");
+    /* No Secure attribute: nylm is plain HTTP, reachable only via LAN/WireGuard. */
+    snprintf(cookie, 256, "%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Strict",
+             AUTH_COOKIE, hex, SESSION_SECONDS);
     http_add_header(res, "Set-Cookie", cookie);
     return 0;
 }
@@ -235,9 +229,7 @@ void auth_end_session(const struct request *req, struct response *res)
         }
     }
     http_add_header(res, "Set-Cookie",
-                    secure_cookie
-                        ? AUTH_COOKIE "=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict; Secure"
-                        : AUTH_COOKIE "=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict");
+                    AUTH_COOKIE "=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict");
 }
 
 int auth_session_valid(const struct request *req)

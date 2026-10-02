@@ -1,4 +1,4 @@
-/* Small pure functions: cookie parsing, redirect targets, arena. */
+/* Small pure functions: cookie parsing, subnets, arena. */
 
 #include "../src/arena.h"
 #include "../src/auth.h"
@@ -28,22 +28,43 @@ static void test_cookies(void)
     CHECK(cookie("; ;", "nylm_session") == NULL);
 }
 
-static void test_redirects(void)
+static uint32_t ip(int a, int b, int c, int d)
 {
-    CHECK_STR(server_redirect_location("example.com", "/", "", 443), "https://example.com/");
-    CHECK_STR(server_redirect_location("example.com:80", "/a", "x=1", 443),
-              "https://example.com/a?x=1");
-    CHECK_STR(server_redirect_location("localhost:8080", "/a b", "", 8443),
-              "https://localhost:8443/a%20b");
-    CHECK_STR(server_redirect_location("h", "/\"<x>", "q=\t", 443),
-              "https://h/%22%3Cx%3E?q=%09");
+    return (uint32_t)a << 24 | (uint32_t)b << 16 | (uint32_t)c << 8 | (uint32_t)d;
+}
 
-    CHECK(server_redirect_location(NULL, "/", "", 443) == NULL);
-    CHECK(server_redirect_location("", "/", "", 443) == NULL);
-    CHECK(server_redirect_location(":443", "/", "", 443) == NULL);
-    CHECK(server_redirect_location("evil.com/x", "/", "", 443) == NULL);
-    CHECK(server_redirect_location("a b", "/", "", 443) == NULL);
-    CHECK(server_redirect_location("[::1]", "/", "", 443) == NULL);
+static void test_subnets(void)
+{
+    struct subnet s;
+
+    CHECK(subnet_parse("10.0.0.0/24", &s) == 0);
+    CHECK(s.addr == ip(10, 0, 0, 0) && s.mask == 0xffffff00u);
+    CHECK(subnet_parse("192.168.1.37/24", &s) == 0); /* host bits dropped */
+    CHECK(s.addr == ip(192, 168, 1, 0));
+    CHECK(subnet_parse("10.0.0.1", &s) == 0);
+    CHECK(s.addr == ip(10, 0, 0, 1) && s.mask == 0xffffffffu);
+    CHECK(subnet_parse("0.0.0.0/0", &s) == 0);
+    CHECK(s.mask == 0);
+
+    CHECK(subnet_parse("", &s) == -1);
+    CHECK(subnet_parse("10.0.0.0/", &s) == -1);
+    CHECK(subnet_parse("10.0.0.0/33", &s) == -1);
+    CHECK(subnet_parse("10.0.0.0/-1", &s) == -1);
+    CHECK(subnet_parse("10.0.0.0/2x", &s) == -1);
+    CHECK(subnet_parse("10.0.0/24", &s) == -1);
+    CHECK(subnet_parse("10.0.0.256", &s) == -1);
+    CHECK(subnet_parse("example.com", &s) == -1);
+    CHECK(subnet_parse("::1", &s) == -1);
+
+    struct subnet list[2];
+    subnet_parse("10.0.0.0/24", &list[0]);
+    subnet_parse("192.168.1.0/24", &list[1]);
+    CHECK(subnet_allowed(list, 2, ip(10, 0, 0, 2)));
+    CHECK(subnet_allowed(list, 2, ip(192, 168, 1, 200)));
+    CHECK(!subnet_allowed(list, 2, ip(10, 0, 1, 2)));
+    CHECK(!subnet_allowed(list, 2, ip(192, 168, 2, 1)));
+    CHECK(!subnet_allowed(list, 2, ip(8, 8, 8, 8)));
+    CHECK(!subnet_allowed(list, 0, ip(10, 0, 0, 2)));
 }
 
 static void test_arena(void)
@@ -65,7 +86,7 @@ int main(void)
     if (arena_init(64 * 1024) != 0)
         return 1;
     test_cookies();
-    test_redirects();
+    test_subnets();
     test_arena();
     TEST_DONE();
 }

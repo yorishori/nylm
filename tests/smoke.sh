@@ -1,11 +1,11 @@
 #!/bin/sh
-# End-to-end checks against a running server: plain HTTP mode, then TLS mode.
+# End-to-end checks against a running server: the API and static files, then
+# listen addresses and the client allowlist.
 # Usage: tests/smoke.sh [binary]   (default: ./nylm-debug, which has sanitizers)
 set -u
 
 BIN=${1:-./nylm-debug}
-HTTP_PORT=18080
-HTTPS_PORT=18443
+PORT=18080
 TMP=$(mktemp -d)
 PID=
 FAILED=0
@@ -17,8 +17,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-export NYLM_DB="$TMP/nylm.db" NYLM_PUBLIC=public NYLM_ACME_DIR="$TMP/acme"
-export NYLM_HTTP_PORT=$HTTP_PORT NYLM_HTTPS_PORT=$HTTPS_PORT NYLM_PUBLIC_HTTPS_PORT=$HTTPS_PORT
+export NYLM_DB="$TMP/nylm.db" NYLM_PUBLIC=public NYLM_PORT=$PORT
 
 # expect STATUS DESCRIPTION curl-args...
 expect() {
@@ -45,11 +44,14 @@ expect_header() {
     fi
 }
 
+# start URL [curl-args...]: runs the server, waits until URL answers.
 start() {
+    url=$1
+    shift
     "$BIN" >"$TMP/log" 2>&1 &
     PID=$!
     i=0
-    while ! curl -sk -o /dev/null "$1" 2>/dev/null; do
+    while ! curl -s -o /dev/null "$@" "$url" 2>/dev/null; do
         i=$((i + 1))
         if [ $i -gt 100 ]; then
             echo "server did not start:"; cat "$TMP/log"; exit 1
@@ -72,11 +74,10 @@ stop() {
 echo 'smoke test password' | "$BIN" set-password 2>/dev/null ||
     { echo "set-password failed"; exit 1; }
 
-# ---- plain HTTP mode -------------------------------------------------------
+# ---- API and static files (defaults: 127.0.0.1, allow 127.0.0.0/8) ---------
 
-export NYLM_TLS=off
-start "http://localhost:$HTTP_PORT/"
-B="http://localhost:$HTTP_PORT"
+start "http://127.0.0.1:$PORT/"
+B="http://127.0.0.1:$PORT"
 J="Content-Type: application/json"
 JAR="$TMP/cookies"
 
@@ -120,31 +121,17 @@ expect 401 "after logout"       -b "$JAR" "$B/api/notes"
 
 stop
 
-# ---- TLS mode ---------------------------------------------------------------
+# ---- listen addresses and client allowlist ----------------------------------
 
-export NYLM_TLS=on NYLM_CERT="$TMP/cert.pem" NYLM_KEY="$TMP/key.pem"
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 1 \
-    -subj /CN=localhost -addext subjectAltName=DNS:localhost \
-    -keyout "$NYLM_KEY" -out "$NYLM_CERT" 2>/dev/null
-mkdir -p "$TMP/acme/.well-known/acme-challenge"
-echo token-content > "$TMP/acme/.well-known/acme-challenge/abc_DEF-123"
+# Two loopback addresses stand in for the WireGuard and LAN interfaces.
+export NYLM_LISTEN="127.0.0.1 127.0.0.2" NYLM_ALLOW=127.0.0.2/32
+start "http://127.0.0.2:$PORT/" --interface 127.0.0.2
 
-start "https://localhost:$HTTPS_PORT/"
-S="https://localhost:$HTTPS_PORT"
-H="http://localhost:$HTTP_PORT"
-CA="--cacert $NYLM_CERT"
-
-expect 200 "https index"        $CA "$S/"
-expect 200 "https health"       $CA "$S/api/health"
-expect_header "strict-transport-security" "HSTS" $CA "$S/"
-expect_header "set-cookie: .*; Secure" "Secure cookie" $CA -H "$J" \
-    -d '{"password":"smoke test password"}' "$S/api/login"
-expect 000 "TLS 1.1 refused"    $CA --tlsv1.1 --tls-max 1.1 "$S/"
-expect 301 "http redirects"     "$H/some/page"
-expect_header "location: https://localhost:$HTTPS_PORT/some/page" "redirect target" "$H/some/page"
-expect 200 "acme challenge"     "$H/.well-known/acme-challenge/abc_DEF-123"
-expect 404 "acme traversal"     --path-as-is "$H/.well-known/acme-challenge/../../x"
-expect 400 "bad Host"           -H "Host: a/b" "$H/"
+expect 200 "second listen address"     --interface 127.0.0.2 "http://127.0.0.2:$PORT/api/health"
+expect 000 "client outside NYLM_ALLOW" --interface 127.0.0.1 "http://127.0.0.1:$PORT/api/health"
+expect 000 "address not listened on"   "http://127.0.0.3:$PORT/api/health"
+if grep -q "127.0.0.1 rejected" "$TMP/log"; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: rejection not logged"; fi
 
 stop
 

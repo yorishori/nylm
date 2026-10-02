@@ -1,78 +1,72 @@
-# Deploying nylm
+# Running nylm on the server
 
-Everything runs in one container. The host provides a domain, certificates
-(certbot) and a firewall.
+nylm runs directly on the host (Arch Linux) as a systemd service, under its
+own unprivileged `nylm` user. It is reachable only from WireGuard and the
+home LAN.
 
-## 1. Host prerequisites
-
-- A domain (below: `nylm.example.com`) with an A record pointing to the server.
-- Docker with the compose plugin, and `certbot` (Debian: `apt install certbot`).
-- Firewall: only ports 80 and 443 (plus SSH) open.
+## Install / update
 
 ```sh
-sudo mkdir -p /srv/nylm/acme
-sudo cp deploy/certbot-deploy-hook.sh /etc/letsencrypt/renewal-hooks/deploy/nylm.sh
+git clone <repo> ~/nylm && cd ~/nylm
+sudo deploy/install.sh
 ```
 
-## 2. First certificate
+The script installs build dependencies, builds, runs the tests, creates the
+`nylm` user, installs the files, writes `/etc/nylm.conf` (first run only),
+asks for the login password (first run only), and starts the service.
 
-nylm needs a certificate to start, so the first one is fetched with certbot's
-own temporary web server (`--standalone`) while port 80 is still free:
+To update: `git pull && sudo deploy/install.sh`.
 
-```sh
-sudo certbot certonly --standalone -d nylm.example.com
-```
+## Where things are
 
-The deploy hook copies the cert into `/srv/nylm/certs`. Then switch renewals
-to webroot mode, so nylm can keep running while certbot renews (nylm serves
-`/.well-known/acme-challenge/` from `/srv/nylm/acme` on port 80):
+| Path                              | What                                       |
+|-----------------------------------|--------------------------------------------|
+| `/usr/local/bin/nylm`             | the binary                                 |
+| `/usr/local/share/nylm/public/`   | frontend files                             |
+| `/etc/nylm.conf`                  | configuration (ports, addresses, paths)    |
+| `/var/lib/nylm/nylm.db`           | database (owned by `nylm`, mode 700 dir)   |
+| `/usr/local/lib/nylm/actions/`    | root-owned scripts nylm may run via sudo   |
+| `/etc/sudoers.d/nylm`             | the rule allowing exactly that             |
+| `/etc/systemd/system/nylm.service`| the service                                |
 
-```sh
-sudo certbot reconfigure --cert-name nylm.example.com --webroot -w /srv/nylm/acme
-```
+## Who can reach it
 
-## 3. Start nylm
+Three independent layers:
 
-```sh
-docker compose up -d --build
-docker compose exec nylm nylm set-password     # prompts twice, no echo
-```
+1. **Bind:** nylm listens only on the addresses in `NYLM_LISTEN` (the
+   WireGuard address and the LAN address), never on `0.0.0.0`. Do not
+   port-forward nylm's port on the router.
+2. **Allowlist:** connections whose source is not in `NYLM_ALLOW` (the
+   WireGuard and LAN subnets) are closed before a byte is read, and logged.
+3. **Login:** password + session cookie.
 
-Open `https://nylm.example.com`.
+Traffic is plain HTTP. Over WireGuard it is encrypted by the tunnel; on the
+home LAN it is not, so anyone on that network could read it. If that is a
+concern, use WireGuard from the PC too and drop the LAN address from both
+settings.
 
-## 4. Renewals
+## What nylm can do as root
 
-Debian's certbot package installs a systemd timer that renews twice a day
-when needed. After each renewal the deploy hook copies the new files and
-runs `docker restart nylm`. Check with:
-
-```sh
-sudo certbot renew --dry-run
-```
+Only run programs directly inside `/usr/local/lib/nylm/actions/`, via
+`sudo -n`. That folder is root-owned and not writable by `nylm`. Actions live
+in `deploy/actions/` in the repo and are installed by `install.sh`. Every
+action must validate its own arguments.
 
 ## Operations
 
-| Task               | Command                                              |
-|--------------------|------------------------------------------------------|
-| Logs               | `docker compose logs -f nylm`                        |
-| Change password    | `docker compose exec nylm nylm set-password`         |
-| Update             | `git pull && docker compose up -d --build`           |
-| Back up the DB     | see below                                            |
+| Task             | Command                                                     |
+|------------------|-------------------------------------------------------------|
+| Logs             | `journalctl -u nylm -f`                                     |
+| Status           | `systemctl status nylm`                                     |
+| Change password  | `sudo -u nylm env NYLM_DB=/var/lib/nylm/nylm.db nylm set-password` |
+| Edit config      | edit `/etc/nylm.conf`, then `sudo systemctl restart nylm`   |
+| Back up the DB   | `sudo sqlite3 /var/lib/nylm/nylm.db ".backup /path/nylm.db"` (needs `sqlite`) |
 
-Backup without stopping (SQLite's online backup via a throwaway container):
-
-```sh
-docker run --rm -v nylm_nylm-data:/data -v "$PWD":/out debian:trixie-slim \
-  sh -c 'apt-get update -qq && apt-get install -yqq sqlite3 >/dev/null && \
-         sqlite3 /data/nylm.db ".backup /out/nylm-backup.db"'
-```
-
-OpenSSL security fixes arrive by rebuilding on a fresh base image:
-`docker compose build --pull && docker compose up -d`.
-
-## Local development
+## Uninstall
 
 ```sh
-make run                  # debug build, plain http://localhost:8080
-make cert && ./nylm-debug # HTTPS with a self-signed cert on https://localhost:8443
+sudo systemctl disable --now nylm
+sudo rm -rf /etc/systemd/system/nylm.service /etc/sudoers.d/nylm /etc/nylm.conf \
+    /usr/local/bin/nylm /usr/local/share/nylm /usr/local/lib/nylm
+sudo userdel nylm            # and /var/lib/nylm if the data should go too
 ```

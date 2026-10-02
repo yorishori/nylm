@@ -2,7 +2,7 @@ CC      = gcc
 CFLAGS  = -std=c11 -Wall -Wextra -Werror -Wpedantic -Wshadow -Wconversion -MMD -MP \
           -isystem vendor/cjson -isystem vendor/sqlite
 LDFLAGS =
-LDLIBS  = -lssl -lcrypto -lm
+LDLIBS  = -lcrypto -lm
 
 SRC = $(wildcard src/*.c)
 
@@ -69,21 +69,13 @@ test: nylm-debug $(TEST_BIN)
 	@for t in $(TEST_BIN); do $$t || exit 1; done
 	tests/smoke.sh ./nylm-debug
 
-# Development server over plain HTTP on :8080.
+# Development server on http://127.0.0.1:8080.
 run: nylm-debug
-	NYLM_TLS=off ./nylm-debug
+	./nylm-debug
 
 clean:
 	rm -rf build nylm nylm-debug
 
-.PHONY: release debug run clean cert test
+.PHONY: release debug run clean test
 
 -include $(REL_OBJ:.o=.d) $(DBG_OBJ:.o=.d)
-
-# Self-signed certificate for local development over HTTPS.
-cert:
-	@mkdir -p certs
-	openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
-		-days 365 -subj /CN=localhost \
-		-addext subjectAltName=DNS:localhost,IP:127.0.0.1 \
-		-keyout certs/key.pem -out certs/cert.pem

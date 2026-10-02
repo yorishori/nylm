@@ -1,9 +1,0 @@
-.git
-build
-nylm
-nylm-debug
-*.db
-*.db-*
-certs
-acme
-data

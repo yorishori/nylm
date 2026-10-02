@@ -9,13 +9,6 @@
 
 #include "arena.h"
 
-static int hsts;
-
-void http_set_hsts(int on)
-{
-    hsts = on;
-}
-
 /* RFC 9110 token characters (header names). */
 static int is_tchar(char c)
 {
@@ -305,11 +298,9 @@ long http_send(struct conn *c, const struct response *res)
         "X-Content-Type-Options: nosniff\r\n"
         "Referrer-Policy: no-referrer\r\n"
         "Content-Security-Policy: default-src 'self'; frame-ancestors 'none'; "
-        "base-uri 'none'; form-action 'self'\r\n"
-        "%s",
+        "base-uri 'none'; form-action 'self'\r\n",
         res->status, http_status_text(res->status), body_len,
-        res->cache_control ? res->cache_control : "no-store",
-        hsts ? "Strict-Transport-Security: max-age=31536000\r\n" : "");
+        res->cache_control ? res->cache_control : "no-store");
     if (res->content_type != NULL && n > 0 && (size_t)n < sizeof head)
         n += snprintf(head + n, sizeof head - (size_t)n, "Content-Type: %s\r\n",
                       res->content_type);
