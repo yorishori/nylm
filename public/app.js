@@ -54,81 +54,11 @@ async function api(method, path, body) {
   return data;
 }
 
-function formatTime(unixSeconds) {
-  return new Date(unixSeconds * 1000).toLocaleString();
-}
+/* ---- home ------------------------------------------------------------- */
 
-/* ---- notes (example feature) ------------------------------------------ */
-
-const notes = {
-  items: [],
-  selected: null, /* id of the note in the editor, or null for a new one */
-};
-
-async function loadNotes() {
-  notes.items = await api("GET", "/api/notes");
-}
-
-function renderNotes() {
-  const current = notes.items.find((n) => n.id === notes.selected);
-
-  const list = el("ul", { class: "list" },
-    ...notes.items.map((n) =>
-      el("li", {},
-        el("button", {
-          "aria-current": n.id === notes.selected ? "true" : "false",
-          title: n.title,
-          onclick: () => { notes.selected = n.id; renderNotes(); },
-        }, n.title))));
-
-  const title = el("input", { name: "title", maxlength: "200", required: true,
-                              value: current ? current.title : "" });
-  const body = el("textarea", { name: "body", maxlength: "10000" });
-  body.value = current ? current.body : "";
-
-  const form = el("form", { onsubmit: (e) => { e.preventDefault(); saveNote(title.value, body.value); } },
-    el("label", {}, el("span", {}, "title"), title),
-    el("label", {}, el("span", {}, "body"), body),
-    el("div", { class: "actions" },
-      el("button", { class: "btn primary", type: "submit" }, current ? "save" : "create"),
-      el("button", { class: "btn", type: "button",
-                     onclick: () => { notes.selected = null; renderNotes(); } }, "new"),
-      current && el("button", { class: "btn danger", type: "button",
-                                onclick: () => deleteNote(current.id) }, "delete")),
-    current && el("p", { class: "empty" }, "updated " + formatTime(current.updated_at)));
-
-  app.replaceChildren(
-    el("div", { class: "split" },
-      el("section", { class: "panel" },
-        notes.items.length ? list : el("p", { class: "empty" }, "no notes yet")),
-      el("section", { class: "panel" }, form)));
-}
-
-async function saveNote(title, body) {
-  try {
-    const saved = notes.selected === null
-      ? await api("POST", "/api/notes", { title, body })
-      : await api("PUT", "/api/notes/" + notes.selected, { title, body });
-    notes.selected = saved.id;
-    await loadNotes();
-    renderNotes();
-    setStatus("saved");
-  } catch (err) {
-    handleError(err);
-  }
-}
-
-async function deleteNote(id) {
-  if (!confirm("Delete this note?")) return;
-  try {
-    await api("DELETE", "/api/notes/" + id);
-    notes.selected = null;
-    await loadNotes();
-    renderNotes();
-    setStatus("deleted");
-  } catch (err) {
-    handleError(err);
-  }
+function renderHome() {
+  logoutButton.hidden = false;
+  app.replaceChildren(el("section", { class: "panel" }, "Logged in. No tools yet."));
 }
 
 /* ---- session ---------------------------------------------------------- */
@@ -167,10 +97,11 @@ function renderLogin() {
 logoutButton.addEventListener("click", async () => {
   try {
     await api("POST", "/api/logout");
+    setStatus("logged out");
   } catch (err) {
-    /* logged out either way */
+    setStatus("logout failed: " + err.message, true);
+    return;
   }
-  setStatus("logged out");
   renderLogin();
 });
 
@@ -188,9 +119,8 @@ function handleError(err) {
 
 async function start() {
   try {
-    await loadNotes();
-    logoutButton.hidden = false;
-    renderNotes();
+    await api("GET", "/api/session");
+    renderHome();
   } catch (err) {
     handleError(err);
   }

@@ -46,58 +46,26 @@ html, body {
 
 main { padding: 1rem; }
 
-/* Two panes: list on the left, editor on the right. */
-.split {
-  display: grid;
-  grid-template-columns: minmax(12rem, 18rem) 1fr;
-  gap: 1rem;
-  align-items: start;
-}
-@media (max-width: 40rem) {
-  .split { grid-template-columns: 1fr; }
-}
-
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
   padding: 0.75rem;
 }
 
-.list { list-style: none; margin: 0; padding: 0; }
-.list li + li { border-top: 1px dotted var(--line); }
-.list button {
-  display: block;
-  width: 100%;
-  text-align: left;
-  padding: 0.35rem 0.25rem;
-  border: 0;
-  background: none;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.list button:hover { color: var(--accent); }
-.list button[aria-current="true"] { color: var(--accent); font-weight: bold; }
-.empty { color: var(--muted); }
-
 label { display: block; margin: 0 0 0.75rem; }
 label span { display: block; color: var(--muted); font-size: 0.85em; }
 
-input, textarea, button {
+input, button {
   font: inherit;
   color: inherit;
 }
-input, textarea {
+input {
   width: 100%;
   padding: 0.35rem 0.5rem;
   border: 1px solid var(--line);
   background: var(--bg);
 }
-textarea { min-height: 16rem; resize: vertical; }
-input:focus, textarea:focus, button:focus-visible {
+input:focus, button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
@@ -111,7 +79,6 @@ input:focus, textarea:focus, button:focus-visible {
 }
 .btn:hover { border-color: var(--accent); }
 .btn.primary { border-color: var(--accent); color: var(--accent); }
-.btn.danger { color: var(--danger); }
 .btn:disabled { opacity: 0.5; cursor: default; }
 
 .login { max-width: 22rem; margin: 3rem auto; }

@@ -25,7 +25,6 @@ struct request {
     size_t content_length;
     char *body;        /* NUL-terminated, NULL if no body */
     size_t body_len;
-    const char *param; /* set by the router: path rest for prefix routes */
 };
 
 struct response {
