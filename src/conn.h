@@ -4,9 +4,12 @@
 #include <stddef.h>
 #include <sys/types.h>
 
+#include <openssl/ssl.h>
+
 /* One client connection. All socket I/O goes through here. */
 struct conn {
     int fd;
+    SSL *ssl;        /* NULL for plain HTTP */
     char ip[46];     /* client address, for the log */
     double deadline; /* monotonic time after which reads/writes fail */
 };
@@ -22,6 +25,7 @@ ssize_t conn_read(struct conn *c, void *buf, size_t len);
 /* Writes everything or returns -1. */
 int conn_write(struct conn *c, const void *buf, size_t len);
 
+/* Shuts down TLS (if any) and closes the socket. */
 void conn_close(struct conn *c);
 
 #endif

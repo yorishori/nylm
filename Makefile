@@ -2,7 +2,7 @@ CC      = gcc
 CFLAGS  = -std=c11 -Wall -Wextra -Werror -Wpedantic -Wshadow -Wconversion -MMD -MP \
           -isystem vendor/cjson -isystem vendor/sqlite
 LDFLAGS =
-LDLIBS  = -lcrypto -lm
+LDLIBS  = -lssl -lcrypto -lm
 
 SRC = $(wildcard src/*.c)
 
@@ -62,6 +62,14 @@ run: nylm-debug
 clean:
 	rm -rf build nylm nylm-debug
 
-.PHONY: release debug run clean
+.PHONY: release debug run clean cert
 
 -include $(REL_OBJ:.o=.d) $(DBG_OBJ:.o=.d)
+
+# Self-signed certificate for local development over HTTPS.
+cert:
+	@mkdir -p certs
+	openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes \
+		-days 365 -subj /CN=localhost \
+		-addext subjectAltName=DNS:localhost,IP:127.0.0.1 \
+		-keyout certs/key.pem -out certs/cert.pem

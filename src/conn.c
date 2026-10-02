@@ -3,6 +3,7 @@
 #include "conn.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -25,6 +26,7 @@ double now_seconds(void)
 void conn_init(struct conn *c, int fd, const char *ip)
 {
     c->fd = fd;
+    c->ssl = NULL;
     snprintf(c->ip, sizeof c->ip, "%s", ip);
     c->deadline = now_seconds() + REQUEST_SECONDS;
 
@@ -38,6 +40,12 @@ ssize_t conn_read(struct conn *c, void *buf, size_t len)
     for (;;) {
         if (now_seconds() > c->deadline)
             return -1;
+        if (c->ssl != NULL) {
+            if (len > INT_MAX)
+                len = INT_MAX;
+            int n = SSL_read(c->ssl, buf, (int)len);
+            return n > 0 ? n : (SSL_get_error(c->ssl, n) == SSL_ERROR_ZERO_RETURN ? 0 : -1);
+        }
         ssize_t n = read(c->fd, buf, len);
         if (n < 0 && errno == EINTR)
             continue;
@@ -51,7 +59,16 @@ int conn_write(struct conn *c, const void *buf, size_t len)
     while (len > 0) {
         if (now_seconds() > c->deadline)
             return -1;
-        ssize_t n = write(c->fd, p, len);
+        ssize_t n;
+        if (c->ssl != NULL) {
+            int chunk = len > INT_MAX ? INT_MAX : (int)len;
+            int w = SSL_write(c->ssl, p, chunk);
+            if (w <= 0)
+                return -1;
+            n = w;
+        } else {
+            n = write(c->fd, p, len);
+        }
         if (n < 0) {
             if (errno == EINTR)
                 continue;
@@ -65,6 +82,11 @@ int conn_write(struct conn *c, const void *buf, size_t len)
 
 void conn_close(struct conn *c)
 {
+    if (c->ssl != NULL) {
+        SSL_shutdown(c->ssl); /* send close_notify; don't wait for the reply */
+        SSL_free(c->ssl);
+        c->ssl = NULL;
+    }
     close(c->fd);
     c->fd = -1;
 }

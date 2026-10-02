@@ -1,30 +1,23 @@
 #define _POSIX_C_SOURCE 200809L
 
-#include <arpa/inet.h>
 #include <errno.h>
-#include <netinet/in.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
 #include <termios.h>
 #include <unistd.h>
 
 #include "arena.h"
 #include "auth.h"
-#include "conn.h"
 #include "db.h"
-#include "http.h"
 #include "json.h"
-#include "router.h"
-#include "static.h"
+#include "server.h"
+#include "tls.h"
 
-#define DEFAULT_PORT 8080
-#define ARENA_SIZE   (16 * 1024 * 1024)
+#define ARENA_SIZE (16 * 1024 * 1024)
 
-static const char *public_dir;
-
+/* Port from an env var value; fallback if unset, -1 if invalid. */
 static int parse_port(const char *s, int fallback)
 {
     if (s == NULL || *s == '\0')
@@ -36,88 +29,6 @@ static int parse_port(const char *s, int fallback)
     if (errno != 0 || *end != '\0' || port < 1 || port > 65535)
         return -1;
     return (int)port;
-}
-
-static int listen_on(int port)
-{
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        perror("socket");
-        return -1;
-    }
-
-    int one = 1;
-    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) < 0) {
-        perror("setsockopt");
-        close(fd);
-        return -1;
-    }
-
-    struct sockaddr_in addr = {
-        .sin_family = AF_INET,
-        .sin_port = htons((uint16_t)port),
-        .sin_addr.s_addr = htonl(INADDR_ANY),
-    };
-    if (bind(fd, (struct sockaddr *)&addr, sizeof addr) < 0) {
-        perror("bind");
-        close(fd);
-        return -1;
-    }
-
-    if (listen(fd, 16) < 0) {
-        perror("listen");
-        close(fd);
-        return -1;
-    }
-    return fd;
-}
-
-static void handle(struct request *req, struct response *res)
-{
-    if (strncmp(req->path, "/api/", 5) == 0) {
-        router_dispatch(req, res);
-    } else if (strcmp(req->method, "GET") == 0) {
-        static_serve(public_dir, req->path, res);
-    } else {
-        http_text(res, 405, "405 Method Not Allowed\n");
-        http_add_header(res, "Allow", "GET");
-    }
-}
-
-static void serve(int client, const char *ip)
-{
-    double start = now_seconds();
-    struct conn c;
-    conn_init(&c, client, ip);
-
-    struct request req;
-    struct response res;
-    http_response_init(&res);
-
-    int status = http_read_request(&c, &req);
-    if (status < 0) {
-        conn_close(&c);
-        return;
-    }
-    if (status > 0) {
-        char *text = arena_alloc(64);
-        if (text != NULL)
-            snprintf(text, 64, "%d %s\n", status, http_status_text(status));
-        http_text(&res, status, text != NULL ? text : "error\n");
-        req.method = "-";
-        req.path = "-";
-    } else {
-        handle(&req, &res);
-    }
-
-    long sent = http_send(&c, &res);
-    if (res.file_fd >= 0)
-        close(res.file_fd);
-    conn_close(&c);
-
-    printf("%s %s %s %d %ld %.1fms\n", ip, req.method, req.path, res.status, sent,
-           (now_seconds() - start) * 1000.0);
-    fflush(stdout);
 }
 
 static const char *env_or(const char *name, const char *fallback)
@@ -178,11 +89,24 @@ static int cmd_set_password(void)
     return 0;
 }
 
-static int cmd_serve(void)
+static int cmd_serve(int tls)
 {
-    int port = parse_port(getenv("NYLM_PORT"), DEFAULT_PORT);
-    if (port < 0) {
-        fprintf(stderr, "invalid NYLM_PORT\n");
+    struct server_config cfg = {
+        .public_dir = env_or("NYLM_PUBLIC", "public"),
+        .tls = tls,
+        .http_port = parse_port(getenv("NYLM_HTTP_PORT"), 8080),
+        .https_port = parse_port(getenv("NYLM_HTTPS_PORT"), 8443),
+        .acme_dir = env_or("NYLM_ACME_DIR", "acme"),
+        .public_https_port = parse_port(getenv("NYLM_PUBLIC_HTTPS_PORT"), 443),
+    };
+    if (cfg.http_port < 0 || cfg.https_port < 0 || cfg.public_https_port < 0) {
+        fprintf(stderr, "invalid port in NYLM_*_PORT\n");
+        return 1;
+    }
+
+    if (tls && tls_init(env_or("NYLM_CERT", "certs/cert.pem"),
+                        env_or("NYLM_KEY", "certs/key.pem")) != 0) {
+        fprintf(stderr, "TLS setup failed (set NYLM_CERT/NYLM_KEY, or NYLM_TLS=off)\n");
         return 1;
     }
 
@@ -195,35 +119,22 @@ static int cmd_serve(void)
     /* A client closing early must not kill the server. */
     signal(SIGPIPE, SIG_IGN);
 
-    int server = listen_on(port);
-    if (server < 0)
-        return 1;
-
-    printf("nylm listening on port %d\n", port);
-    fflush(stdout);
-
-    for (;;) {
-        struct sockaddr_in addr;
-        socklen_t addr_len = sizeof addr;
-        int client = accept(server, (struct sockaddr *)&addr, &addr_len);
-        if (client < 0) {
-            if (errno != EINTR)
-                perror("accept");
-            continue;
-        }
-        char ip[INET_ADDRSTRLEN] = "?";
-        inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof ip);
-
-        serve(client, ip);
-        arena_reset();
-    }
+    server_run(&cfg);
+    return 1;
 }
 
 static void usage(void)
 {
     fprintf(stderr,
             "usage: nylm                 run the server\n"
-            "       nylm set-password    set the login password (reads stdin)\n");
+            "       nylm set-password    set the login password (reads stdin)\n"
+            "\n"
+            "environment (defaults in brackets):\n"
+            "  NYLM_DB [nylm.db]  NYLM_PUBLIC [public]  NYLM_TLS [on] | off\n"
+            "  NYLM_HTTP_PORT [8080]   app when TLS is off, else redirect + ACME\n"
+            "  NYLM_HTTPS_PORT [8443]  app when TLS is on\n"
+            "  NYLM_CERT [certs/cert.pem]  NYLM_KEY [certs/key.pem]\n"
+            "  NYLM_ACME_DIR [acme]  NYLM_PUBLIC_HTTPS_PORT [443]\n");
 }
 
 int main(int argc, char **argv)
@@ -233,14 +144,13 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    public_dir = env_or("NYLM_PUBLIC", "public");
     int tls = strcmp(env_or("NYLM_TLS", "on"), "off") != 0;
     auth_set_secure_cookie(tls);
 
     if (db_open(env_or("NYLM_DB", "nylm.db")) != 0)
         return 1;
 
-    int rc = argc == 2 ? cmd_set_password() : cmd_serve();
+    int rc = argc == 2 ? cmd_set_password() : cmd_serve(tls);
     db_close();
     return rc;
 }
