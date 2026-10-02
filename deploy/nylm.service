@@ -10,6 +10,7 @@ User=nylm
 Group=nylm
 EnvironmentFile=/etc/nylm.conf
 ExecStart=/usr/local/bin/nylm
+# Holds no data: everything is in NYLM_DATA (see /etc/nylm.conf).
 WorkingDirectory=/var/lib/nylm
 # If an address in NYLM_LISTEN is not up yet (e.g. wg0), bind fails: retry.
 Restart=on-failure

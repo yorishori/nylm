@@ -39,8 +39,25 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 | `deploy/`         | `install.sh`, systemd unit, root action scripts          |
 
 On the server: binary `/usr/local/bin/nylm`, config `/etc/nylm.conf`, data
-`/var/lib/nylm/`, frontend `/usr/local/share/nylm/public/`, actions
+in `NYLM_DATA` (on the data drive), frontend `/usr/local/share/nylm/public/`, actions
 `/usr/local/lib/nylm/actions/`, sudo rule `/etc/sudoers.d/nylm`.
+
+## Data
+
+Everything nylm saves lives in one folder, `NYLM_DATA` in `/etc/nylm.conf`.
+Each app has its own subfolder and SQLite database in it:
+
+```
+$NYLM_DATA/core/core.db       login password and sessions
+$NYLM_DATA/plants/plants.db   plant care
+```
+
+nylm refuses to start if the folder does not exist. In an empty folder it
+creates every app's folder and database: a fresh install (set a password).
+Point `NYLM_DATA` at a folder *inside* the drive (`/mnt/data/nylm`), not at
+the mount point: when the drive is not mounted the folder is missing, so nylm
+stops (and systemd retries) instead of starting empty on the system disk.
+Create the folder and make it writable by user `nylm` before installing.
 
 ## Plants
 
@@ -59,7 +76,8 @@ make run                          # debug build on http://127.0.0.1:8080
 make test                         # unit + end-to-end tests
 sudo deploy/install.sh            # on the server: install or update
 journalctl -u nylm -f             # server logs
-sudo -u nylm env NYLM_DB=/var/lib/nylm/nylm.db nylm set-password
+sudo -u nylm env NYLM_DATA=/mnt/data/nylm nylm set-password
+NYLM_DATA=dev-data ./nylm-debug set-password   # password for make run
 ```
 
 Configuration is environment variables; `nylm --help` lists them.

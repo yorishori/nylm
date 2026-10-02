@@ -169,7 +169,8 @@ static void usage(void)
             "       nylm set-password    set the login password (reads stdin)\n"
             "\n"
             "environment (defaults in brackets):\n"
-            "  NYLM_DB      [nylm.db]      SQLite database file\n"
+            "  NYLM_DATA    (required)     data folder; must exist. Each app gets its own\n"
+            "                              subfolder and database in it\n"
             "  NYLM_PUBLIC  [public]       static files directory\n"
             "  NYLM_PORT    [8080]         port to listen on\n"
             "  NYLM_LISTEN  [127.0.0.1]    addresses to listen on, e.g. \"10.0.0.1 192.168.1.5\"\n"
@@ -187,10 +188,10 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    if (db_open(env_or("NYLM_DB", "nylm.db")) != 0)
+    if (db_open_all(getenv("NYLM_DATA")) != 0)
         return 1;
 
     int rc = argc == 2 ? cmd_set_password() : cmd_serve();
-    db_close();
+    db_close_all();
     return rc;
 }

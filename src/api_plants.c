@@ -36,7 +36,7 @@
  */
 static sqlite3_stmt *vprepare(const char *sql, const char *types, va_list ap)
 {
-    sqlite3_stmt *st = db_prepare(sql);
+    sqlite3_stmt *st = db_prepare(plants_db, sql);
     if (st == NULL)
         return NULL;
     int rc = SQLITE_OK;
@@ -52,7 +52,7 @@ static sqlite3_stmt *vprepare(const char *sql, const char *types, va_list ap)
         }
     }
     if (rc != SQLITE_OK) {
-        db_log_error(sql);
+        db_log_error(plants_db, sql);
         sqlite3_finalize(st);
         return NULL;
     }
@@ -82,7 +82,7 @@ static int run(const char *sql, const char *types, ...)
         return -1;
     int rc = sqlite3_step(st);
     if (rc != SQLITE_DONE && rc != SQLITE_CONSTRAINT)
-        db_log_error(sql);
+        db_log_error(plants_db, sql);
     sqlite3_finalize(st);
     return rc == SQLITE_DONE ? 0 : rc == SQLITE_CONSTRAINT ? 1 : -1;
 }
@@ -99,7 +99,7 @@ static int archived_state(const char *sql, long id)
     int rc = sqlite3_step(st);
     int state = rc == SQLITE_ROW ? 1 + sqlite3_column_int(st, 0) : rc == SQLITE_DONE ? 0 : -1;
     if (state < 0)
-        db_log_error(sql);
+        db_log_error(plants_db, sql);
     sqlite3_finalize(st);
     return state;
 }
@@ -150,7 +150,7 @@ static void reply_created(struct response *res)
     cJSON *out = cJSON_CreateObject();
     /* row ids stay far below 2^53: exact in a double */
     if (out == NULL ||
-        cJSON_AddNumberToObject(out, "id", (double)sqlite3_last_insert_rowid(db)) == NULL) {
+        cJSON_AddNumberToObject(out, "id", (double)sqlite3_last_insert_rowid(plants_db)) == NULL) {
         fprintf(stderr, "plants: out of memory replying with a new id\n");
         json_error(res, 500, "internal error");
         return;
@@ -312,7 +312,7 @@ static int add_rows(cJSON *array, sqlite3_stmt *st)
         }
     }
     if (rc != SQLITE_DONE) {
-        db_log_error(sqlite3_sql(st));
+        db_log_error(plants_db, sqlite3_sql(st));
         return -1;
     }
     return 0;
@@ -377,7 +377,7 @@ void plants_update(struct request *req, struct response *res)
         json_error(res, 500, "internal error");
         return;
     }
-    if (sqlite3_changes(db) == 0) {
+    if (sqlite3_changes(plants_db) == 0) {
         json_error(res, 404, "plant not found");
         return;
     }
@@ -398,7 +398,7 @@ static void set_archived(struct request *req, struct response *res, const char *
         json_error(res, 500, "internal error");
         return;
     }
-    if (sqlite3_changes(db) == 0) {
+    if (sqlite3_changes(plants_db) == 0) {
         json_error(res, 404, not_found);
         return;
     }
@@ -444,7 +444,7 @@ void plants_type_update(struct request *req, struct response *res)
                    rc == 1 ? "a care type with this name exists" : "internal error");
         return;
     }
-    if (sqlite3_changes(db) == 0) {
+    if (sqlite3_changes(plants_db) == 0) {
         json_error(res, 404, "care type not found");
         return;
     }
@@ -527,7 +527,7 @@ static int load_rule(sqlite3_stmt *st, int col, long plant_id, long type_id,
         p->interval = sqlite3_column_int(ps, 4);
     }
     if (rc != SQLITE_DONE)
-        db_log_error("care_periods");
+        db_log_error(plants_db, "care_periods");
     sqlite3_finalize(ps);
     if (rc != SQLITE_DONE)
         return -1;
@@ -633,7 +633,7 @@ void plants_get(struct request *req, struct response *res)
         }
     }
     if (rc != SQLITE_DONE && rc != SQLITE_ROW)
-        db_log_error("plants_get rules");
+        db_log_error(plants_db, "plants_get rules");
     sqlite3_finalize(st);
     if (rc != SQLITE_DONE) {
         json_error(res, 500, "internal error");
@@ -673,7 +673,7 @@ void plants_due(struct request *req, struct response *res)
     int rc = st != NULL ? sqlite3_step(st) : SQLITE_ERROR;
     size_t max = rc == SQLITE_ROW ? (size_t)sqlite3_column_int64(st, 0) : 0;
     if (st != NULL && rc != SQLITE_ROW)
-        db_log_error("plants_due count");
+        db_log_error(plants_db, "plants_due count");
     sqlite3_finalize(st);
     if (rc != SQLITE_ROW) {
         json_error(res, 500, "internal error");
@@ -712,7 +712,7 @@ void plants_due(struct request *req, struct response *res)
             n++;
     }
     if (rc != SQLITE_DONE && rc != SQLITE_ROW)
-        db_log_error("plants_due");
+        db_log_error(plants_db, "plants_due");
     sqlite3_finalize(st);
     if (rc != SQLITE_DONE) {
         json_error(res, 500, "internal error");
@@ -871,12 +871,12 @@ void plants_rule_save(struct request *req, struct response *res)
         check_type(res, type_id) != 0)
         return;
 
-    if (db_exec("BEGIN IMMEDIATE") != 0) {
+    if (db_exec(plants_db, "BEGIN IMMEDIATE") != 0) {
         json_error(res, 500, "internal error");
         return;
     }
-    if (store_rule(plant_id, type_id, &rule) != 0 || db_exec("COMMIT") != 0) {
-        db_exec("ROLLBACK");
+    if (store_rule(plant_id, type_id, &rule) != 0 || db_exec(plants_db, "COMMIT") != 0) {
+        db_exec(plants_db, "ROLLBACK");
         json_error(res, 500, "internal error");
         return;
     }
@@ -897,7 +897,7 @@ void plants_rule_delete(struct request *req, struct response *res)
         json_error(res, 500, "internal error");
         return;
     }
-    if (sqlite3_changes(db) == 0) {
+    if (sqlite3_changes(plants_db) == 0) {
         json_error(res, 404, "rule not found");
         return;
     }
@@ -925,7 +925,7 @@ void plants_log(struct request *req, struct response *res)
         sqlite3_finalize(st);
         if (rc != SQLITE_ROW) {
             if (rc != SQLITE_DONE)
-                db_log_error("plants_log before");
+                db_log_error(plants_db, "plants_log before");
             json_error(res, rc == SQLITE_DONE ? 404 : 500,
                        rc == SQLITE_DONE ? "log entry not found" : "internal error");
             return;
@@ -1003,7 +1003,7 @@ void plants_log_update(struct request *req, struct response *res)
     sqlite3_finalize(st);
     if (rc != SQLITE_ROW) {
         if (rc != SQLITE_DONE)
-            db_log_error("plants_log_update");
+            db_log_error(plants_db, "plants_log_update");
         json_error(res, rc == SQLITE_DONE ? 404 : 500,
                    rc == SQLITE_DONE ? "log entry not found" : "internal error");
         return;
@@ -1030,7 +1030,7 @@ void plants_log_delete(struct request *req, struct response *res)
         json_error(res, 500, "internal error");
         return;
     }
-    if (sqlite3_changes(db) == 0) {
+    if (sqlite3_changes(plants_db) == 0) {
         json_error(res, 404, "log entry not found");
         return;
     }

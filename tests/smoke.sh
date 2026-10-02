@@ -17,7 +17,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-export NYLM_DB="$TMP/nylm.db" NYLM_PUBLIC=public NYLM_PORT=$PORT
+export NYLM_DATA="$TMP/data" NYLM_PUBLIC=public NYLM_PORT=$PORT
 
 # expect STATUS DESCRIPTION curl-args...
 expect() {
@@ -79,10 +79,43 @@ stop() {
     fi
 }
 
+# ---- data folder -----------------------------------------------------------
+
+# refuses DESCRIPTION ENV-ARG [nylm-args...]: nylm, run with one change to its
+# environment, exits non-zero with an error about the data folder.
+refuses() {
+    desc=$1 envarg=$2
+    shift 2
+    if env "$envarg" "$BIN" "$@" >"$TMP/log" 2>&1 </dev/null; then
+        FAILED=$((FAILED + 1)); echo "FAIL: $desc: started anyway"
+    elif grep -q "NYLM_DATA\|data folder" "$TMP/log"; then
+        PASSED=$((PASSED + 1))
+    else
+        FAILED=$((FAILED + 1)); echo "FAIL: $desc: unclear error: $(cat "$TMP/log")"
+    fi
+}
+refuses "NYLM_DATA unset"       -uNYLM_DATA
+refuses "NYLM_DATA empty"       NYLM_DATA=
+refuses "data folder missing"   NYLM_DATA="$TMP/data"
+refuses "set-password, missing" NYLM_DATA="$TMP/data" set-password
+touch "$TMP/file"
+refuses "data folder is a file" NYLM_DATA="$TMP/file"
+if [ -e "$TMP/data" ]; then
+    FAILED=$((FAILED + 1)); echo "FAIL: a missing data folder was created"
+else PASSED=$((PASSED + 1)); fi
+
 # ---- setup ---------------------------------------------------------------
 
+# An empty data folder is a fresh install: each app gets its folder and database.
+mkdir "$TMP/data"
 echo 'smoke test password' | "$BIN" set-password 2>/dev/null ||
     { echo "set-password failed"; exit 1; }
+for f in core/core.db plants/plants.db; do
+    if [ -f "$TMP/data/$f" ]; then PASSED=$((PASSED + 1)); else
+        FAILED=$((FAILED + 1)); echo "FAIL: $f not created"; fi
+done
+if [ "$(stat -c %a "$TMP/data/plants")" = 700 ]; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: app folder is not mode 700"; fi
 
 # ---- API and static files (defaults: 127.0.0.1, allow 127.0.0.0/8) ---------
 

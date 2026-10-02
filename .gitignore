@@ -5,3 +5,4 @@ build/
 *.db
 *.db-wal
 *.db-shm
+/dev-data/

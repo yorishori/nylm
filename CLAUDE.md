@@ -50,8 +50,12 @@ If a rule blocks the task, stop and ask the user; do not work around it.
    `src/api_<feature>.c`, one file per feature, declared in `src/api.h`.
 5. New routes MUST have `public = 0` (login required). Making a route public
    requires the user's explicit approval.
-6. Schema changes are a new entry appended to `migrations[]` in
-   `src/migrations.c`. NEVER edit, reorder or delete an existing entry.
+6. Everything nylm saves (databases, files) lives in the `NYLM_DATA` folder,
+   in the app's own subfolder: `<NYLM_DATA>/<app>/`. Each app has its own
+   SQLite database there, its own connection (`src/db.h`) and its own
+   migrations list in `src/migrations.c`; code uses only its own app's
+   connection. Schema changes are a new entry appended to that app's list.
+   NEVER edit, reorder or delete an existing entry.
    New tables are `STRICT`.
 7. The server is single-threaded on purpose. NEVER add threads, forks for
    request handling, or async I/O without the user's approval.

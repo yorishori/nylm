@@ -42,9 +42,11 @@ test: nylm-debug $(TEST_BIN)
 	@for t in $(TEST_BIN); do $$t || exit 1; done
 	tests/smoke.sh ./nylm-debug
 
-# Development server on http://127.0.0.1:8080.
+# Development server on http://127.0.0.1:8080, data in ./dev-data.
+# First time: NYLM_DATA=dev-data ./nylm-debug set-password
 run: nylm-debug
-	./nylm-debug
+	mkdir -p dev-data
+	NYLM_DATA=dev-data ./nylm-debug
 
 clean:
 	rm -rf build nylm nylm-debug

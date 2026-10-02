@@ -1,14 +1,15 @@
 /*
- * The database schema, as a list of migrations. db_open() applies every
- * migration past PRAGMA user_version, in order, each in its own transaction.
+ * The database schemas: one list of migrations per app, each app with its
+ * own database (see src/db.h). db_open() applies every migration past the
+ * database's PRAGMA user_version, in order, each in its own transaction.
  *
- * To change the schema, append a new entry. Never edit or remove an entry
- * that has been installed anywhere: databases already ran it.
+ * To change an app's schema, append a new entry to its list. Never edit or
+ * remove an entry that has been installed anywhere: databases already ran it.
  */
 
 #include "db.h"
 
-const char *const migrations[] = {
+const char *const core_migrations[] = {
     /* 1: the single user's password (Argon2id) and active login sessions.
      * Only the SHA-256 of each session token is stored, never the token. */
     "CREATE TABLE user ("
@@ -23,8 +24,12 @@ const char *const migrations[] = {
     "    token_hash BLOB    PRIMARY KEY,"
     "    expires_at INTEGER NOT NULL"
     ") STRICT, WITHOUT ROWID;",
+};
 
-    /* 2: plant care. Plants and care types are archived, never deleted.
+const int core_migration_count = sizeof core_migrations / sizeof core_migrations[0];
+
+const char *const plants_migrations[] = {
+    /* 1: plant care. Plants and care types are archived, never deleted.
      * A rule says how often a care type is due for a plant; the log records
      * what was done (care_type_id NULL: a plain note). Due dates are not
      * stored: they are computed from the rule and the latest log entry.
@@ -77,4 +82,4 @@ const char *const migrations[] = {
     "CREATE INDEX care_log_by_rule ON care_log (plant_id, care_type_id, date);",
 };
 
-const int migration_count = sizeof migrations / sizeof migrations[0];
+const int plants_migration_count = sizeof plants_migrations / sizeof plants_migrations[0];

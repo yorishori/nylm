@@ -60,7 +60,7 @@ static int sha256(const void *data, size_t len, unsigned char out[32])
 /* Stores the password row. Runs inside auth_set_password's transaction. */
 static int store_password(const unsigned char *salt, const unsigned char *hash)
 {
-    sqlite3_stmt *st = db_prepare(
+    sqlite3_stmt *st = db_prepare(core_db, 
         "INSERT INTO user (id, salt, hash, memcost, iterations) VALUES (1, ?, ?, ?, ?) "
         "ON CONFLICT (id) DO UPDATE SET salt = excluded.salt, hash = excluded.hash, "
         "memcost = excluded.memcost, iterations = excluded.iterations, "
@@ -78,7 +78,7 @@ static int store_password(const unsigned char *salt, const unsigned char *hash)
         rc = sqlite3_step(st);
     sqlite3_finalize(st);
     if (rc != SQLITE_DONE) {
-        db_log_error("store_password");
+        db_log_error(core_db, "store_password");
         return -1;
     }
     return 0;
@@ -92,11 +92,11 @@ int auth_set_password(const char *password)
         return -1;
 
     /* New password and logging out every session happen together or not at all. */
-    if (db_exec("BEGIN IMMEDIATE") != 0)
+    if (db_exec(core_db, "BEGIN IMMEDIATE") != 0)
         return -1;
-    if (store_password(salt, hash) != 0 || db_exec("DELETE FROM sessions") != 0 ||
-        db_exec("COMMIT") != 0) {
-        db_exec("ROLLBACK");
+    if (store_password(salt, hash) != 0 || db_exec(core_db, "DELETE FROM sessions") != 0 ||
+        db_exec(core_db, "COMMIT") != 0) {
+        db_exec(core_db, "ROLLBACK");
         return -1;
     }
     return 0;
@@ -104,7 +104,7 @@ int auth_set_password(const char *password)
 
 int auth_check_password(const char *password)
 {
-    sqlite3_stmt *st = db_prepare("SELECT salt, hash, memcost, iterations FROM user "
+    sqlite3_stmt *st = db_prepare(core_db, "SELECT salt, hash, memcost, iterations FROM user "
                                   "WHERE id = 1");
     if (st == NULL)
         return -1;
@@ -115,7 +115,7 @@ int auth_check_password(const char *password)
             fprintf(stderr, "auth: no password set; run `nylm set-password`\n");
             return 0;
         }
-        db_log_error("auth_check_password");
+        db_log_error(core_db, "auth_check_password");
         return -1;
     }
 
@@ -202,9 +202,9 @@ int auth_start_session(struct response *res)
 
     /* Housekeeping: drop expired sessions whenever someone logs in. A failure
      * here is logged (by db_exec) but does not block the login. */
-    db_exec("DELETE FROM sessions WHERE expires_at <= unixepoch()");
+    db_exec(core_db, "DELETE FROM sessions WHERE expires_at <= unixepoch()");
 
-    sqlite3_stmt *st = db_prepare("INSERT INTO sessions (token_hash, expires_at) "
+    sqlite3_stmt *st = db_prepare(core_db, "INSERT INTO sessions (token_hash, expires_at) "
                                   "VALUES (?, unixepoch() + ?)");
     if (st == NULL)
         return -1;
@@ -215,7 +215,7 @@ int auth_start_session(struct response *res)
         rc = sqlite3_step(st);
     sqlite3_finalize(st);
     if (rc != SQLITE_DONE) {
-        db_log_error("auth_start_session");
+        db_log_error(core_db, "auth_start_session");
         return -1;
     }
 
@@ -234,7 +234,7 @@ int auth_end_session(const struct request *req, struct response *res)
 {
     unsigned char hash[32];
     if (request_token_hash(req, hash) == 0) {
-        sqlite3_stmt *st = db_prepare("DELETE FROM sessions WHERE token_hash = ?");
+        sqlite3_stmt *st = db_prepare(core_db, "DELETE FROM sessions WHERE token_hash = ?");
         if (st == NULL)
             return -1;
         int rc = sqlite3_bind_blob(st, 1, hash, sizeof hash, SQLITE_STATIC);
@@ -242,7 +242,7 @@ int auth_end_session(const struct request *req, struct response *res)
             rc = sqlite3_step(st);
         sqlite3_finalize(st);
         if (rc != SQLITE_DONE) {
-            db_log_error("auth_end_session");
+            db_log_error(core_db, "auth_end_session");
             return -1;
         }
     }
@@ -255,7 +255,7 @@ int auth_session_valid(const struct request *req)
     unsigned char hash[32];
     if (request_token_hash(req, hash) != 0)
         return 0;
-    sqlite3_stmt *st = db_prepare("SELECT 1 FROM sessions "
+    sqlite3_stmt *st = db_prepare(core_db, "SELECT 1 FROM sessions "
                                   "WHERE token_hash = ? AND expires_at > unixepoch()");
     if (st == NULL)
         return -1;
@@ -267,6 +267,6 @@ int auth_session_valid(const struct request *req)
         return 1;
     if (rc == SQLITE_DONE)
         return 0;
-    db_log_error("auth_session_valid");
+    db_log_error(core_db, "auth_session_valid");
     return -1;
 }

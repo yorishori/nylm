@@ -5,7 +5,13 @@
 #
 # Run it again after `git pull` to update: it rebuilds, reinstalls the binary
 # and static files, and restarts the service. Configuration (/etc/nylm.conf)
-# and data (/var/lib/nylm) are kept.
+# and data (the NYLM_DATA folder) are kept.
+#
+# All data lives in NYLM_DATA, a folder you create on the data drive and make
+# writable by user nylm. Use a folder INSIDE the drive (e.g. /mnt/data/nylm),
+# not the mount point: if the drive is not mounted the folder is missing and
+# nylm refuses to start, instead of starting empty on the system disk.
+# The first install asks for it, or takes NYLM_DATA from the environment.
 #
 # Addresses are detected from wg0 and the default route. Override with
 # WG_CIDR=10.0.0.1/24 LAN_CIDR=192.168.1.20/24 sudo -E deploy/install.sh
@@ -14,7 +20,7 @@ set -eu
 PORT=${NYLM_PORT:-8080}
 WG_IF=${WG_IF:-wg0}
 CONF=/etc/nylm.conf
-DATA=/var/lib/nylm
+HOME_DIR=/var/lib/nylm # nylm's home and working directory; holds no data
 SHARE=/usr/local/share/nylm
 ACTIONS=/usr/local/lib/nylm/actions
 
@@ -44,8 +50,8 @@ as_user make test
 
 step "user and directories"
 id nylm >/dev/null 2>&1 ||
-    useradd --system --home-dir "$DATA" --shell /usr/bin/nologin nylm
-install -d -m 700 -o nylm -g nylm "$DATA"
+    useradd --system --home-dir "$HOME_DIR" --shell /usr/bin/nologin nylm
+install -d -m 700 -o nylm -g nylm "$HOME_DIR"
 # Root-owned and not writable by nylm: this folder is nylm's whole privilege.
 install -d -m 755 -o root -g root /usr/local/lib/nylm "$ACTIONS"
 
@@ -74,6 +80,30 @@ visudo -cqf "$tmp" || die "generated sudoers file is invalid"
 install -m 440 -o root -g root "$tmp" /etc/sudoers.d/nylm
 rm -f "$tmp"
 
+step "data folder"
+if [ -f "$CONF" ]; then
+    # shellcheck disable=SC1090
+    NYLM_DATA=$(. "$CONF" && printf '%s' "${NYLM_DATA:-}")
+    [ -n "$NYLM_DATA" ] || die "$CONF has no NYLM_DATA; add NYLM_DATA=/path/on/drive"
+elif [ -z "${NYLM_DATA:-}" ]; then
+    [ -t 0 ] || die "set NYLM_DATA to the data folder on the drive"
+    printf 'data folder on the drive (e.g. /mnt/data/nylm): '
+    read -r NYLM_DATA
+fi
+# Only plain absolute paths: the value goes into a file that systemd parses
+# and this script sources.
+case "$NYLM_DATA" in
+    /*) ;;
+    *) die "NYLM_DATA must be an absolute path: '$NYLM_DATA'" ;;
+esac
+case "$NYLM_DATA" in
+    *[!A-Za-z0-9/._-]*) die "NYLM_DATA may only contain A-Z a-z 0-9 / . _ -" ;;
+esac
+[ -d "$NYLM_DATA" ] || die "$NYLM_DATA does not exist (create it on the drive; is it mounted?)"
+sudo -u nylm test -w "$NYLM_DATA" -a -x "$NYLM_DATA" ||
+    die "user nylm cannot write to $NYLM_DATA (chown it, or mount with uid=nylm)"
+echo "data: $NYLM_DATA"
+
 step "configuration"
 if [ -f "$CONF" ]; then
     echo "keeping existing $CONF"
@@ -86,7 +116,8 @@ else
     cat > "$CONF" <<EOF
 # nylm configuration, read by nylm.service. Restart after editing:
 #   sudo systemctl restart nylm
-NYLM_DB=$DATA/nylm.db
+# Data folder on the drive; each app has a subfolder and database in it.
+NYLM_DATA=$NYLM_DATA
 NYLM_PUBLIC=$SHARE/public
 NYLM_PORT=$PORT
 # Addresses to listen on: WireGuard and LAN only, never 0.0.0.0.
@@ -99,10 +130,9 @@ EOF
     sed 's/^/    /' "$CONF"
 fi
 
-if [ ! -f "$DATA/nylm.db" ]; then
+if [ ! -f "$NYLM_DATA/core/core.db" ]; then
     step "login password"
-    # shellcheck disable=SC2046
-    sudo -u nylm env $(grep '^NYLM_DB=' "$CONF") /usr/local/bin/nylm set-password
+    sudo -u nylm env NYLM_DATA="$NYLM_DATA" /usr/local/bin/nylm set-password
 fi
 
 step "service"
