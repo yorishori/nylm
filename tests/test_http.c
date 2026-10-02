@@ -1,3 +1,4 @@
+#include "../src/arena.h"
 #include "../src/http.h"
 #include "test.h"
 
@@ -20,7 +21,11 @@ static void test_request_line(void)
 
     CHECK(parse("POST /api/notes?a=1&b=%20 HTTP/1.0\r\n\r\n", &req) == 0);
     CHECK_STR(req.method, "POST");
-    CHECK_STR(req.path, "/api/notes"); /* query string dropped */
+    CHECK_STR(req.path, "/api/notes"); /* query string split off */
+    CHECK_STR(req.query, "a=1&b=%20");
+
+    CHECK(parse("GET /a HTTP/1.1\r\n\r\n", &req) == 0);
+    CHECK(req.query == NULL);
 
     CHECK(parse("GET /a%20b HTTP/1.1\r\n\r\n", &req) == 0);
     CHECK_STR(req.path, "/a b");
@@ -110,9 +115,53 @@ static void test_url_decode(void)
     CHECK(http_url_decode(s) == -1);
 }
 
+/* Looks up name in a request whose query string is q. */
+static int query(const char *q, const char *name, const char **value)
+{
+    struct request req;
+    memset(&req, 0, sizeof req);
+    req.query = q;
+    *value = NULL;
+    return http_query(&req, name, value);
+}
+
+static void test_query(void)
+{
+    const char *v;
+
+    CHECK(query("id=12", "id", &v) == 0);
+    CHECK_STR(v, "12");
+    CHECK(query("plant_id=3&before=7", "before", &v) == 0);
+    CHECK_STR(v, "7");
+    CHECK(query("plant_id=3&before=7", "plant_id", &v) == 0);
+    CHECK_STR(v, "3");
+    CHECK(query("id=1&id=2", "id", &v) == 0); /* first one wins */
+    CHECK_STR(v, "1");
+    CHECK(query("id=", "id", &v) == 0);
+    CHECK_STR(v, "");
+    CHECK(query("x=%41%20b", "x", &v) == 0);
+    CHECK_STR(v, "A b");
+    CHECK(query("&&id=5&", "id", &v) == 0);
+    CHECK_STR(v, "5");
+
+    CHECK(query(NULL, "id", &v) == 1);
+    CHECK(query("", "id", &v) == 1);
+    CHECK(query("id", "id", &v) == 1); /* no '=' */
+    CHECK(query("idx=1", "id", &v) == 1);
+    CHECK(query("xid=1", "id", &v) == 1);
+    CHECK(query("plant_id=1", "id", &v) == 1);
+
+    CHECK(query("id=%zz", "id", &v) == -1);
+    CHECK(query("id=%0a", "id", &v) == -1); /* control character */
+    CHECK(query("id=%", "id", &v) == -1);
+}
+
 int main(void)
 {
+    if (arena_init(64 * 1024) != 0)
+        return 1;
     test_request_line();
+    test_query();
     test_headers();
     test_content_length();
     test_url_decode();

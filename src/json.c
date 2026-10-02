@@ -99,3 +99,97 @@ const char *json_get_string(const cJSON *obj, const char *key, size_t min, size_
         snprintf(msg, 128, "'%s' must be %zu to %zu bytes", key, min, max);
     return msg;
 }
+
+int text_valid(const char *s, int multiline)
+{
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p != '\0') {
+        unsigned char c = *p;
+        if (c < 0x80) {
+            if ((c < 0x20 && !(multiline && c == '\n')) || c == 0x7f)
+                return 0;
+            p++;
+            continue;
+        }
+        /* Multi-byte sequence: lead byte, then 1-3 continuation bytes.
+         * Overlong forms, surrogates and code points past U+10FFFF are
+         * rejected through the allowed range of the second byte. */
+        int more;
+        unsigned char lo = 0x80, hi = 0xbf;
+        if (c >= 0xc2 && c <= 0xdf)
+            more = 1;
+        else if (c >= 0xe0 && c <= 0xef) {
+            more = 2;
+            if (c == 0xe0)
+                lo = 0xa0;
+            else if (c == 0xed)
+                hi = 0x9f;
+        } else if (c >= 0xf0 && c <= 0xf4) {
+            more = 3;
+            if (c == 0xf0)
+                lo = 0x90;
+            else if (c == 0xf4)
+                hi = 0x8f;
+        } else
+            return 0;
+        if (p[1] < lo || p[1] > hi)
+            return 0;
+        for (int i = 2; i <= more; i++)
+            if (p[i] < 0x80 || p[i] > 0xbf)
+                return 0;
+        /* C1 control characters (U+0080..U+009F) */
+        if (c == 0xc2 && p[1] <= 0x9f)
+            return 0;
+        p += more + 1;
+    }
+    return 1;
+}
+
+/* An error message "'key' <what>" in the request arena. */
+static const char *field_error(const char *key, const char *what)
+{
+    char *msg = arena_alloc(128);
+    if (msg == NULL)
+        return "invalid field";
+    snprintf(msg, 128, "'%s' %s", key, what);
+    return msg;
+}
+
+const char *json_get_text(const cJSON *obj, const char *key, size_t min, size_t max,
+                          int multiline, const char **out)
+{
+    const char *s;
+    const char *err = json_get_string(obj, key, min, max, &s);
+    if (err != NULL)
+        return err;
+    if (!text_valid(s, multiline))
+        return field_error(key, multiline ? "must be UTF-8 text without control characters"
+                                          : "must be one line of UTF-8 text");
+    *out = s;
+    return NULL;
+}
+
+const char *json_get_int(const cJSON *obj, const char *key, long min, long max, long *out)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (cJSON_IsNumber(item)) {
+        double v = item->valuedouble;
+        /* Range first: converting an out-of-range double to long is undefined. */
+        if (v >= (double)min && v <= (double)max && v == (double)(long)v) {
+            *out = (long)v;
+            return NULL;
+        }
+    }
+    char what[96];
+    snprintf(what, sizeof what, "must be a whole number from %ld to %ld", min, max);
+    return field_error(key, what);
+}
+
+const char *json_get_bool(const cJSON *obj, const char *key, int *out)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (!cJSON_IsBool(item))
+        return field_error(key, "must be true or false");
+    *out = cJSON_IsTrue(item);
+    return NULL;
+}

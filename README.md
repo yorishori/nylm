@@ -30,6 +30,7 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 | `src/http.c`      | parse requests, write responses                          |
 | `src/router.c`    | route table: method, path, handler, login required       |
 | `src/api_*.c`     | handlers, one file per feature                           |
+| `src/care.c`      | plant care dates: when a care rule is next due           |
 | `src/auth.c`      | password hashing (Argon2id), sessions                    |
 | `src/db.c`        | SQLite connection, applies migrations                    |
 | `src/migrations.c`| the schema, one appended entry per change                |
@@ -40,6 +41,16 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 On the server: binary `/usr/local/bin/nylm`, config `/etc/nylm.conf`, data
 `/var/lib/nylm/`, frontend `/usr/local/share/nylm/public/`, actions
 `/usr/local/lib/nylm/actions/`, sudo rule `/etc/sudoers.d/nylm`.
+
+## Plants
+
+Plant care tracker (`src/api_plants.c`, API under `/api/plants`). Plants and
+care types (watering, fertilising, ...) are archived, never deleted. A care
+rule per plant and type says how often it is due: every N days, with optional
+seasonal periods that change the interval or pause it, or once a year on a
+fixed date. Logging a care entry makes the next due date count from that day;
+nothing comes due during a pause. Due dates are computed on every read, from
+the server's local date (the system time zone).
 
 ## Commands
 

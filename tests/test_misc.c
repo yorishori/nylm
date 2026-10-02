@@ -158,6 +158,80 @@ static void test_json(void)
     CHECK_STR(json_get_string(obj, "e", 1, 2, &out), "'e' must be 1 to 2 bytes");
     CHECK_STR(json_get_string(obj, "n", 0, 9, &out), "'n' must be a string");
     CHECK_STR(json_get_string(obj, "missing", 0, 9, &out), "'missing' must be a string");
+
+    /* whole numbers in a range */
+    obj = BODY(J, "{\"n\":5,\"z\":0,\"neg\":-1,\"f\":1.5,\"big\":1e300,\"s\":\"5\","
+                  "\"t\":true,\"no\":false,\"nul\":null}", &res);
+    long n = 0;
+    CHECK(obj != NULL);
+    CHECK(json_get_int(obj, "n", 1, 5, &n) == NULL && n == 5); /* max */
+    CHECK(json_get_int(obj, "n", 5, 9, &n) == NULL && n == 5); /* min */
+    CHECK(json_get_int(obj, "z", 0, 0, &n) == NULL && n == 0);
+    CHECK(json_get_int(obj, "neg", -1, 1, &n) == NULL && n == -1);
+    CHECK_STR(json_get_int(obj, "n", 1, 4, &n), "'n' must be a whole number from 1 to 4");
+    CHECK_STR(json_get_int(obj, "n", 6, 9, &n), "'n' must be a whole number from 6 to 9");
+    CHECK(json_get_int(obj, "f", 0, 9, &n) != NULL);
+    CHECK(json_get_int(obj, "big", 0, 9007199254740991L, &n) != NULL);
+    CHECK(json_get_int(obj, "s", 0, 9, &n) != NULL);
+    CHECK(json_get_int(obj, "t", 0, 9, &n) != NULL);
+    CHECK(json_get_int(obj, "nul", 0, 9, &n) != NULL);
+    CHECK(json_get_int(obj, "missing", 0, 9, &n) != NULL);
+
+    /* booleans */
+    int b = -1;
+    CHECK(json_get_bool(obj, "t", &b) == NULL && b == 1);
+    CHECK(json_get_bool(obj, "no", &b) == NULL && b == 0);
+    CHECK_STR(json_get_bool(obj, "z", &b), "'z' must be true or false");
+    CHECK(json_get_bool(obj, "nul", &b) != NULL);
+    CHECK(json_get_bool(obj, "missing", &b) != NULL);
+
+    /* text: length, then UTF-8 and control characters */
+    obj = BODY(J, "{\"a\":\"Monstera \\u00e9\\u6728\\ud83c\\udf31\",\"nl\":\"a\\nb\","
+                  "\"tab\":\"a\\tb\",\"e\":\"\"}", &res);
+    CHECK(obj != NULL);
+    CHECK(json_get_text(obj, "a", 1, 100, 0, &out) == NULL);
+    CHECK_STR(out, "Monstera \xc3\xa9\xe6\x9c\xa8\xf0\x9f\x8c\xb1");
+    CHECK(json_get_text(obj, "e", 0, 1, 0, &out) == NULL);
+    CHECK(json_get_text(obj, "nl", 0, 9, 1, &out) == NULL);
+    CHECK_STR(json_get_text(obj, "nl", 0, 9, 0, &out), "'nl' must be one line of UTF-8 text");
+    CHECK_STR(json_get_text(obj, "tab", 0, 9, 1, &out),
+              "'tab' must be UTF-8 text without control characters");
+    CHECK_STR(json_get_text(obj, "e", 1, 9, 0, &out), "'e' must be 1 to 9 bytes");
+}
+
+static void test_text_valid(void)
+{
+    CHECK(text_valid("", 0));
+    CHECK(text_valid("plain ascii ~", 0));
+    CHECK(text_valid("two\nlines", 1));
+    CHECK(!text_valid("two\nlines", 0));
+    CHECK(!text_valid("cr\r", 1));
+    CHECK(!text_valid("tab\t", 1));
+    CHECK(!text_valid("del\x7f", 1));
+    CHECK(!text_valid("esc\x1b[0m", 1));
+
+    CHECK(text_valid("\xc3\xa9", 0));             /* U+00E9 */
+    CHECK(text_valid("\xc2\xa0", 0));             /* U+00A0, first after C1 */
+    CHECK(!text_valid("\xc2\x85", 0));            /* U+0085, C1 control */
+    CHECK(!text_valid("\xc2\x9f", 0));            /* U+009F, C1 control */
+    CHECK(text_valid("\xe2\x82\xac", 0));         /* U+20AC */
+    CHECK(text_valid("\xef\xbf\xbf", 0));         /* U+FFFF */
+    CHECK(text_valid("\xf0\x90\x80\x80", 0));     /* U+10000 */
+    CHECK(text_valid("\xf4\x8f\xbf\xbf", 0));     /* U+10FFFF, max */
+
+    CHECK(!text_valid("\x80", 0));                /* lone continuation */
+    CHECK(!text_valid("\xc0\xaf", 0));            /* overlong '/' */
+    CHECK(!text_valid("\xc1\xbf", 0));            /* overlong */
+    CHECK(!text_valid("\xe0\x80\xaf", 0));        /* overlong */
+    CHECK(!text_valid("\xf0\x80\x80\xaf", 0));    /* overlong */
+    CHECK(!text_valid("\xed\xa0\x80", 0));        /* surrogate U+D800 */
+    CHECK(!text_valid("\xf4\x90\x80\x80", 0));    /* U+110000, max + 1 */
+    CHECK(!text_valid("\xf5\x80\x80\x80", 0));
+    CHECK(!text_valid("\xff", 0));
+    CHECK(!text_valid("\xc3", 0));                /* truncated */
+    CHECK(!text_valid("\xe2\x82", 0));
+    CHECK(!text_valid("\xf0\x9f\x8c", 0));
+    CHECK(!text_valid("\xc3(", 0));               /* bad continuation */
 }
 
 int main(void)
@@ -171,5 +245,6 @@ int main(void)
     test_response_headers();
     test_conn();
     test_json();
+    test_text_valid();
     TEST_DONE();
 }

@@ -93,10 +93,11 @@ static int parse_request_line(char *line, struct request *req)
     if (strlen(target) > HTTP_MAX_PATH)
         return 414;
 
-    /* No route uses a query string yet: cut it off and ignore it. */
     char *q = strchr(target, '?');
-    if (q != NULL)
+    if (q != NULL) {
         *q = '\0';
+        req->query = q + 1;
+    }
     if (http_url_decode(target) != 0)
         return 400;
     req->path = target;
@@ -226,6 +227,25 @@ int http_read_request(struct conn *c, struct request *req)
     return 0;
 }
 
+int http_query(const struct request *req, const char *name, const char **value)
+{
+    size_t name_len = strlen(name);
+    for (const char *p = req->query; p != NULL && *p != '\0';) {
+        size_t len = strcspn(p, "&");
+        if (len > name_len && strncmp(p, name, name_len) == 0 && p[name_len] == '=') {
+            char *v = arena_strndup(p + name_len + 1, len - name_len - 1);
+            if (v == NULL || http_url_decode(v) != 0)
+                return -1;
+            *value = v;
+            return 0;
+        }
+        p += len;
+        if (*p == '&')
+            p++;
+    }
+    return 1;
+}
+
 const char *http_header(const struct request *req, const char *name)
 {
     for (size_t i = 0; i < req->nheaders; i++)
@@ -244,6 +264,7 @@ const char *http_status_text(int status)
     case 401: return "Unauthorized";
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
+    case 409: return "Conflict";
     case 408: return "Request Timeout";
     case 413: return "Content Too Large";
     case 414: return "URI Too Long";

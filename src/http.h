@@ -19,6 +19,7 @@ struct header {
 struct request {
     const char *method;
     const char *path;  /* URL-decoded, no query string */
+    const char *query; /* raw text after '?', NULL if none */
     struct header headers[HTTP_MAX_HEADERS];
     size_t nheaders;
     size_t content_length;
@@ -52,6 +53,13 @@ int http_read_request(struct conn *c, struct request *req);
 
 /* Decodes %XX escapes in place. Rejects bad escapes and control characters. */
 int http_url_decode(char *s);
+
+/*
+ * Finds the first name=value pair in the query string and URL-decodes the
+ * value into the arena. Returns 0 (found), 1 (absent) or -1 (badly escaped,
+ * or out of memory).
+ */
+int http_query(const struct request *req, const char *name, const char **value);
 
 /* Case-insensitive header lookup; NULL if absent. */
 const char *http_header(const struct request *req, const char *name);

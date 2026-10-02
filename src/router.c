@@ -15,12 +15,28 @@ static void health(struct request *req, struct response *res)
 }
 
 static const struct route routes[] = {
-    /* method   path             handler         public */
-    { "GET",    "/api/health",   health,         1 },
+    /* method   path                          handler              public */
+    { "GET",    "/api/health",                health,              1 },
 
-    { "POST",   "/api/login",    session_login,  1 },
-    { "POST",   "/api/logout",   session_logout, 1 },
-    { "GET",    "/api/session",  session_check,  0 },
+    { "POST",   "/api/login",                 session_login,       1 },
+    { "POST",   "/api/logout",                session_logout,      1 },
+    { "GET",    "/api/session",               session_check,       0 },
+
+    { "GET",    "/api/plants",                plants_list,         0 },
+    { "GET",    "/api/plants/due",            plants_due,          0 },
+    { "GET",    "/api/plants/plant",          plants_get,          0 },
+    { "POST",   "/api/plants/add",            plants_add,          0 },
+    { "POST",   "/api/plants/update",         plants_update,       0 },
+    { "POST",   "/api/plants/archive",        plants_archive,      0 },
+    { "POST",   "/api/plants/types/add",      plants_type_add,     0 },
+    { "POST",   "/api/plants/types/update",   plants_type_update,  0 },
+    { "POST",   "/api/plants/types/archive",  plants_type_archive, 0 },
+    { "POST",   "/api/plants/rules/save",     plants_rule_save,    0 },
+    { "POST",   "/api/plants/rules/delete",   plants_rule_delete,  0 },
+    { "GET",    "/api/plants/log",            plants_log,          0 },
+    { "POST",   "/api/plants/log/add",        plants_log_add,      0 },
+    { "POST",   "/api/plants/log/update",     plants_log_update,   0 },
+    { "POST",   "/api/plants/log/delete",     plants_log_delete,   0 },
 };
 
 int router_find(const struct route *table, size_t n, const char *method, const char *path)

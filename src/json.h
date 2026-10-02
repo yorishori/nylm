@@ -27,4 +27,20 @@ cJSON *json_body(const struct request *req, struct response *res);
 const char *json_get_string(const cJSON *obj, const char *key, size_t min, size_t max,
                             const char **out);
 
+/*
+ * Like json_get_string, and the text must also be valid UTF-8 without control
+ * characters (newline allowed only if multiline).
+ */
+const char *json_get_text(const cJSON *obj, const char *key, size_t min, size_t max,
+                          int multiline, const char **out);
+
+/* Reads obj[key] as a whole number in min..max. NULL or an error message. */
+const char *json_get_int(const cJSON *obj, const char *key, long min, long max, long *out);
+
+/* Reads obj[key] as true/false into *out (1/0). NULL or an error message. */
+const char *json_get_bool(const cJSON *obj, const char *key, int *out);
+
+/* 1 if s is valid UTF-8 with no control characters (but '\n' if multiline). */
+int text_valid(const char *s, int multiline);
+
 #endif
