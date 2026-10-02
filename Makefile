@@ -1,5 +1,5 @@
 CC      = gcc
-CFLAGS  = -std=c11 -Wall -Wextra -Werror -Wpedantic -Wshadow -Wconversion
+CFLAGS  = -std=c11 -Wall -Wextra -Werror -Wpedantic -Wshadow -Wconversion -MMD -MP
 LDFLAGS =
 
 SRC = $(wildcard src/*.c)
@@ -34,3 +34,5 @@ clean:
 	rm -rf build nylm nylm-debug
 
 .PHONY: release debug run clean
+
+-include $(REL_OBJ:.o=.d) $(DBG_OBJ:.o=.d)

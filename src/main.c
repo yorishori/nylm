@@ -6,15 +6,19 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
 #include "arena.h"
 #include "conn.h"
 #include "http.h"
+#include "static.h"
 
 #define DEFAULT_PORT 8080
 #define ARENA_SIZE   (16 * 1024 * 1024)
+
+static const char *public_dir;
 
 static int parse_port(const char *s, int fallback)
 {
@@ -65,8 +69,14 @@ static int listen_on(int port)
 
 static void handle(struct request *req, struct response *res)
 {
-    (void)req;
-    http_text(res, 200, "hello\n");
+    if (strncmp(req->path, "/api/", 5) == 0) {
+        http_text(res, 404, "404 Not Found\n");
+    } else if (strcmp(req->method, "GET") == 0) {
+        static_serve(public_dir, req->path, res);
+    } else {
+        http_text(res, 405, "405 Method Not Allowed\n");
+        http_add_header(res, "Allow", "GET");
+    }
 }
 
 static void serve(int client, const char *ip)
@@ -112,6 +122,10 @@ int main(void)
         fprintf(stderr, "invalid NYLM_PORT\n");
         return 1;
     }
+
+    public_dir = getenv("NYLM_PUBLIC");
+    if (public_dir == NULL || *public_dir == '\0')
+        public_dir = "public";
 
     if (arena_init(ARENA_SIZE) != 0) {
         fprintf(stderr, "out of memory\n");
