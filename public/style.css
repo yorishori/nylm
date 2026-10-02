@@ -1,84 +1,272 @@
+/*
+ * Soft dark: one slate surface; shapes are raised out of it or pressed into
+ * it with a light and a dark shadow. Pastel colours carry meaning only:
+ *   rose = late, peach = today, lavender = this week, sky = later,
+ *   mint = done / positive action, muted grey = paused or nothing scheduled.
+ */
 :root {
-  --bg: #f4f1ea;
-  --panel: #fffdf8;
-  --text: #1d1b16;
-  --muted: #6b665b;
-  --line: #c9c2b2;
-  --accent: #1f5c99;
-  --danger: #a3271d;
-  --font: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-}
+  --surface: #2b2e3b;
+  --shade: #1e2029;
+  --light: #383c4d;
+  --text: #e6e4f2;
+  --muted: #9c9fb5;
+  --rose: #f4a7b5;
+  --peach: #f6c79e;
+  --lavender: #bcb3f6;
+  --sky: #9fcbef;
+  --mint: #a6dfc3;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #16161a;
-    --panel: #1e1e23;
-    --text: #e6e3da;
-    --muted: #98938a;
-    --line: #3a3a42;
-    --accent: #7fb0e6;
-    --danger: #ef7d73;
-  }
+  --raised: 6px 6px 14px var(--shade), -6px -6px 14px var(--light);
+  --raised-small: 3px 3px 7px var(--shade), -3px -3px 7px var(--light);
+  --pressed: inset 3px 3px 7px var(--shade), inset -3px -3px 7px var(--light);
+
+  --font: ui-rounded, "SF Pro Rounded", "Nunito", "Quicksand", system-ui, sans-serif;
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
 
 html, body {
   margin: 0;
-  background: var(--bg);
+  background: var(--surface);
   color: var(--text);
-  font: 14px/1.5 var(--font);
+  font: 16px/1.5 var(--font);
+  font-variant-numeric: tabular-nums;
 }
 
 [hidden] { display: none !important; }
 
+h1, h2, h3 { margin: 0; font-weight: 650; line-height: 1.25; }
+h1 { font-size: 1.95rem; }
+h2 { font-size: 1.25rem; }
+h3 { font-size: 1rem; }
+p { margin: 0; }
+
+a { color: var(--sky); }
+a:focus-visible, button:focus-visible, input:focus-visible,
+select:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--lavender);
+  outline-offset: 3px;
+}
+
+/* ---- header -------------------------------------------------------------- */
+
 .bar {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 1rem;
-  padding: 0.5rem 1rem;
-  border-bottom: 1px solid var(--line);
-  background: var(--panel);
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 1rem 1rem 0.5rem;
 }
-.brand { font-weight: bold; letter-spacing: 0.05em; }
-.status { color: var(--muted); flex: 1; }
-.status.error { color: var(--danger); }
+.brand {
+  color: var(--text);
+  font-weight: 700;
+  font-size: 1.25rem;
+  text-decoration: none;
+}
+.status { flex: 1; color: var(--muted); font-size: 0.85rem; min-height: 1.3em; }
+.status.error { color: var(--rose); }
 
-main { padding: 1rem; }
-
-.panel {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  padding: 0.75rem;
+main {
+  max-width: 46rem;
+  margin: 0 auto;
+  padding: 1rem 1rem 4rem;
 }
 
-label { display: block; margin: 0 0 0.75rem; }
-label span { display: block; color: var(--muted); font-size: 0.85em; }
+/* ---- controls ------------------------------------------------------------ */
 
-input, button {
-  font: inherit;
-  color: inherit;
-}
-input {
+input, select, textarea, button { font: inherit; color: inherit; }
+
+input, select, textarea {
   width: 100%;
-  padding: 0.35rem 0.5rem;
-  border: 1px solid var(--line);
-  background: var(--bg);
+  padding: 0.55rem 0.8rem;
+  border: 0;
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--pressed);
 }
-input:focus, button:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 1px;
-}
+textarea { min-height: 5rem; resize: vertical; }
+input[type="number"] { width: 6rem; }
+select { cursor: pointer; }
 
-.actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
 .btn {
-  padding: 0.3rem 0.9rem;
-  border: 1px solid var(--line);
-  background: var(--panel);
+  padding: 0.5rem 1.1rem;
+  border: 0;
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: var(--raised-small);
   cursor: pointer;
+  white-space: nowrap;
+  transition: box-shadow 120ms ease;
 }
-.btn:hover { border-color: var(--accent); }
-.btn.primary { border-color: var(--accent); color: var(--accent); }
+.btn:active { box-shadow: var(--pressed); }
 .btn:disabled { opacity: 0.5; cursor: default; }
+.btn.go { color: var(--mint); font-weight: 600; }
+.btn.danger { color: var(--rose); }
+.btn.quiet { box-shadow: none; color: var(--muted); padding-inline: 0.6rem; }
+.btn.quiet:hover { color: var(--text); }
 
-.login { max-width: 22rem; margin: 3rem auto; }
+.actions { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
+
+.field { display: grid; gap: 0.3rem; }
+.field > span { color: var(--muted); font-size: 0.85rem; }
+.form { display: grid; gap: 1rem; }
+.form .row { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; }
+.form .row > .field { flex: 1 1 12rem; }
+.form .row > input:not([type="number"]) { flex: 1 1 10rem; width: auto; }
+.form-error { color: var(--rose); font-size: 0.9rem; }
+.form-error:empty { display: none; }
+.hint { color: var(--muted); font-size: 0.85rem; }
+
+.choice { display: flex; gap: 0.6rem; align-items: center; cursor: pointer; }
+.choice input { width: auto; box-shadow: none; accent-color: var(--lavender); }
+
+/* ---- surfaces ------------------------------------------------------------ */
+
+.card {
+  background: var(--surface);
+  border-radius: 18px;
+  box-shadow: var(--raised);
+  padding: 1.1rem 1.25rem;
+}
+.well {
+  border-radius: 16px;
+  box-shadow: var(--pressed);
+  padding: 1rem 1.1rem;
+}
+.stack { display: grid; gap: 1.25rem; }
+.section { display: grid; gap: 0.9rem; margin-top: 2rem; }
+.section:first-child { margin-top: 0; }
+.section > header { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
+.count { color: var(--muted); font-weight: 400; }
+.muted { color: var(--muted); }
+.empty { color: var(--muted); padding: 1rem 0; }
+.list { list-style: none; margin: 0; padding: 0; display: grid; gap: 1rem; }
+
+/* ---- status colour ------------------------------------------------------- */
+
+.pill {
+  display: inline-block;
+  padding: 0.2rem 0.7rem;
+  border-radius: 999px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  box-shadow: var(--pressed);
+  white-space: nowrap;
+}
+.tone-late     { --tone: var(--rose); }
+.tone-today    { --tone: var(--peach); }
+.tone-soon     { --tone: var(--lavender); }
+.tone-later    { --tone: var(--sky); }
+.tone-done     { --tone: var(--mint); }
+.tone-paused   { --tone: var(--muted); }
+.pill[class*="tone-"] { color: var(--tone); }
+
+/* A coloured edge on items whose status matters at a glance. */
+.marked { border-left: 5px solid var(--tone, transparent); }
+
+/* ---- home ---------------------------------------------------------------- */
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(13rem, 1fr));
+  gap: 1.75rem;
+  margin-top: 1rem;
+}
+.tile {
+  display: grid;
+  gap: 1rem;
+  min-height: 9rem;
+  align-content: space-between;
+  padding: 1.4rem;
+  border-radius: 24px;
+  background: var(--surface);
+  box-shadow: var(--raised);
+  color: var(--text);
+  text-decoration: none;
+}
+.tile:active { box-shadow: var(--pressed); }
+.tile h2 { font-size: 1.55rem; }
+.tile .pills { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+
+/* ---- app shell ----------------------------------------------------------- */
+
+.app-head { display: grid; gap: 1.1rem; margin-bottom: 1.75rem; }
+.tabs {
+  display: flex;
+  gap: 0.35rem;
+  padding: 0.35rem;
+  border-radius: 999px;
+  box-shadow: var(--pressed);
+  overflow-x: auto;
+}
+.tabs a {
+  flex: 1;
+  text-align: center;
+  padding: 0.5rem 0.9rem;
+  border-radius: 999px;
+  color: var(--muted);
+  text-decoration: none;
+  white-space: nowrap;
+}
+.tabs a[aria-current="page"] {
+  color: var(--text);
+  font-weight: 600;
+  box-shadow: var(--raised-small);
+}
+
+/* ---- due ----------------------------------------------------------------- */
+
+.due-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.75rem 1rem;
+  align-items: center;
+}
+.due-row .what { display: grid; gap: 0.15rem; }
+.due-row .what a { color: var(--text); font-weight: 600; text-decoration: none; }
+.due-row .what a:hover { text-decoration: underline; }
+.due-row .done { grid-column: 1 / -1; display: grid; gap: 0.75rem; }
+.due-row .when { justify-self: end; }
+
+/* ---- plants -------------------------------------------------------------- */
+
+.plant-card {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.25rem 1rem;
+  align-items: center;
+  color: var(--text);
+  text-decoration: none;
+}
+.plant-card:active { box-shadow: var(--pressed); }
+.plant-card h3 { font-size: 1.1rem; }
+
+.rule { display: grid; gap: 0.6rem; }
+.rule > header { display: flex; justify-content: space-between; gap: 1rem; align-items: center; }
+.seasons { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.2rem; color: var(--muted); font-size: 0.9rem; }
+
+.season-row { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
+.season-row select { width: auto; }
+.season-row input[type="number"] { width: 4.5rem; }
+
+/* ---- journal ------------------------------------------------------------- */
+
+.entry { display: grid; gap: 0.5rem; }
+.entry > header { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+.entry .note { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* ---- login --------------------------------------------------------------- */
+
+.login { max-width: 22rem; margin: 4rem auto; }
+
+@media (max-width: 30rem) {
+  h1 { font-size: 1.55rem; }
+  .card { padding: 1rem; }
+  .tabs a { padding-inline: 0.6rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn { transition: none; }
+}
