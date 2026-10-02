@@ -1,0 +1,58 @@
+/* Plants app. Shared look and parts: /style.css. */
+
+/* Name on the left, status on the right, buttons underneath. */
+.due-row, .plant-card {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0.5rem 1rem;
+  align-items: center;
+}
+.due-row .what { display: grid; gap: 0.25rem; justify-items: start; }
+.due-row .done, .plant-card .actions, .plant-card .muted, .plant-card .next {
+  grid-column: 1 / -1;
+}
+.due-row .done { display: grid; gap: 0.75rem; margin-top: 0.25rem; }
+.plant-card .actions { margin-top: 0.25rem; }
+.when { justify-self: end; }
+
+.rule { display: grid; gap: 0.6rem; }
+.rule > header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  align-items: center;
+}
+.seasons {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.2rem;
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.season-row { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
+.season-row input[type="number"] { width: 4.5rem; }
+
+.entry { display: grid; gap: 0.5rem; }
+.entry > header { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+.entry .note { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+/* The journal's plant: name, switcher, open button. */
+.plant-picker {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.25rem;
+  align-items: end;
+  margin-bottom: 2rem;
+}
+.plant-picker > h2 { flex: 1 1 100%; }
+.plant-picker .field { flex: 1 1 14rem; }
+
+@media (max-width: 21rem) {
+  .due-row, .plant-card { grid-template-columns: 1fr; }
+  .when { justify-self: start; }
+  .season-row { gap: 0.4rem; }
+}

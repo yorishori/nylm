@@ -14,8 +14,8 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 
 - One process, one request at a time. Every request gets its own memory
   arena, freed when it ends.
-- The frontend (`public/`) builds the whole UI in JavaScript; the server only
-  serves files and JSON.
+- The frontend (`public/`) builds the whole UI in JavaScript, one page per app
+  (`/plants/`) plus the home page; the server only serves files and JSON.
 - Access: bind to WireGuard + LAN addresses only → drop clients outside the
   allowed subnets → password login with a session cookie.
 - nylm runs as user `nylm`. Root work happens only through scripts in
@@ -34,7 +34,8 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 | `src/auth.c`      | password hashing (Argon2id), sessions                    |
 | `src/db.c`        | SQLite connection, applies migrations                    |
 | `src/migrations.c`| the schema, one appended entry per change                |
-| `public/`         | `index.html`, `app.js`, `style.css`                      |
+| `public/`         | home page, `common.js` + `style.css` shared by all pages |
+| `public/<app>/`   | one page per app: `index.html`, `<app>.js`, `<app>.css`  |
 | `tests/`          | unit tests (`test_*.c`), end-to-end (`smoke.sh`)         |
 | `deploy/`         | `install.sh`, systemd unit, root action scripts          |
 

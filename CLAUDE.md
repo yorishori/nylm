@@ -41,9 +41,15 @@ If a rule blocks the task, stop and ask the user; do not work around it.
 
 1. Data flows one way. The backend serves files from `public/` unchanged and
    answers JSON. The backend NEVER generates HTML.
-2. The frontend builds all UI in `public/app.js`. It inserts data with
-   `textContent` / `createTextNode` (the `el()` helper) and NEVER with
-   `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write` or `eval`.
+2. The frontend builds all UI in JavaScript. Each app is a page:
+   `public/<app>/index.html` with its own `<app>.js` (and `<app>.css`);
+   the home page is `public/index.html` + `home.js`. Anything more than one
+   page needs (helpers, session, router, dropdown, calendar, colour picker)
+   lives in `public/common.js`, and look shared by all pages in
+   `public/style.css`. Use the common dropdown and calendar, never native
+   `<select>` or date inputs. Data goes in with `textContent` /
+   `createTextNode` (the `el()` helper) and NEVER with `innerHTML`,
+   `outerHTML`, `insertAdjacentHTML`, `document.write` or `eval`.
 3. NEVER add inline `<script>`, inline `style=""` attributes or `on*=""`
    HTML attributes: the Content-Security-Policy blocks them.
 4. Routes live only in the table in `src/router.c`. Handlers live in

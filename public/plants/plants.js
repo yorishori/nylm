@@ -1,16 +1,11 @@
 "use strict";
 
 /*
- * nylm frontend. The server only serves files and JSON; everything the user
- * sees is built here. Rule: data goes into the page with textContent (via
- * el()), never innerHTML.
- *
- * Pages are addressed by the URL hash:
- *   #/                      home: one tile per app
- *   #/plants/due            what to do, soonest first
- *   #/plants/plants[/ID]    plants, or one plant with its care rules
- *   #/plants/journal[/ID]   a plant's care log and notes
- *   #/plants/types          care types
+ * Plants app (/plants/). Sections by URL hash:
+ *   #/due            what to do, soonest first
+ *   #/plants[/ID]    plants, or one plant with its care rules
+ *   #/journal[/ID]   a plant's care log and notes
+ *   #/types          care types
  *
  * Colour has three jobs, each with its own shape:
  *   a plant's colour      = stripe on its card's left edge, dot before its name
@@ -18,136 +13,7 @@
  *   urgency               = the due label's text: rose late, peach today
  */
 
-const app = document.getElementById("app");
-const statusLine = document.getElementById("status");
-const logoutButton = document.getElementById("logout");
-const homeButton = document.getElementById("home");
-
-/* ---- helpers ---------------------------------------------------------- */
-
-/* el("button", {class: "btn", onclick: f}, "text", childNode, ...) */
-function el(tag, attrs, ...children) {
-  const node = document.createElement(tag);
-  for (const [key, value] of Object.entries(attrs || {})) {
-    if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
-    else if (value === true) node.setAttribute(key, "");
-    else if (value !== false && value != null) node.setAttribute(key, value);
-  }
-  for (const child of children.flat()) {
-    if (child == null || child === false) continue;
-    node.append(child instanceof Node ? child : document.createTextNode(String(child)));
-  }
-  return node;
-}
-
-function setStatus(text, isError) {
-  statusLine.textContent = text || "";
-  statusLine.classList.toggle("error", Boolean(isError));
-}
-
-class ApiError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
-
-/* Calls the JSON API. Resolves to the parsed body (null for 204). */
-async function api(method, path, body) {
-  const options = { method, headers: {}, credentials: "same-origin" };
-  if (body !== undefined || method !== "GET") {
-    options.headers["Content-Type"] = "application/json";
-    if (body !== undefined) options.body = JSON.stringify(body);
-  }
-  const res = await fetch(path, options);
-  const data = res.status === 204 ? null : await res.json().catch(() => null);
-  if (!res.ok) {
-    throw new ApiError(res.status, (data && data.error) || res.statusText);
-  }
-  return data;
-}
-
-/* A labelled form control. */
-function field(label, control, hint) {
-  return el("label", { class: "field" }, el("span", {}, label), control,
-            hint ? el("span", { class: "hint" }, hint) : null);
-}
-
-/*
- * A button that goes to another page. Everything that navigates looks like
- * a button; text is never a link.
- */
-function navButton(label, hash, extra) {
-  return el("a", { class: extra ? "btn " + extra : "btn", href: hash }, label);
-}
-
-/*
- * A form whose submit runs action(form). While it runs the form's buttons
- * are disabled; an error is shown in the form's .form-error line.
- */
-function form(attrs, action, ...children) {
-  const error = el("p", { class: "form-error", role: "alert" });
-  const node = el("form", {
-    ...attrs,
-    class: "form " + (attrs.class || ""),
-    onsubmit: async (e) => {
-      e.preventDefault();
-      const buttons = node.querySelectorAll("button");
-      buttons.forEach((b) => { b.disabled = true; });
-      error.textContent = "";
-      try {
-        await action(node);
-      } catch (err) {
-        /* A lost session goes to the login form; anything else shows here. */
-        if (!(err instanceof ApiError && err.status === 401 && handleError(err))) {
-          error.textContent = err.message;
-        }
-      } finally {
-        buttons.forEach((b) => { b.disabled = false; });
-      }
-    },
-  }, ...children, error);
-  return node;
-}
-
-/* A form error raised before anything is sent. */
-function invalid(message) {
-  return new Error(message);
-}
-
-/* Asks before something that cannot be undone. */
-function sure(question) {
-  return window.confirm(question);
-}
-
-/* ---- dates and status -------------------------------------------------- */
-
-const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
-function pad2(n) {
-  return String(n).padStart(2, "0");
-}
-
-/* Today as "YYYY-MM-DD" in local time. */
-function today() {
-  const d = new Date();
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-}
-
-/* "2026-10-04" -> "Sun 4 Oct" (this year) or "4 Oct 2027". */
-function showDate(iso) {
-  const [y, m, d] = iso.split("-").map(Number);
-  const date = new Date(y, m - 1, d);
-  if (y === new Date().getFullYear()) return `${DAYS[date.getDay()]} ${d} ${MONTHS[m - 1]}`;
-  return `${d} ${MONTHS[m - 1]} ${y}`;
-}
-
-/* "3 Mar" for a month/day pair. */
-function showMonthDay(month, day) {
-  return `${day} ${MONTHS[month - 1]}`;
-}
+/* ---- due dates --------------------------------------------------------- */
 
 /* How soon something is due, in words. */
 function dueText(daysLeft, due) {
@@ -173,10 +39,7 @@ function dueLabel(daysLeft, due) {
   return el("span", { class: tone ? "due " + tone : "due" }, dueText(daysLeft, due));
 }
 
-/* ---- identity colours -------------------------------------------------- */
-
-/* Must match CARE_COLOR_NAMES in src/care.h. */
-const COLORS = ["butter", "lime", "mint", "teal", "sky", "periwinkle", "lavender", "orchid"];
+/* ---- identity ---------------------------------------------------------- */
 
 /* A plant's name with its colour dot. */
 function plantName(name, color, tag) {
@@ -190,114 +53,31 @@ function careChip(name, color) {
   return el("span", { class: `chip c-${color}` }, name);
 }
 
-/* The first palette colour not in used (or the least used one). */
-function nextColor(used) {
-  const counts = new Map(COLORS.map((c) => [c, 0]));
-  for (const c of used) if (counts.has(c)) counts.set(c, counts.get(c) + 1);
-  return COLORS.reduce((best, c) => (counts.get(c) < counts.get(best) ? c : best));
+/* A dropdown of care types shown as chips; noteOption adds "Note only" (""). */
+function careTypeDropdown(label, types, selected, noteOption) {
+  const options = types.map((t) => ({
+    value: String(t.id), label: t.name, render: () => careChip(t.name, t.color),
+  }));
+  if (noteOption) options.unshift({ value: "", label: "Note only", render: () => careChip(null) });
+  return dropdown({ label, options, value: selected == null ? "" : String(selected) });
 }
 
-/* Round colour swatches to pick from; .value is the chosen name. */
-let pickerSeq = 0;
-function colorPicker(selected) {
-  const name = `color-${++pickerSeq}`;
-  const node = el("fieldset", { class: "swatches" },
-    el("legend", { class: "hint" }, "Colour"),
-    COLORS.map((c) => el("label", { class: `swatch c-${c}` },
-      el("input", { type: "radio", name, value: c, checked: c === selected, "aria-label": c }))));
-  Object.defineProperty(node, "value", {
-    get: () => node.querySelector(`input[name=${name}]:checked`).value,
-  });
-  return node;
-}
+/* ---- shell ------------------------------------------------------------- */
 
-function plural(n, one, many) {
-  return `${n} ${n === 1 ? one : many}`;
-}
-
-/* ---- routing ----------------------------------------------------------- */
-
-/* Each render bumps this; a render that finds it changed was overtaken. */
-let renderSeq = 0;
-
-function go(hash) {
-  if (location.hash === hash) route();
-  else location.hash = hash;
-}
-
-async function route() {
-  const seq = ++renderSeq;
-  const parts = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
-  const id = parts[2] !== undefined ? Number(parts[2]) : null;
-  if (id !== null && !(Number.isInteger(id) && id > 0)) {
-    go("#/");
-    return;
-  }
-  logoutButton.hidden = false;
-  homeButton.hidden = parts.length === 0;
-  try {
-    let page;
-    if (parts.length === 0) page = await homePage();
-    else if (parts[0] === "plants" && parts[1] === "due") page = await duePage();
-    else if (parts[0] === "plants" && parts[1] === "plants" && id) page = await plantPage(id);
-    else if (parts[0] === "plants" && parts[1] === "plants") page = await plantsPage();
-    else if (parts[0] === "plants" && parts[1] === "journal") page = await journalPage(id);
-    else if (parts[0] === "plants" && parts[1] === "types") page = await typesPage();
-    else {
-      go("#/");
-      return;
-    }
-    if (seq === renderSeq) app.replaceChildren(page);
-  } catch (err) {
-    if (seq === renderSeq) handleError(err);
-  }
-}
-
-window.addEventListener("hashchange", route);
-
-/* ---- home -------------------------------------------------------------- */
-
-/* Pills summing up a due list: late, today, this week. */
-function dueSummary(due) {
-  const late = due.filter((d) => d.days_left < 0).length;
-  const now = due.filter((d) => d.days_left === 0).length;
-  const week = due.filter((d) => d.days_left > 0 && d.days_left <= 7).length;
-  if (late + now + week === 0) {
-    return [el("span", { class: "pill" }, "Nothing due this week")];
-  }
-  return [
-    late ? el("span", { class: "pill late" }, `${late} late`) : null,
-    now ? el("span", { class: "pill today" }, `${now} today`) : null,
-    week ? el("span", { class: "pill" }, `${week} this week`) : null,
-  ];
-}
-
-async function homePage() {
-  const due = await api("GET", "/api/plants/due");
-  return el("section", {},
-    el("h1", {}, "Apps"),
-    el("nav", { class: "tiles", "aria-label": "Apps" },
-      el("a", { class: "tile", href: "#/plants/due" },
-        el("h2", {}, "Plants"),
-        el("div", { class: "pills" }, dueSummary(due)))));
-}
-
-/* ---- plants: shell ----------------------------------------------------- */
-
-const PLANT_TABS = [
+const TABS = [
   ["due", "Due"],
   ["plants", "Plants"],
   ["journal", "Journal"],
   ["types", "Care types"],
 ];
 
-function plantsShell(active, ...content) {
+function shell(active, ...content) {
   return el("section", {},
     el("header", { class: "app-head" },
       el("h1", {}, "Plants"),
       el("nav", { class: "tabs", "aria-label": "Plants sections" },
-        PLANT_TABS.map(([key, label]) =>
-          el("a", { href: `#/plants/${key}`, "aria-current": key === active ? "page" : null },
+        TABS.map(([key, label]) =>
+          el("a", { href: `#/${key}`, "aria-current": key === active ? "page" : null },
              label)))),
     ...content);
 }
@@ -307,15 +87,15 @@ async function logCare(plantId, plantName, typeId, typeName, date) {
   await api("POST", "/api/plants/log/add",
             { plant_id: plantId, care_type_id: typeId, date, note: "" });
   setStatus(`Logged ${typeName.toLowerCase()} for ${plantName}`);
-  route();
+  refresh();
 }
 
 /*
  * The two ways to mark care as done: today, or on an earlier date (which
- * opens a small date form).
+ * opens a small form with a calendar).
  */
 function doneButtons(plantId, plantName, typeId, typeName, ...extra) {
-  const date = el("input", { type: "date", required: true, max: today(), value: today() });
+  const date = datePicker({ label: "Done on", value: today(), max: today() });
   const later = form({ hidden: true }, async () => {
     await logCare(plantId, plantName, typeId, typeName, date.value);
   },
@@ -339,15 +119,14 @@ function doneButtons(plantId, plantName, typeId, typeName, ...extra) {
   return [
     el("div", { class: "actions" },
       nowButton,
-      el("button", { class: "btn", type: "button",
-                     onclick: () => { later.hidden = false; date.focus(); } },
+      el("button", { class: "btn", type: "button", onclick: () => { later.hidden = false; } },
          "Done on a date…"),
       ...extra),
     later,
   ];
 }
 
-/* ---- plants: due ------------------------------------------------------- */
+/* ---- due --------------------------------------------------------------- */
 
 const DUE_GROUPS = [
   ["Late", (d) => d < 0],
@@ -364,18 +143,18 @@ function dueRow(item) {
     el("span", { class: "when" }, dueLabel(item.days_left, item.due)),
     el("div", { class: "done" },
       doneButtons(item.plant_id, item.plant, item.care_type_id, item.care_type,
-                  navButton("Open plant", `#/plants/plants/${item.plant_id}`))));
+                  navButton("Open plant", `#/plants/${item.plant_id}`))));
 }
 
 async function duePage() {
   const due = await api("GET", "/api/plants/due");
   if (due.length === 0) {
-    return plantsShell("due",
+    return shell("due",
       el("div", { class: "empty" },
         el("p", {}, "Nothing is scheduled yet. Add a care rule to a plant."),
-        el("div", { class: "actions" }, navButton("Go to Plants", "#/plants/plants"))));
+        el("div", { class: "actions" }, navButton("Go to Plants", "#/plants"))));
   }
-  return plantsShell("due",
+  return shell("due",
     DUE_GROUPS.map(([title, test]) => {
       const items = due.filter((d) => test(d.days_left));
       if (items.length === 0) return null;
@@ -385,7 +164,7 @@ async function duePage() {
     }));
 }
 
-/* ---- plants: list ------------------------------------------------------ */
+/* ---- plants ------------------------------------------------------------ */
 
 const PLANT_LIMITS = { name: 100, species: 100, location: 100, notes: 4000 };
 
@@ -400,8 +179,8 @@ function plantInputs(plant, color) {
                            value: p.species || "" }),
     location: el("input", { name: "location", maxlength: PLANT_LIMITS.location,
                             value: p.location || "" }),
-    acquired: el("input", { name: "acquired", type: "date", max: today(),
-                            value: p.acquired || "" }),
+    acquired: datePicker({ label: "Acquired", value: p.acquired || null, max: today(),
+                           nullable: true }),
     notes: el("textarea", { name: "notes", maxlength: PLANT_LIMITS.notes }, p.notes || ""),
   };
 }
@@ -411,7 +190,7 @@ function plantFields(inputs) {
     field("Name", inputs.name),
     el("div", { class: "row" }, field("Species", inputs.species),
        field("Location", inputs.location)),
-    field("Acquired", inputs.acquired, "Leave empty if you don't know."),
+    field("Acquired", inputs.acquired, "Leave it as Not set if you don't know."),
     field("Notes", inputs.notes),
     inputs.color,
   ];
@@ -422,7 +201,7 @@ function plantBody(inputs) {
     name: inputs.name.value.trim(),
     species: inputs.species.value.trim(),
     location: inputs.location.value.trim(),
-    acquired: inputs.acquired.value || null,
+    acquired: inputs.acquired.value,
     notes: inputs.notes.value,
     color: inputs.color.value,
   };
@@ -448,7 +227,7 @@ function plantCard(plant, urgent) {
     urgent ? el("span", { class: "next" }, careChip(urgent.care_type, urgent.care_type_color))
            : null,
     where ? el("span", { class: "muted" }, where) : null,
-    el("div", { class: "actions" }, navButton("Open", `#/plants/plants/${plant.id}`)));
+    el("div", { class: "actions" }, navButton("Open", `#/plants/${plant.id}`)));
 }
 
 function addPlantForm(color) {
@@ -456,7 +235,7 @@ function addPlantForm(color) {
   const node = form({ class: "raised", hidden: true }, async () => {
     const created = await api("POST", "/api/plants/add", plantBody(inputs));
     setStatus(`Added ${inputs.name.value.trim()}`);
-    go(`#/plants/plants/${created.id}`);
+    go(`#/plants/${created.id}`);
   },
     el("h2", {}, "New plant"),
     plantFields(inputs),
@@ -470,7 +249,7 @@ function addPlantForm(color) {
 async function setPlantArchived(plant, archived) {
   await api("POST", "/api/plants/archive", { id: plant.id, archived });
   setStatus(`${archived ? "Archived" : "Restored"} ${plant.name}`);
-  route();
+  refresh();
 }
 
 async function plantsPage() {
@@ -481,7 +260,7 @@ async function plantsPage() {
   const archived = data.plants.filter((p) => p.archived);
   const addForm = addPlantForm(nextColor(data.plants.map((p) => p.color)));
 
-  return plantsShell("plants",
+  return shell("plants",
     el("section", { class: "section" },
       el("header", {},
         el("h2", {}, "Plants ", el("span", { class: "count" }, active.length)),
@@ -499,14 +278,14 @@ async function plantsPage() {
             el("li", { class: `card marked item c-${p.color}` },
               plantName(p.name, p.color, "strong"),
               el("div", { class: "actions" },
-                navButton("Open", `#/plants/plants/${p.id}`),
+                navButton("Open", `#/plants/${p.id}`),
                 el("button", { class: "btn", type: "button",
                                onclick: () => setPlantArchived(p, false).catch(handleError) },
                    "Restore"))))))
       : null);
 }
 
-/* ---- plants: one plant and its rules ----------------------------------- */
+/* ---- one plant and its rules ------------------------------------------- */
 
 /* "Every 4 days", "Once a year on 1 Mar", "Only in seasons". */
 function scheduleText(rule) {
@@ -537,7 +316,7 @@ function ruleCard(plant, rule, types) {
     typeArchived
       ? el("div", { class: "stack" },
           el("p", { class: "hint" }, `${rule.care_type} is archived. Restore it to log it.`),
-          el("div", { class: "actions" }, navButton("Go to Care types", "#/plants/types")))
+          el("div", { class: "actions" }, navButton("Go to Care types", "#/types")))
       : rule.due ? doneButtons(plant.id, plant.name, rule.care_type_id, rule.care_type) : null,
     el("div", { class: "actions" },
       el("button", { class: "btn", type: "button", onclick: () => {
@@ -555,7 +334,7 @@ function ruleCard(plant, rule, types) {
           await api("POST", "/api/plants/rules/delete",
                     { plant_id: plant.id, care_type_id: rule.care_type_id });
           setStatus(`Deleted the ${rule.care_type.toLowerCase()} rule`);
-          route();
+          refresh();
         } catch (err) {
           handleError(err);
         }
@@ -563,40 +342,31 @@ function ruleCard(plant, rule, types) {
   return el("li", { class: "card" }, view, editor);
 }
 
-function monthSelect(value) {
-  return el("select", { "aria-label": "Month" },
-    MONTHS.map((name, i) => el("option", { value: i + 1, selected: i + 1 === value }, name)));
-}
-
-function dayInput(value) {
-  return el("input", { type: "number", min: 1, max: 31, required: true, "aria-label": "Day",
-                       value: value || 1 });
-}
-
-/* One editable season: a month/day range and its interval or "paused". */
+/* One editable season: a range of days of the year and its interval or "paused". */
 function seasonRow(season, onRemove) {
   const s = season || { start_month: 11, start_day: 1, end_month: 2, end_day: 28,
                         interval_days: 14 };
-  const startMonth = monthSelect(s.start_month), startDay = dayInput(s.start_day);
-  const endMonth = monthSelect(s.end_month), endDay = dayInput(s.end_day);
-  const kind = el("select", { "aria-label": "In this season" },
-    el("option", { value: "every", selected: Boolean(s.interval_days) }, "every"),
-    el("option", { value: "paused", selected: !s.interval_days }, "paused"));
+  const from = monthDayPicker({ label: "Season starts", month: s.start_month, day: s.start_day });
+  const to = monthDayPicker({ label: "Season ends", month: s.end_month, day: s.end_day });
   const days = el("input", { type: "number", min: 1, max: 3650, "aria-label": "Days",
                              value: s.interval_days || 7 });
   const daysLabel = el("span", {}, "days");
-  const sync = () => { days.hidden = daysLabel.hidden = kind.value === "paused"; };
-  kind.addEventListener("change", sync);
-  sync();
+  const sync = (kind) => { days.hidden = daysLabel.hidden = kind === "paused"; };
+  const kind = dropdown({
+    label: "In this season",
+    options: [{ value: "every", label: "every" }, { value: "paused", label: "paused" }],
+    value: s.interval_days ? "every" : "paused",
+    onchange: sync,
+  });
+  sync(kind.value);
   const row = el("div", { class: "season-row well" },
-    el("span", {}, "From"), startDay, startMonth,
-    el("span", {}, "to"), endDay, endMonth,
+    el("span", {}, "From"), from, el("span", {}, "to"), to,
     kind, days, daysLabel,
     el("button", { class: "btn", type: "button", onclick: () => onRemove(row) },
        "Remove season"));
   row.read = () => ({
-    start_month: Number(startMonth.value), start_day: Number(startDay.value),
-    end_month: Number(endMonth.value), end_day: Number(endDay.value),
+    start_month: from.value.month, start_day: from.value.day,
+    end_month: to.value.month, end_day: to.value.day,
     interval_days: kind.value === "paused" ? null : Number(days.value),
   });
   return row;
@@ -608,16 +378,16 @@ function seasonRow(season, onRemove) {
  */
 function ruleForm(plant, rule, types, onCancel) {
   const r = rule || { interval_days: 7, yearly_month: null, yearly_day: null, periods: [] };
-  const typeSelect = rule ? null : el("select", { required: true, "aria-label": "Care type" },
-    types.map((t) => el("option", { value: t.id }, t.name)));
+  const typeChoice = rule ? null : careTypeDropdown("Care type", types, types[0].id, false);
 
   const initial = r.yearly_month ? "yearly" : r.interval_days ? "every" : "seasons";
+  const modeName = uniqueId("mode");
   const mode = (value, label) => el("label", { class: "choice" },
-    el("input", { type: "radio", name: "mode", value, checked: value === initial }), label);
+    el("input", { type: "radio", name: modeName, value, checked: value === initial }), label);
   const interval = el("input", { type: "number", min: 1, max: 3650,
                                  value: r.interval_days || 7, "aria-label": "Days" });
-  const yearMonth = monthSelect(r.yearly_month || 3);
-  const yearDay = dayInput(r.yearly_day || 1);
+  const yearly = monthDayPicker({ label: "Once a year on", month: r.yearly_month || 3,
+                                  day: r.yearly_day || 1 });
 
   const seasonList = el("div", { class: "stack" });
   const removeSeason = (row) => row.remove();
@@ -633,11 +403,12 @@ function ruleForm(plant, rule, types, onCancel) {
 
   const everyRow = el("div", { class: "row" }, el("span", {}, "Every"), interval,
                       el("span", {}, "days, outside the seasons below"));
-  const yearlyRow = el("div", { class: "row" }, el("span", {}, "On"), yearDay, yearMonth);
+  const yearlyRow = el("div", { class: "row" }, el("span", {}, "On"), yearly);
   const seasonsOnly = el("p", { class: "hint" }, "Not due outside the seasons below.");
+  const chosenMode = () => node.querySelector(`input[name=${modeName}]:checked`).value;
 
-  const node = form({ class: "stack" }, async (f) => {
-    const chosen = f.querySelector("input[name=mode]:checked").value;
+  const node = form({ class: "stack" }, async () => {
+    const chosen = chosenMode();
     if (chosen === "every" && !(Number(interval.value) >= 1)) {
       throw invalid("Enter how many days between each time.");
     }
@@ -645,20 +416,19 @@ function ruleForm(plant, rule, types, onCancel) {
     if (chosen === "seasons" && !periods.some((p) => p.interval_days)) {
       throw invalid("Add a season that is not paused, or choose another schedule.");
     }
-    const typeId = rule ? rule.care_type_id : Number(typeSelect.value);
     await api("POST", "/api/plants/rules/save", {
       plant_id: plant.id,
-      care_type_id: typeId,
+      care_type_id: rule ? rule.care_type_id : Number(typeChoice.value),
       interval_days: chosen === "every" ? Number(interval.value) : null,
-      yearly_month: chosen === "yearly" ? Number(yearMonth.value) : null,
-      yearly_day: chosen === "yearly" ? Number(yearDay.value) : null,
+      yearly_month: chosen === "yearly" ? yearly.value.month : null,
+      yearly_day: chosen === "yearly" ? yearly.value.day : null,
       periods,
     });
     setStatus("Saved the rule");
-    route();
+    refresh();
   },
-    el("h3", {}, rule ? `${rule.care_type} rule` : "New care rule"),
-    typeSelect ? field("Care type", typeSelect) : null,
+    el("h3", {}, rule ? careChip(rule.care_type, rule.care_type_color) : "New care rule"),
+    typeChoice ? field("Care type", typeChoice) : null,
     el("fieldset", { class: "stack well" },
       el("legend", { class: "hint" }, "Schedule"),
       mode("every", "Every few days"),
@@ -671,13 +441,13 @@ function ruleForm(plant, rule, types, onCancel) {
 
   /* Show only the inputs of the chosen schedule. */
   const sync = () => {
-    const chosen = node.querySelector("input[name=mode]:checked").value;
+    const chosen = chosenMode();
     everyRow.hidden = chosen !== "every";
     seasonsOnly.hidden = chosen !== "seasons";
     yearlyRow.hidden = chosen !== "yearly";
     seasons.hidden = chosen === "yearly";
   };
-  node.addEventListener("change", (e) => { if (e.target.name === "mode") sync(); });
+  node.addEventListener("change", (e) => { if (e.target.name === modeName) sync(); });
   sync();
   return node;
 }
@@ -693,73 +463,66 @@ async function plantPage(id) {
   const details = form({ class: "raised" }, async () => {
     await api("POST", "/api/plants/update", { id: plant.id, ...plantBody(inputs) });
     setStatus(`Saved ${inputs.name.value.trim()}`);
-    route();
+    refresh();
   },
     plantFields(inputs),
     el("div", { class: "actions" },
       el("button", { class: "btn go", type: "submit" }, "Save details")));
 
-  return plantsShell("plants",
-    el("div", { class: "actions" }, navButton("All plants", "#/plants/plants")),
+  return shell("plants",
+    el("div", { class: "actions" }, navButton("All plants", "#/plants")),
     el("header", { class: "section" },
       plantName(plant.name, plant.color, "h2"),
       plant.archived ? el("p", { class: "muted" }, "Archived: not shown in Due.") : null),
 
     el("div", { class: "split" },
-    el("section", { class: "section" },
-      el("header", {},
-        el("h2", {}, "Care rules ", el("span", { class: "count" }, plant.rules.length)),
-        freeTypes.length
-          ? el("button", { class: "btn go", type: "button", onclick: () => {
-              addRule.replaceChildren(el("div", { class: "raised" },
-                ruleForm(plant, null, freeTypes, () => { addRule.hidden = true; })));
-              addRule.hidden = false;
-            } }, "Add care rule")
-          : null),
-      freeTypes.length === 0
-        ? el("div", { class: "stack" },
-            el("p", { class: "hint" }, "Every care type has a rule here."),
-            el("div", { class: "actions" }, navButton("Add care types", "#/plants/types")))
-        : null,
-      addRule,
-      plant.rules.length
-        ? el("ul", { class: "list" }, plant.rules.map((r) => ruleCard(plant, r, data.care_types)))
-        : el("p", { class: "empty" }, "No care rules yet.")),
+      el("section", { class: "section" },
+        el("header", {},
+          el("h2", {}, "Care rules ", el("span", { class: "count" }, plant.rules.length)),
+          freeTypes.length
+            ? el("button", { class: "btn go", type: "button", onclick: () => {
+                addRule.replaceChildren(el("div", { class: "raised" },
+                  ruleForm(plant, null, freeTypes, () => { addRule.hidden = true; })));
+                addRule.hidden = false;
+              } }, "Add care rule")
+            : null),
+        freeTypes.length === 0
+          ? el("div", { class: "stack" },
+              el("p", { class: "hint" }, "Every care type has a rule here."),
+              el("div", { class: "actions" }, navButton("Add care types", "#/types")))
+          : null,
+        addRule,
+        plant.rules.length
+          ? el("ul", { class: "list" }, plant.rules.map((r) => ruleCard(plant, r, data.care_types)))
+          : el("p", { class: "empty" }, "No care rules yet.")),
 
-    el("div", { class: "side" },
-    el("section", { class: "section" },
-      el("header", {},
-        el("h2", {}, "Journal"),
-        navButton("Open journal", `#/plants/journal/${plant.id}`))),
+      el("div", { class: "side" },
+        el("section", { class: "section" },
+          el("header", {},
+            el("h2", {}, "Journal"),
+            navButton("Open journal", `#/journal/${plant.id}`))),
 
-    el("section", { class: "section" },
-      el("header", {}, el("h2", {}, "Details")),
-      details,
-      el("div", { class: "actions" },
-        plant.archived
-          ? el("button", { class: "btn", type: "button",
-                           onclick: () => setPlantArchived(plant, false).catch(handleError) },
-               "Restore plant")
-          : el("button", { class: "btn danger", type: "button",
-                           onclick: () => setPlantArchived(plant, true).catch(handleError) },
-               "Archive plant"))))));
+        el("section", { class: "section" },
+          el("header", {}, el("h2", {}, "Details")),
+          details,
+          el("div", { class: "actions" },
+            plant.archived
+              ? el("button", { class: "btn", type: "button",
+                               onclick: () => setPlantArchived(plant, false).catch(handleError) },
+                   "Restore plant")
+              : el("button", { class: "btn danger", type: "button",
+                               onclick: () => setPlantArchived(plant, true).catch(handleError) },
+                   "Archive plant"))))));
 }
 
-/* ---- plants: journal --------------------------------------------------- */
-
-/* A care type select; "" means a plain note. */
-function typeSelect(types, selected) {
-  return el("select", { "aria-label": "Care type" },
-    el("option", { value: "", selected: selected == null }, "Note only"),
-    types.map((t) => el("option", { value: t.id, selected: t.id === selected }, t.name)));
-}
+/* ---- journal ----------------------------------------------------------- */
 
 /* Inputs for a log entry, filled from entry (or today / note only). */
 function entryInputs(entry, types) {
   const e = entry || { date: today(), care_type_id: null, note: "" };
   return {
-    date: el("input", { type: "date", required: true, max: today(), value: e.date }),
-    type: typeSelect(types, e.care_type_id),
+    date: datePicker({ label: "Date", value: e.date, max: today() }),
+    type: careTypeDropdown("What", types, e.care_type_id, true),
     note: el("textarea", { maxlength: 4000 }, e.note),
   };
 }
@@ -795,7 +558,7 @@ function entryCard(entry, typeById, types) {
         editor.replaceChildren(form({}, async () => {
           await api("POST", "/api/plants/log/update", { id: entry.id, ...entryBody(inputs) });
           setStatus("Saved the entry");
-          route();
+          refresh();
         },
           entryFields(inputs),
           el("div", { class: "actions" },
@@ -812,27 +575,29 @@ function entryCard(entry, typeById, types) {
         try {
           await api("POST", "/api/plants/log/delete", { id: entry.id });
           setStatus("Deleted the entry");
-          route();
+          refresh();
         } catch (err) {
           handleError(err);
         }
       } }, "Delete")));
-  return el("li", { class: "card" }, view, editor);
+  const li = el("li", { class: "card" }, view, editor);
+  li.entryId = entry.id; /* for paging */
+  return li;
 }
 
 async function journalPage(id) {
   const data = await api("GET", "/api/plants");
   const plants = data.plants;
   if (plants.length === 0) {
-    return plantsShell("journal",
+    return shell("journal",
       el("div", { class: "empty" },
         el("p", {}, "Add a plant to start its journal."),
-        el("div", { class: "actions" }, navButton("Go to Plants", "#/plants/plants"))));
+        el("div", { class: "actions" }, navButton("Go to Plants", "#/plants"))));
   }
   const plant = plants.find((p) => p.id === id) ||
                 plants.find((p) => !p.archived) || plants[0];
   if (plant.id !== id) {
-    history.replaceState(null, "", `#/plants/journal/${plant.id}`);
+    history.replaceState(null, "", `#/journal/${plant.id}`);
   }
 
   const log = await api("GET", `/api/plants/log?plant_id=${plant.id}`);
@@ -840,18 +605,22 @@ async function journalPage(id) {
   const typeById = new Map(types.map((t) => [t.id, t]));
   const active = types.filter((t) => !t.archived);
 
-  const picker = el("select", {
-    "aria-label": "Plant",
-    onchange: (e) => go(`#/plants/journal/${e.target.value}`),
-  }, plants.map((p) =>
-    el("option", { value: p.id, selected: p.id === plant.id },
-       p.archived ? `${p.name} (archived)` : p.name)));
+  const picker = dropdown({
+    label: "Show another plant",
+    options: plants.map((p) => ({
+      value: String(p.id),
+      label: p.archived ? `${p.name} (archived)` : p.name,
+      render: () => plantName(p.archived ? `${p.name} (archived)` : p.name, p.color),
+    })),
+    value: String(plant.id),
+    onchange: (value) => go(`#/journal/${value}`),
+  });
 
   const inputs = entryInputs(null, active);
   const add = form({ class: "raised" }, async () => {
     await api("POST", "/api/plants/log/add", { plant_id: plant.id, ...entryBody(inputs) });
     setStatus("Added the entry");
-    route();
+    refresh();
   },
     el("h2", {}, "New entry"),
     entryFields(inputs),
@@ -859,29 +628,26 @@ async function journalPage(id) {
       el("button", { class: "btn go", type: "submit" }, "Add entry")));
 
   const list = el("ul", { class: "list" }, log.entries.map((e) => entryCard(e, typeById, types)));
-  let more = log.more;
   const olderButton = el("button", { class: "btn", type: "button", onclick: async () => {
     olderButton.disabled = true;
     try {
       const last = list.lastElementChild.entryId;
       const older = await api("GET", `/api/plants/log?plant_id=${plant.id}&before=${last}`);
-      for (const e of older.entries) list.append(withId(entryCard(e, typeById, types), e.id));
-      more = older.more;
-      olderButton.hidden = !more;
+      for (const e of older.entries) list.append(entryCard(e, typeById, types));
+      olderButton.hidden = !older.more;
     } catch (err) {
       handleError(err);
     } finally {
       olderButton.disabled = false;
     }
   } }, "Show older entries");
-  [...list.children].forEach((li, i) => withId(li, log.entries[i].id));
-  olderButton.hidden = !more;
+  olderButton.hidden = !log.more;
 
-  return plantsShell("journal",
-    el("div", { class: `card marked picker c-${plant.color}` },
+  return shell("journal",
+    el("div", { class: `card marked plant-picker c-${plant.color}` },
       plantName(plant.name, plant.color, "h2"),
       field("Show another plant", picker),
-      navButton("Open plant", `#/plants/plants/${plant.id}`)),
+      navButton("Open plant", `#/plants/${plant.id}`)),
     el("div", { class: "split" },
       el("section", { class: "section" },
         el("header", {}, el("h2", {}, "Entries")),
@@ -890,18 +656,12 @@ async function journalPage(id) {
       el("div", { class: "side first" }, add)));
 }
 
-/* Remembers which log entry a list item shows, for paging. */
-function withId(li, id) {
-  li.entryId = id;
-  return li;
-}
-
-/* ---- plants: care types ------------------------------------------------ */
+/* ---- care types -------------------------------------------------------- */
 
 async function setTypeArchived(type, archived) {
   await api("POST", "/api/plants/types/archive", { id: type.id, archived });
   setStatus(`${archived ? "Archived" : "Restored"} ${type.name}`);
-  route();
+  refresh();
 }
 
 function typeRow(type) {
@@ -918,7 +678,7 @@ function typeRow(type) {
       await api("POST", "/api/plants/types/update",
                 { id: type.id, name: name.value.trim(), color: color.value });
       setStatus(`Saved ${name.value.trim()}`);
-      route();
+      refresh();
     },
       careChip(type.name, type.color),
       name,
@@ -939,7 +699,7 @@ async function typesPage() {
                              placeholder: "e.g. Watering" });
   const color = colorPicker(nextColor(data.care_types.map((t) => t.color)));
 
-  return plantsShell("types",
+  return shell("types",
     el("section", { class: "section" },
       el("p", { class: "hint" },
          "Care types are what you do to plants. Each plant gets its own rule per type."),
@@ -947,7 +707,7 @@ async function typesPage() {
         await api("POST", "/api/plants/types/add",
                   { name: name.value.trim(), color: color.value });
         setStatus(`Added ${name.value.trim()}`);
-        route();
+        refresh();
       },
         name,
         color,
@@ -971,70 +731,22 @@ async function typesPage() {
       : null);
 }
 
-/* ---- session ----------------------------------------------------------- */
+/* ---- routing ----------------------------------------------------------- */
 
-function renderLogin() {
-  renderSeq++; /* drop any page still loading */
-  logoutButton.hidden = true;
-  homeButton.hidden = true;
-  const password = el("input", { type: "password", name: "password", required: true,
-                                 autocomplete: "current-password" });
-  app.replaceChildren(form({ class: "raised login" }, async () => {
-    setStatus("Checking…");
-    try {
-      await api("POST", "/api/login", { password: password.value });
-    } catch (err) {
-      password.value = "";
-      password.focus();
-      setStatus("");
-      throw err;
-    }
-    setStatus("");
-    route();
-  },
-    el("h1", {}, "nylm"),
-    field("Password", password),
-    el("div", { class: "actions" }, el("button", { class: "btn go", type: "submit" }, "Log in"))));
-  password.focus();
+/* ["plants", "3"] -> the plant page, etc. Unknown hashes go to Due. */
+function route(parts) {
+  const [section, rawId] = parts;
+  const id = rawId === undefined ? null : Number(rawId);
+  if (id !== null && !(Number.isInteger(id) && id > 0)) {
+    go("#/due");
+    return null;
+  }
+  if (section === "due" && id === null) return duePage();
+  if (section === "plants") return id ? plantPage(id) : plantsPage();
+  if (section === "journal") return journalPage(id);
+  if (section === "types" && id === null) return typesPage();
+  go("#/due");
+  return null;
 }
 
-logoutButton.addEventListener("click", async () => {
-  try {
-    await api("POST", "/api/logout");
-    setStatus("Logged out");
-  } catch (err) {
-    setStatus("Logout failed: " + err.message, true);
-    return;
-  }
-  renderLogin();
-});
-
-/* ---- startup ----------------------------------------------------------- */
-
-/*
- * A 401 means the session is gone: show the login form (returns true). Any
- * other error goes to the status line; the caller may also show it inline.
- */
-function handleError(err) {
-  if (err instanceof ApiError && err.status === 401) {
-    if (!app.querySelector(".login")) {
-      setStatus("Please log in");
-      renderLogin();
-      return true;
-    }
-    return false; /* wrong password: the login form shows it */
-  }
-  setStatus(err.message || String(err), true);
-  return false;
-}
-
-async function start() {
-  try {
-    await api("GET", "/api/session");
-    route();
-  } catch (err) {
-    handleError(err);
-  }
-}
-
-start();
+startApp(route);
