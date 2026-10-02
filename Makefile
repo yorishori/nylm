@@ -56,6 +56,19 @@ build/gen/migrations.c: $(MIGRATIONS) tools/embed-migrations.sh
 build/gen/migrations.o: build/gen/migrations.c
 	$(CC) -std=c11 -c -o $@ $<
 
+# Unit tests link every debug object except main.o.
+TEST_SRC = $(wildcard tests/test_*.c)
+TEST_BIN = $(TEST_SRC:tests/%.c=build/tests/%)
+TEST_OBJ = $(filter-out build/debug/main.o,$(DBG_OBJ)) $(VENDOR_OBJ) $(GEN_OBJ)
+
+build/tests/%: tests/%.c tests/test.h $(TEST_OBJ)
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -O0 -g $(SAN) -o $@ $< $(TEST_OBJ) $(LDLIBS)
+
+test: nylm-debug $(TEST_BIN)
+	@for t in $(TEST_BIN); do $$t || exit 1; done
+	tests/smoke.sh ./nylm-debug
+
 # Development server over plain HTTP on :8080.
 run: nylm-debug
 	NYLM_TLS=off ./nylm-debug
@@ -63,7 +76,7 @@ run: nylm-debug
 clean:
 	rm -rf build nylm nylm-debug
 
-.PHONY: release debug run clean cert
+.PHONY: release debug run clean cert test
 
 -include $(REL_OBJ:.o=.d) $(DBG_OBJ:.o=.d)
 
