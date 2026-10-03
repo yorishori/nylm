@@ -191,6 +191,22 @@ static int pictures_parse(const char *json, struct tags *out)
     return 0;
 }
 
+int music_set_cover(struct tags *t, const char *hash)
+{
+    if (!art_hash_valid(hash))
+        return -1;
+    struct tag_picture *p = arena_alloc(sizeof *p);
+    if (p == NULL)
+        return -1;
+    memset(p, 0, sizeof *p);
+    memcpy(p->hash, hash, ART_HASH_LEN + 1);
+    p->type = "Front Cover";
+    p->description = "";
+    t->pictures = p;
+    t->npictures = 1;
+    return 0;
+}
+
 int music_track_tags(sqlite3_stmt *st, int col, struct tags *out)
 {
     memset(out, 0, sizeof *out);
@@ -671,11 +687,13 @@ static long remove_missing(const char *path)
     return rc == 0 ? (long)sqlite3_changes(music_db) : -1;
 }
 
-/* Deletes the art rows no track uses. 0 or -1. */
+/* Deletes the art rows no track uses and no pending change sets. 0 or -1. */
 static int remove_unused_art(void)
 {
     sqlite3_stmt *st = db_prepare(music_db,
-        "DELETE FROM art WHERE hash NOT IN (SELECT hash FROM track_pictures)");
+        "DELETE FROM art WHERE hash NOT IN (SELECT hash FROM track_pictures)"
+        " AND hash NOT IN (SELECT value FROM changes"
+        "  WHERE state = 'pending' AND field = '" MUSIC_COVER_FIELD "')");
     int rc = st != NULL ? step_once(st) : -1;
     sqlite3_finalize(st);
     return rc;
@@ -1031,9 +1049,16 @@ static int apply_pending(long long track_id, struct tags *want, unsigned *change
     int rc;
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
         (*rows)++;
-        int f = tags_field_of((const char *)sqlite3_column_text(st, 0));
+        const char *name = (const char *)sqlite3_column_text(st, 0);
+        int f = tags_field_of(name);
         const char *value = arena_strndup((const char *)sqlite3_column_text(st, 1),
                                           (size_t)sqlite3_column_bytes(st, 1));
+        if (strcmp(name, MUSIC_COVER_FIELD) == 0) {
+            if (value == NULL || music_set_cover(want, value) != 0)
+                *bad = 1;
+            *changed |= MUSIC_COVER_BIT;
+            continue;
+        }
         if (f < 0 || value == NULL) {
             *bad = 1;
             continue;
@@ -1048,6 +1073,60 @@ static int apply_pending(long long track_id, struct tags *want, unsigned *change
         db_log_error(music_db, "write: changes");
     sqlite3_finalize(st);
     return rc == SQLITE_DONE ? 0 : -1;
+}
+
+/*
+ * Gets the new cover of want (its one picture, set by music_set_cover())
+ * ready to write: it must be stored as a JPEG, its bytes must still have
+ * its hash, and it must decode completely, which makes its thumbnail (and
+ * records its size). Its bytes go into the arena. 0, or -1 with why in
+ * note.
+ */
+static int load_cover(struct tags *want, char *note, size_t size)
+{
+    const char *hash = want->pictures[0].hash;
+    sqlite3_stmt *st = db_prepare(music_db, "SELECT mime FROM art WHERE hash = ?");
+    int rc = st != NULL && sqlite3_bind_text(st, 1, hash, -1, SQLITE_STATIC) == SQLITE_OK
+                 ? sqlite3_step(st)
+                 : SQLITE_ERROR;
+    const char *mime = rc == SQLITE_ROW ? (const char *)sqlite3_column_text(st, 0) : NULL;
+    int jpeg = mime != NULL && strcmp(mime, "image/jpeg") == 0;
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE)
+        db_log_error(music_db, "write: cover");
+    sqlite3_finalize(st);
+    if (!jpeg) {
+        snprintf(note, size, "not written: the picture is not stored as a JPEG");
+        return -1;
+    }
+    unsigned char *data = arena_alloc(ART_MAX_UPLOAD);
+    long n = data != NULL ? art_load(hash, data, ART_MAX_UPLOAD) : -1;
+    char check[ART_HASH_LEN + 1];
+    if (n < 0 || art_hash(data, (size_t)n, check) != 0 || strcmp(check, hash) != 0) {
+        snprintf(note, size, "not written: the stored picture is missing or damaged");
+        return -1;
+    }
+    unsigned width, height;
+    char err[200];
+    if (make_thumbnail(hash, data, (size_t)n, &width, &height, err, sizeof err) != 0) {
+        snprintf(note, size, "not written: the picture can not be read: %s", err);
+        return -1;
+    }
+    st = db_prepare(music_db, "UPDATE art SET width = ?, height = ?, thumb = 1 WHERE hash = ?");
+    int ok = st != NULL && sqlite3_bind_int64(st, 1, width) == SQLITE_OK &&
+             sqlite3_bind_int64(st, 2, height) == SQLITE_OK &&
+             sqlite3_bind_text(st, 3, hash, -1, SQLITE_STATIC) == SQLITE_OK && step_once(st) == 0;
+    sqlite3_finalize(st);
+    struct tag_picture *p = ok ? arena_alloc(sizeof *p) : NULL;
+    if (p == NULL) {
+        snprintf(note, size, "not written: internal error (see the log)");
+        return -1;
+    }
+    *p = want->pictures[0];
+    p->data = data;
+    p->size = (size_t)n;
+    p->mime = "image/jpeg";
+    want->pictures = p;
+    return 0;
 }
 
 /* Lists in note what is wrong with want ("DATE is required; ..."). 1 if
@@ -1096,6 +1175,8 @@ static int write_track(struct scan *s, long long track_id, struct write_counts *
         snprintf(note, sizeof note, "not written: a change in the queue can not be read");
     else if (!music_inside(path))
         snprintf(note, sizeof note, "not written: the file is not in the music folder");
+    else if ((changed & MUSIC_COVER_BIT) && load_cover(&want, note, sizeof note) != 0)
+        ; /* note says why */
     else if (tags_prepare(&want, changed, warning, sizeof warning) != 0)
         snprintf(note, sizeof note, "not written: out of memory");
     else if (!check_all(&want, note, sizeof note)) {

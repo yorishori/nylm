@@ -464,7 +464,8 @@ else PASSED=$((PASSED + 1)); fi
 for route in "GET /api/music" "GET /api/music/albums" "GET /api/music/album?track=1" \
              "GET /api/music/values?field=artist" "GET /api/music/changes" \
              "POST /api/music/queue" "POST /api/music/discard" "POST /api/music/scan" \
-             "POST /api/music/write" "GET /api/music/art?hash=$(printf '%064d' 0)&size=full"; do
+             "POST /api/music/write" "GET /api/music/art?hash=$(printf '%064d' 0)&size=full" \
+             "POST /api/music/cover"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
@@ -786,11 +787,99 @@ expect 400 "art bad size"       -b "$JAR" "$AR?hash=$FRONT&size=big"
 expect_body "'size' must be full or thumb" "size message"
 expect 405 "art POST"           -b "$JAR" -H "$J" -d '{}' "$AR?hash=$FRONT&size=full"
 
+# Setting the album cover: the upload is stored and queued for every track
+# of the album; the write service makes it each track's only picture.
+C=/api/music/cover
+COVER=d5f6219958dc70a334eed2ab216ad29f487608ffabd2af5d9a0578fd0e1a4fcd
+# cover_json FILE: the body that sets the cover of track $TA's album to FILE.
+cover_json() {
+    printf '{"album":%s,"image":"%s"}' "$TA" "$(base64 -w0 "$1")" > "$TMP/cover.json"
+}
+BPM_BATCH=$(sqlite3 "$MDB" "SELECT DISTINCT batch FROM changes WHERE state = 'pending'")
+post "discard before covers"   200 $D "{\"batch\":$BPM_BATCH}"
+N=$(sqlite3 "$MDB" "SELECT count(*) FROM tracks WHERE album = 'Some Album'")
+{ printf '\377\330\377'; head -c 716797 /dev/zero; } > "$TMP/max.jpg"
+cover_json "$TMP/max.jpg"
+expect 200 "cover of 700 KiB"  -b "$JAR" -H "$J" --data-binary "@$TMP/cover.json" "$B$C"
+post "discard it"              200 $D "{\"batch\":$(sqlite3 "$MDB" "SELECT max(batch) FROM changes")}"
+printf '\0' >> "$TMP/max.jpg"
+cover_json "$TMP/max.jpg"
+expect 413 "cover too big"     -b "$JAR" -H "$J" --data-binary "@$TMP/cover.json" "$B$C"
+expect_body "bigger than 700 KiB" "too big message"
+cover_json tests/data/cover.jpg
+expect 415 "cover needs json"  -b "$JAR" --data-binary "@$TMP/cover.json" "$B$C"
+post "cover no album"          400 $C '{"image":"/9j/"}'
+post "cover album 0"           400 $C '{"album":0,"image":"/9j/"}'
+post "cover album text"        400 $C '{"album":"x","image":"/9j/"}'
+post "cover no image"          400 $C "{\"album\":$TA}"
+post "cover image number"      400 $C "{\"album\":$TA,\"image\":1}"
+post "cover image empty"       400 $C "{\"album\":$TA,\"image\":\"\"}"
+post "cover not base64"        400 $C "{\"album\":$TA,\"image\":\"/9j!\"}"
+expect_body "'image' must be base64" "base64 message"
+post "cover base64 length"     400 $C "{\"album\":$TA,\"image\":\"/9j/4\"}"
+post "cover base64 lines"      400 $C "{\"album\":$TA,\"image\":\"/9j/\\n4AAA\"}"
+post "cover not a JPEG"        400 $C "{\"album\":$TA,\"image\":\"$(printf '\211PNG\r\n\032\n' | base64)\"}"
+expect_body "'image' must be a JPEG picture" "JPEG message"
+post "cover missing album"     404 $C '{"album":999,"image":"/9j/"}'
+flock "$LOCK" sleep 1 &
+LOCKER=$!
+sleep 0.3
+expect 409 "cover while busy"  -b "$JAR" -H "$J" --data-binary "@$TMP/cover.json" "$B$C"
+wait "$LOCKER"
+cp "$M/Artist/Art/01.flac" "$TMP/before.flac"
+expect 200 "set the cover"     -b "$JAR" -H "$J" --data-binary "@$TMP/cover.json" "$B$C"
+expect_body "\"queued\":$N,\"dropped\":0,\"hash\":\"$COVER\"}" "one change per track"
+same_file "uploading leaves the file alone" "$TMP/before.flac" "$M/Artist/Art/01.flac"
+same_file "the cover is stored as sent" tests/data/cover.jpg "$ART/$COVER"
+query "image/jpeg|763||0" "the cover listed, not decoded" \
+    "SELECT mime, size, width, thumb FROM art WHERE hash = '$COVER'"
+expect 200 "new cover's thumbnail: the picture" -b "$JAR" "$AR?hash=$COVER&size=thumb"
+same_file "the cover is sent" tests/data/cover.jpg "$TMP/body"
+expect 200 "album with a new cover" -b "$JAR" "$B/api/music/album?track=$TA"
+expect_body "\"pending\":{\"picture\":\"$COVER\"},\"pictures\":[{\"hash\":\"$FRONT\"" "the new cover is pending"
+expect 200 "albums with a new cover" -b "$JAR" "$B/api/music/albums?track=$TA"
+expect_body '"changed":["picture"]' "the album's cover changes"
+expect 200 "changes with a cover" -b "$JAR" "$B/api/music/changes"
+expect_body "\"field\":\"picture\",\"value\":\"$COVER\",\"now\":\"[\\\"$FRONT\\\",\\\"$BACK\\\"]\"" "the change shows the pictures now"
+expect 200 "the same cover again" -b "$JAR" -H "$J" --data-binary "@$TMP/cover.json" "$B$C"
+expect_body '"queued":0,"dropped":0' "nothing new to queue"
+post "picture through queue"   400 $Q "{\"edits\":[{\"track\":$TA,\"field\":\"picture\",\"value\":\"$COVER\"}]}"
+
+# The write: each valid track gets the cover as its only picture (the Art
+# copies and 02.FLAC break the rules and are not written); the cover is
+# decoded and gets a thumbnail.
+service 0 "music-write, cover"  music-write
+logged "2 tracks written; 2 changes done, 0 with warnings, 3 failed" "cover write counts"
+query "0|$COVER|Front Cover|" "the cover is the only picture (FLAC)" \
+    "SELECT position, hash, type, description FROM track_pictures
+     WHERE track_id = (SELECT id FROM tracks WHERE path LIKE '%Multi/01.flac')"
+query "0|$COVER|Front Cover|" "the cover is the only picture (MP3)" \
+    "SELECT position, hash, type, description FROM track_pictures
+     WHERE track_id = (SELECT id FROM tracks WHERE path LIKE '%Album/01.mp3')"
+query "300|300|1" "the cover decoded" "SELECT width, height, thumb FROM art WHERE hash = '$COVER'"
+if [ -f "$ART/$COVER.thumb" ]; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: no thumbnail of the cover"; fi
+expect 200 "same cover, now in the files" -b "$JAR" -H "$J" --data-binary "@$TMP/cover.json" "$B$C"
+expect_body '"queued":3,"dropped":0' "only the tracks without it are queued"
+post "discard that"            200 $D "{\"batch\":$(sqlite3 "$MDB" "SELECT max(batch) FROM changes")}"
+
+# A cover that does not decode is not written; the files stay as they were.
+head -c 400 tests/data/cover.jpg > "$TMP/damaged.jpg"
+cover_json "$TMP/damaged.jpg"
+post "a damaged cover is queued" 200 $C "$(cat "$TMP/cover.json")"
+cp "$M/Artist/Album/01.mp3" "$TMP/before.mp3"
+service 0 "music-write, damaged cover" music-write
+logged "not written: the picture can not be read" "damaged cover refused"
+same_file "a refused cover leaves the file alone" "$TMP/before.mp3" "$M/Artist/Album/01.mp3"
+query "$COVER" "a refused cover leaves the cache alone" \
+    "SELECT hash FROM track_pictures
+     WHERE track_id = (SELECT id FROM tracks WHERE path LIKE '%Album/01.mp3')"
+
 # A scan of the whole library removes the pictures no track has.
 rm -r "$M/Artist/Art"
 service 0 "scan after removing the pictures" music-scan
-logged "4 unused picture files removed" "unused picture files removed"
-query "0" "unused art rows removed" "SELECT count(*) FROM art"
+logged "6 unused picture files removed" "unused picture files removed"
+query "$COVER" "unused art rows removed" "SELECT hash FROM art"
 expect 404 "removed picture"    -b "$JAR" "$AR?hash=$FRONT&size=full"
 
 expect 204 "logout"             -b "$JAR" -c "$JAR" -X POST "$B/api/logout"

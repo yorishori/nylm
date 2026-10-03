@@ -59,8 +59,9 @@ int music_scan(const char *path);
 /*
  * `nylm music-write`: writes the pending changes, one track at a time
  * (src/tags.c checks the file and verifies the write), records each
- * result, and reads each track back into the cache. 0, or 1 if it could
- * not run.
+ * result, and reads each track back into the cache. A new cover is first
+ * checked: its bytes must still have its hash and decode completely (which
+ * makes its thumbnail). 0, or 1 if it could not run.
  */
 int music_write(void);
 
@@ -93,6 +94,18 @@ const char *music_busy(int *error);
     " (SELECT json_group_array(value ORDER BY position) FROM track_values v"            \
     "  WHERE v.track_id = t.id AND v.field = 'composer')"
 #define MUSIC_TAG_NCOLS (1 + TAG_FIELDS)
+
+/*
+ * The field of a change that sets the album cover (value: the hash of an
+ * uploaded JPEG in the art table), and its bit next to the tags' bits
+ * (1u << field) in a set of changed fields.
+ */
+#define MUSIC_COVER_FIELD "picture"
+#define MUSIC_COVER_BIT   (1u << TAG_FIELDS)
+
+/* Sets t's pictures to one front cover, the picture hash (in the arena).
+ * 0, or -1 if hash is not one or out of memory. */
+int music_set_cover(struct tags *t, const char *hash);
 
 /* Reads MUSIC_TAG_COLUMNS from column col of st's row into out (strings in
  * the arena). 0, or -1 when out of memory or a JSON array is invalid. */

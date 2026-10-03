@@ -81,11 +81,14 @@ struct tag_values {
 
 #define TAGS_MAX_PICTURES 32 /* pictures of one track that are kept */
 
-/* An embedded picture. */
+/* An embedded picture. data, size and mime are only set to write it. */
 struct tag_picture {
     char hash[ART_HASH_LEN + 1]; /* SHA-256 of its bytes */
     const char *type;            /* "Front Cover", ...; "" if the format has none */
     const char *description;     /* "" if none */
+    const unsigned char *data;
+    size_t size;
+    const char *mime;
 };
 
 struct tags {
@@ -152,10 +155,11 @@ enum tags_result {
 /*
  * Writes want into the file in place, through TagLib. First the file must
  * still hold now (what the cache has, pictures included); then every tag
- * that differs is set (a genre or composer value by value, in order) and
- * the file is saved once; then it is read back: every tag must read as
- * want, and the pictures must be the same. err says why when not
- * TAGS_WRITTEN.
+ * that differs is set (a genre or composer value by value, in order); if
+ * want's pictures differ from the file's, they replace all of them (want
+ * then has exactly one, with its data and mime); the file is saved once;
+ * then it is read back: every tag and the pictures (by their bytes) must
+ * read as want. err says why when not TAGS_WRITTEN.
  */
 enum tags_result tags_write(const char *path, const struct tags *now, const struct tags *want,
                             char *err, size_t errlen);

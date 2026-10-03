@@ -486,6 +486,59 @@ static void test_write(void)
     CHECK_STR(t.value[TAG_ALBUMSORT].v[0], "Other Album");
 }
 
+/* A new cover (want's one picture, with its bytes): fills cover. */
+static void make_cover(struct tag_picture *cover)
+{
+    static const unsigned char jpeg[] = "\xff\xd8\xff\xe0 a new cover";
+    memset(cover, 0, sizeof *cover);
+    CHECK(art_hash(jpeg, sizeof jpeg, cover->hash) == 0);
+    cover->type = "Front Cover";
+    cover->description = "";
+    cover->data = jpeg;
+    cover->size = sizeof jpeg;
+    cover->mime = "image/jpeg";
+}
+
+/* A cover replaces all the pictures, alone or with tags, in FLAC and MP3. */
+static void test_write_cover(void)
+{
+    char path[512], err[256];
+    struct tags now, want, t;
+    struct tag_picture cover;
+    make_cover(&cover);
+
+    copy_fixture("tagged.flac", "cover.flac", path, sizeof path);
+    add_pictures(path, 3, "old");
+    CHECK(tags_read(path, &now, NULL, NULL, err, sizeof err) == 0 && now.npictures == 3);
+    want = now;
+    want.pictures = &cover;
+    want.npictures = 1;
+    CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_WRITTEN);
+    CHECK(tags_read(path, &t, NULL, NULL, err, sizeof err) == 0 && t.npictures == 1);
+    CHECK_STR(t.pictures[0].hash, cover.hash);
+    CHECK_STR(t.pictures[0].type, "Front Cover");
+    CHECK_STR(t.value[TAG_TITLE].v[0], "Song Two"); /* tags untouched */
+
+    copy_fixture("tagged.mp3", "cover.mp3", path, sizeof path);
+    add_picture(path);
+    CHECK(tags_read(path, &now, NULL, NULL, err, sizeof err) == 0 && now.npictures == 1);
+    want = now;
+    want.pictures = &cover;
+    want.value[TAG_MOOD] = one("calm");
+    CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_WRITTEN);
+    CHECK(tags_read(path, &t, NULL, NULL, err, sizeof err) == 0 && t.npictures == 1);
+    CHECK_STR(t.pictures[0].hash, cover.hash);
+    CHECK_STR(t.value[TAG_MOOD].v[0], "calm");
+
+    /* the same cover again: nothing about the pictures changes */
+    now = t;
+    want = t;
+    want.value[TAG_MOOD] = one("bright");
+    CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_WRITTEN);
+    CHECK(tags_read(path, &t, NULL, NULL, err, sizeof err) == 0 && t.npictures == 1);
+    CHECK_STR(t.pictures[0].hash, cover.hash);
+}
+
 /* Refusals leave the file byte for byte as it was. */
 static void test_refusals(void)
 {
@@ -510,6 +563,24 @@ static void test_refusals(void)
     now.npictures = 1;
     CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_NOT_WRITTEN);
     CHECK(strstr(err, "(the pictures)") != NULL);
+    CHECK(slurp(path, b, sizeof b) == len && memcmp(a, b, (size_t)len) == 0);
+
+    /* new pictures: exactly one, with its bytes */
+    now.value[TAG_DATE] = one("2001");
+    now.npictures = 0;
+    now.pictures = NULL;
+    struct tag_picture covers[2];
+    make_cover(&covers[0]);
+    make_cover(&covers[1]);
+    want = now;
+    want.pictures = covers;
+    want.npictures = 2;
+    CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_NOT_WRITTEN);
+    CHECK(strstr(err, "only one picture") != NULL);
+    want.npictures = 1;
+    covers[0].data = NULL;
+    CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_NOT_WRITTEN);
+    CHECK(strstr(err, "only one picture") != NULL);
     CHECK(slurp(path, b, sizeof b) == len && memcmp(a, b, (size_t)len) == 0);
 
     /* not audio, missing, a symlink, a folder */
@@ -554,6 +625,7 @@ int main(void)
     test_read();
     test_pictures();
     test_write();
+    test_write_cover();
     test_refusals();
     test_read_back();
 

@@ -235,6 +235,37 @@ const char *const music_migrations[] = {
     "    PRIMARY KEY (track_id, position)"
     ") STRICT, WITHOUT ROWID;"
     "CREATE INDEX track_pictures_by_hash ON track_pictures (hash);",
+
+    /* 3: a change may set the album cover: field 'picture', value the
+     * hash of an uploaded picture in art; written, it replaces all of the
+     * track's pictures. SQLite can not change a CHECK: the table is made
+     * again with the same rows. */
+    "CREATE TABLE changes_new ("
+    "    id       INTEGER PRIMARY KEY,"
+    "    batch    INTEGER NOT NULL,"
+    "    track_id INTEGER REFERENCES tracks(id) ON DELETE SET NULL,"
+    "    field    TEXT    NOT NULL CHECK (field IN ('title', 'album', 'artist', 'albumartist',"
+    "                     'tracknumber', 'discnumber', 'date', 'compilation', 'isrc', 'asin',"
+    "                     'bpm', 'copyright', 'encodedby', 'mood', 'media', 'label',"
+    "                     'catalognumber', 'barcode', 'musicbrainz_trackid',"
+    "                     'musicbrainz_albumid', 'genre', 'composer', 'picture')),"
+    "    value    TEXT    NOT NULL,"
+    "    started  INTEGER,"
+    "    finished INTEGER,"
+    "    state    TEXT    NOT NULL DEFAULT 'pending' CHECK (state IN"
+    "                     ('pending', 'running', 'done', 'warning', 'failed')),"
+    "    done     INTEGER NOT NULL DEFAULT 0 CHECK (done IN (0, 1)),"
+    "    note     TEXT    NOT NULL DEFAULT ''"
+    ") STRICT;"
+    "INSERT INTO changes_new (id, batch, track_id, field, value, started, finished, state,"
+    "    done, note)"
+    "  SELECT id, batch, track_id, field, value, started, finished, state, done, note"
+    "  FROM changes;"
+    "DROP TABLE changes;"
+    "ALTER TABLE changes_new RENAME TO changes;"
+    "CREATE UNIQUE INDEX changes_one_pending ON changes (track_id, field)"
+    "    WHERE state = 'pending';"
+    "CREATE INDEX changes_by_state ON changes (state, batch);",
 };
 
 const int music_migration_count = sizeof music_migrations / sizeof music_migrations[0];

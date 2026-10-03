@@ -140,14 +140,15 @@ static int add_rows(cJSON *list, sqlite3_stmt *st, int ncols, int max)
     return rc == SQLITE_DONE ? 0 : -1;
 }
 
-/* Adds key: [names of the fields whose bit is set]. NULL when out of memory. */
+/* Adds key: [names of the fields whose bit is set; "picture" for
+ * MUSIC_COVER_BIT]. NULL when out of memory. */
 static cJSON *add_field_names(cJSON *obj, const char *key, unsigned bits)
 {
     cJSON *list = cJSON_AddArrayToObject(obj, key);
-    for (int i = 0; list != NULL && i < TAG_FIELDS; i++) {
+    for (int i = 0; list != NULL && i <= TAG_FIELDS; i++) {
         if ((bits & (1u << i)) == 0)
             continue;
-        cJSON *name = cJSON_CreateString(tags_name[i]);
+        cJSON *name = cJSON_CreateString(i < TAG_FIELDS ? tags_name[i] : MUSIC_COVER_FIELD);
         if (name == NULL || !cJSON_AddItemToArray(list, name))
             return NULL;
     }
@@ -231,8 +232,9 @@ static int track_exists(struct response *res, long long id)
 /*
  * The track's tags from st's row (MUSIC_TAG_COLUMNS at col) with its
  * pending changes applied (pending: "SELECT field, value FROM changes
- * WHERE state = 'pending' AND track_id = ?"), into the arena. *changed:
- * the bits of the fields with a pending change. 0 or -1 (logged).
+ * WHERE state = 'pending' AND track_id = ?"; a new cover is its only
+ * picture), into the arena. *changed: the bits of the fields with a
+ * pending change (MUSIC_COVER_BIT for the cover). 0 or -1 (logged).
  */
 static int planned_tags(sqlite3_stmt *st, int col, long long id, sqlite3_stmt *pending,
                         struct tags *out, unsigned *changed)
@@ -244,10 +246,16 @@ static int planned_tags(sqlite3_stmt *st, int col, long long id, sqlite3_stmt *p
     }
     int rc, bad = 0;
     while ((rc = sqlite3_step(pending)) == SQLITE_ROW && !bad) {
-        int f = tags_field_of((const char *)sqlite3_column_text(pending, 0));
+        const char *name = (const char *)sqlite3_column_text(pending, 0);
+        int f = tags_field_of(name);
         const char *v = (const char *)sqlite3_column_text(pending, 1);
         const char *copy = v != NULL ? arena_strndup(v, (size_t)sqlite3_column_bytes(pending, 1))
                                      : NULL;
+        if (strcmp(name, MUSIC_COVER_FIELD) == 0) {
+            bad = copy == NULL || music_set_cover(out, copy) != 0;
+            *changed |= bad ? 0 : MUSIC_COVER_BIT;
+            continue;
+        }
         bad = f < 0 || copy == NULL ||
               (tags_is_multi((enum tag_field)f)
                    ? music_values_parse(copy, &out->value[f]) != 0
@@ -563,8 +571,8 @@ void music_albums(struct request *req, struct response *res)
 /*
  * GET /api/music/album?track=N: the tracks of the album of track N: their
  * file (path, size, ext, scanned), tags as in the files, pending changes
- * ({field: new value}), pictures (PICTURES_SQL), and which planned tags
- * are missing or invalid.
+ * ({field: new value}; picture: the hash of a new cover), pictures
+ * (PICTURES_SQL), and which planned tags are missing or invalid.
  */
 void music_album(struct request *req, struct response *res)
 {
@@ -614,6 +622,8 @@ void music_album(struct request *req, struct response *res)
             ok = add_column(tags, tags_name[f], (enum tag_field)f, st, tags_col + 1 + f) != NULL &&
                  (!(changed & (1u << f)) ||
                   add_values(planned, tags_name[f], (enum tag_field)f, &t.value[f]) != NULL);
+        if (ok && (changed & MUSIC_COVER_BIT))
+            ok = cJSON_AddStringToObject(planned, MUSIC_COVER_FIELD, t.pictures[0].hash) != NULL;
         if (!ok) {
             rc = SQLITE_NOMEM;
             break;
@@ -693,7 +703,8 @@ void music_values(struct request *req, struct response *res)
     json_reply(res, 200, list);
 }
 
-/* A change's tag as the file has it now (genre and composer: JSON). */
+/* A change's tag as the file has it now (genre and composer: JSON; the
+ * cover: the hashes of the track's pictures, JSON). */
 #define NOW_VALUE                                                                      \
     "CASE c.field WHEN 'title' THEN t.title WHEN 'album' THEN t.album"                 \
     " WHEN 'artist' THEN t.artist WHEN 'albumartist' THEN t.albumartist"               \
@@ -705,6 +716,8 @@ void music_values(struct request *req, struct response *res)
     " WHEN 'catalognumber' THEN t.catalognumber WHEN 'barcode' THEN t.barcode"         \
     " WHEN 'musicbrainz_trackid' THEN t.musicbrainz_trackid"                           \
     " WHEN 'musicbrainz_albumid' THEN t.musicbrainz_albumid"                           \
+    " WHEN 'picture' THEN (SELECT json_group_array(hash ORDER BY position)"             \
+    "  FROM track_pictures p WHERE p.track_id = t.id)"                                 \
     " ELSE (SELECT json_group_array(value ORDER BY position) FROM track_values v"       \
     "  WHERE v.track_id = t.id AND v.field = c.field) END"
 
@@ -1073,6 +1086,165 @@ void music_queue(struct request *req, struct response *res)
     if (rc != 0 || out == NULL || cJSON_AddNumberToObject(out, "batch", (double)batch) == NULL ||
         cJSON_AddNumberToObject(out, "queued", queued) == NULL ||
         cJSON_AddNumberToObject(out, "dropped", dropped) == NULL) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, out);
+}
+
+/* 1 if the track's only picture is hash, 0 if not, -1 on error (logged). */
+static int has_only_picture(long long track, const char *hash)
+{
+    sqlite3_stmt *st = db_prepare(music_db,
+        "SELECT count(*) = 1 AND max(hash) = ?2 FROM track_pictures WHERE track_id = ?1");
+    int rc = st != NULL && sqlite3_bind_int64(st, 1, track) == SQLITE_OK &&
+                     sqlite3_bind_text(st, 2, hash, -1, SQLITE_STATIC) == SQLITE_OK
+                 ? sqlite3_step(st)
+                 : SQLITE_ERROR;
+    int same = rc == SQLITE_ROW ? sqlite3_column_int(st, 0) : -1;
+    if (rc != SQLITE_ROW)
+        db_log_error(music_db, "cover: pictures");
+    sqlite3_finalize(st);
+    return same;
+}
+
+/*
+ * Queues the cover hash for every track of the album of track album, as
+ * batch: or, for a track whose only picture it is already, drops its
+ * pending cover. Counts in *queued and *dropped. 0 or -1 (logged).
+ */
+static int queue_cover(long long album, const char *hash, long long batch, int *queued,
+                       int *dropped)
+{
+    sqlite3_stmt *tracks = db_prepare(music_db, "SELECT t.id FROM tracks t WHERE" SAME_ALBUM);
+    sqlite3_stmt *add = db_prepare(music_db,
+        "INSERT INTO changes (batch, track_id, field, value)"
+        " VALUES (?1, ?2, '" MUSIC_COVER_FIELD "', ?3)"
+        " ON CONFLICT (track_id, field) WHERE state = 'pending' DO UPDATE SET"
+        "  batch = excluded.batch, value = excluded.value"
+        " WHERE value IS NOT excluded.value");
+    sqlite3_stmt *drop = db_prepare(music_db,
+        "DELETE FROM changes WHERE state = 'pending' AND track_id = ?2"
+        " AND field = '" MUSIC_COVER_FIELD "'"); /* ?2 like add's */
+    int rc = tracks != NULL && add != NULL && drop != NULL &&
+                     sqlite3_bind_int64(tracks, 1, album) == SQLITE_OK
+                 ? SQLITE_ROW
+                 : SQLITE_ERROR;
+    while (rc == SQLITE_ROW && (rc = sqlite3_step(tracks)) == SQLITE_ROW) {
+        long long id = sqlite3_column_int64(tracks, 0);
+        int same = has_only_picture(id, hash);
+        sqlite3_stmt *st = same ? drop : add;
+        if (same < 0 || sqlite3_bind_int64(st, 2, id) != SQLITE_OK ||
+            (!same && (sqlite3_bind_int64(st, 1, batch) != SQLITE_OK ||
+                       sqlite3_bind_text(st, 3, hash, -1, SQLITE_STATIC) != SQLITE_OK)) ||
+            sqlite3_step(st) != SQLITE_DONE) {
+            rc = SQLITE_ERROR;
+            break;
+        }
+        *(same ? dropped : queued) += sqlite3_changes(music_db) > 0;
+        sqlite3_reset(st);
+        sqlite3_clear_bindings(st);
+    }
+    if (rc != SQLITE_DONE)
+        db_log_error(music_db, "queue cover");
+    sqlite3_finalize(tracks);
+    sqlite3_finalize(add);
+    sqlite3_finalize(drop);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+/*
+ * POST /api/music/cover {"album": track id, "image": base64 of a JPEG}:
+ * sets the album's cover. The picture (at most ART_MAX_UPLOAD bytes; only
+ * its first bytes are checked here, the write service decodes it) is
+ * stored in the art folder, and a change that makes it each track's only
+ * picture is queued for every track of the album, as one batch; nothing
+ * is written to the files until the write service runs. A track that has
+ * only this picture already gets none (its pending cover is dropped).
+ * -> 200 {batch, queued, dropped, hash}
+ */
+void music_cover(struct request *req, struct response *res)
+{
+    cJSON *body = json_body(req, res);
+    if (body == NULL)
+        return;
+    long long album;
+    const char *image = NULL;
+    const char *err = get_id(body, "album", &album);
+    if (err == NULL)
+        err = json_get_string(body, "image", 1, HTTP_MAX_BODY, &image);
+    if (err != NULL) {
+        json_error(res, 400, err);
+        return;
+    }
+    unsigned char *data = arena_alloc(ART_MAX_UPLOAD);
+    if (data == NULL) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    long size = art_base64_decode(image, strlen(image), data, ART_MAX_UPLOAD);
+    if (size == -2) {
+        json_error(res, 413, "the picture is bigger than 700 KiB");
+        return;
+    }
+    if (size < 0) {
+        json_error(res, 400, "'image' must be base64 (A-Z a-z 0-9 + /, padded with =)");
+        return;
+    }
+    const char *mime = art_mime(data, (size_t)size);
+    if (mime == NULL || strcmp(mime, "image/jpeg") != 0) {
+        json_error(res, 400, "'image' must be a JPEG picture");
+        return;
+    }
+    if (track_exists(res, album) != 1)
+        return;
+    long long n = single_number("SELECT count(*) FROM tracks t WHERE" SAME_ALBUM, album);
+    if (n < 0 || n > MAX_TRACKS) {
+        json_error(res, n < 0 ? 500 : 413, n < 0 ? "internal error"
+                                                 : "this album has more than 2000 tracks");
+        return;
+    }
+    char hash[ART_HASH_LEN + 1];
+    if (art_hash(data, (size_t)size, hash) != 0) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+
+    int lock = lock_for_write(res);
+    if (lock < 0)
+        return;
+    int queued = 0, dropped = 0;
+    long long batch = -1;
+    sqlite3_stmt *add = db_prepare(music_db,
+        "INSERT INTO art (hash, mime, size) VALUES (?, 'image/jpeg', ?)"
+        " ON CONFLICT (hash) DO NOTHING");
+    /* The file first: a row never names a missing file. If what follows
+     * fails, the scan of the whole library removes the file. */
+    int rc = add != NULL && art_save(hash, 0, data, (size_t)size) == 0 &&
+                     sqlite3_bind_text(add, 1, hash, -1, SQLITE_STATIC) == SQLITE_OK &&
+                     sqlite3_bind_int64(add, 2, size) == SQLITE_OK
+                 ? db_exec(music_db, "BEGIN IMMEDIATE")
+                 : -1;
+    if (rc == 0)
+        rc = run_once(add); /* finalizes add */
+    else
+        sqlite3_finalize(add);
+    if (rc == 0 &&
+        (batch = single_number("SELECT coalesce(max(batch), 0) + 1 FROM changes", 0)) < 0)
+        rc = -1;
+    if (rc == 0)
+        rc = queue_cover(album, hash, batch, &queued, &dropped);
+    if (rc == 0)
+        rc = db_exec(music_db, "COMMIT");
+    if (rc != 0 && sqlite3_get_autocommit(music_db) == 0)
+        db_exec(music_db, "ROLLBACK");
+    music_unlock(lock);
+
+    cJSON *out = cJSON_CreateObject();
+    if (rc != 0 || out == NULL || cJSON_AddNumberToObject(out, "batch", (double)batch) == NULL ||
+        cJSON_AddNumberToObject(out, "queued", queued) == NULL ||
+        cJSON_AddNumberToObject(out, "dropped", dropped) == NULL ||
+        cJSON_AddStringToObject(out, "hash", hash) == NULL) {
         json_error(res, 500, "internal error");
         return;
     }

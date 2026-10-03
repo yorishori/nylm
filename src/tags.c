@@ -11,6 +11,7 @@
 #include "tags.h"
 
 #include <errno.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -499,6 +500,21 @@ enum tags_result tags_write(const char *path, const struct tags *now, const stru
         return TAGS_NOT_WRITTEN;
     }
 
+    if (!tags_same_pictures(&before, want)) {
+        const struct tag_picture *p = want->npictures == 1 ? &want->pictures[0] : NULL;
+        if (p == NULL || p->data == NULL || p->mime == NULL || p->size > UINT_MAX) {
+            taglib_file_free(f);
+            set_err(err, errlen, "only one picture, with its bytes, can be written");
+            return TAGS_NOT_WRITTEN;
+        }
+        TAGLIB_COMPLEX_PROPERTY_PICTURE(pic, p->data, (unsigned int)p->size, p->description,
+                                        p->mime, p->type);
+        if (!taglib_complex_property_set(f, "PICTURE", pic)) {
+            taglib_file_free(f);
+            set_err(err, errlen, "this type of file can not hold a picture");
+            return TAGS_NOT_WRITTEN;
+        }
+    }
     for (int i = 0; i < TAG_FIELDS; i++) {
         const struct tag_values *v = &want->value[i];
         if (tags_equal(v, &before.value[i]))

@@ -86,6 +86,8 @@ static void test_upgrade(void)
         return;
     CHECK(db_exec(db, "INSERT INTO tracks (path, size, ext, scanned, has_art, title)"
                       " VALUES ('/m/a.mp3', 1, 'mp3', 1700000000, 1, 'A')") == 0);
+    CHECK(db_exec(db, "INSERT INTO changes (batch, track_id, field, value, state, done, note)"
+                      " VALUES (4, 1, 'title', 'B', 'done', 1, 'ok')") == 0);
     sqlite3_close(db);
     db = db_open(db_path, music_migrations, music_migration_count);
     CHECK(db != NULL);
@@ -97,6 +99,18 @@ static void test_upgrade(void)
     sqlite3_finalize(st);
     st = db_prepare(db, "SELECT count(*) FROM pragma_table_info('tracks') WHERE name = 'has_art'");
     CHECK(st != NULL && sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 0);
+    sqlite3_finalize(st);
+    /* the changes are kept when the table is made again */
+    st = db_prepare(db, "SELECT batch, track_id, field, value, state, done, note FROM changes");
+    CHECK(st != NULL && sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 4 &&
+          sqlite3_column_int(st, 1) == 1 && sqlite3_column_int(st, 5) == 1);
+    CHECK_STR((const char *)sqlite3_column_text(st, 2), "title");
+    CHECK_STR((const char *)sqlite3_column_text(st, 6), "ok");
+    CHECK(sqlite3_step(st) == SQLITE_DONE);
+    sqlite3_finalize(st);
+    CHECK(db_exec(db, "DELETE FROM tracks") == 0);
+    st = db_prepare(db, "SELECT track_id IS NULL FROM changes");
+    CHECK(st != NULL && sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 1);
     sqlite3_finalize(st);
     sqlite3_close(db);
     remove_db();
@@ -130,6 +144,11 @@ static void test_schema(void)
         CHECK((rc == SQLITE_DONE) == tags_is_editable((enum tag_field)i));
         sqlite3_reset(st);
     }
+    CHECK(st != NULL && sqlite3_bind_text(st, 1, MUSIC_COVER_FIELD, -1, SQLITE_STATIC) ==
+                            SQLITE_OK && sqlite3_step(st) == SQLITE_DONE);
+    sqlite3_reset(st);
+    CHECK(sqlite3_bind_text(st, 1, "pictures", -1, SQLITE_STATIC) == SQLITE_OK &&
+          sqlite3_step(st) != SQLITE_DONE);
     sqlite3_finalize(st);
 
     /* art: a hash is 64 lowercase hex characters; mime one nylm knows */
@@ -222,6 +241,16 @@ static void test_track_pictures(void)
                                  "", "") "]", &t) == -1);
     CHECK(track_pictures("[{\"hash\":\"" HASH "\",\"description\":\"\"}]", &t) == -1);
     CHECK(track_pictures("[{\"hash\":\"" HASH "\",\"type\":\"\",\"description\":1}]", &t) == -1);
+
+    /* a new cover: one front cover picture */
+    CHECK(music_set_cover(&t, HASH) == 0 && t.npictures == 1);
+    CHECK_STR(t.pictures[0].hash, HASH);
+    CHECK_STR(t.pictures[0].type, "Front Cover");
+    CHECK_STR(t.pictures[0].description, "");
+    CHECK(t.pictures[0].data == NULL);
+    CHECK(music_set_cover(&t, "abc") == -1);
+    CHECK(music_set_cover(&t, "") == -1);
+    CHECK(music_set_cover(&t, HASH "0") == -1);
 }
 
 int main(void)

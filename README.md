@@ -164,6 +164,15 @@ libpng; the server never decodes a picture. `GET /api/music/art?hash=H&size=full
 sends one (the only API answer that is not JSON): the type from the
 `art` table, cached by the browser for a year.
 
+A new album cover is a JPEG of at most 700 KiB, sent as base64 in JSON
+(`POST /api/music/cover`; the browser scales it down first). The server
+checks only that it is base64 and starts like a JPEG, stores it in the
+art folder, and queues a `picture` change (its hash) for every track of
+the album. The write service checks that the stored bytes still have
+that hash and decode completely (which makes the thumbnail), then
+replaces all of the track's pictures with it as the front cover, and
+checks it reads back.
+
 ## Commands
 
 ```sh
