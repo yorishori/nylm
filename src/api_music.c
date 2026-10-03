@@ -1,9 +1,13 @@
 /*
  * Music library: albums, their tracks' tags, and the changes to them
  * (src/music.c). The server never opens a music file: it reads the cache
- * in music_db, queues tag changes in the changes table, and starts the
- * services that work on the files (scan, write), each after asking for the
- * password again and recording it in the audit table.
+ * in music_db, queues tag changes and scans, and starts the services that
+ * work on the files (scan, write), each after asking for the password
+ * again and recording it in the audit table.
+ *
+ * An album is the tracks that share ALBUM and ALBUMARTIST in the files (the
+ * cache); it is named by the id of any of its tracks. What the pages show
+ * is planned: the files' values with the pending changes applied.
  *
  * While a service runs the server writes nothing to music_db: every write
  * here holds the library lock shared, and answers 409 if a service has it.
@@ -11,6 +15,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <errno.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -25,40 +30,27 @@
 #include "music.h"
 #include "tags.h"
 
-#define ID_MAX       9007199254740991L /* 2^53 - 1: exact in a JSON number */
-#define MAX_TRACKS   500               /* tracks in one album (folder) */
-#define MAX_CANCEL   1000              /* change ids in one cancel request */
+#define ID_MAX       9007199254740991LL /* 2^53 - 1: exact in a JSON number */
+#define MAX_TRACKS   2000  /* tracks in one album page, one refresh */
+#define MAX_EDITS    2000  /* track changes in one request */
+#define MAX_LIST     5000  /* rows in a list of values or pending changes */
+#define MAX_HISTORY  300   /* written changes listed */
 
 /* Every failed password check costs the caller this long, as for login. */
 #define PASSWORD_FAILURE_DELAY_SECONDS 1
 
 #define BUSY_MESSAGE "the library is busy: a scan or write is running; try again when it is done"
 
-/* Fields set for the whole album, and per track. */
+/* The tags an album row shows (the same for all its tracks, or mixed). */
 static const enum tag_field album_fields[] = {
-    TAG_ALBUM, TAG_ALBUMARTIST, TAG_GENRE, TAG_DATE, TAG_COMPILATION, TAG_COMPOSER,
+    TAG_ALBUM, TAG_ALBUMARTIST, TAG_DATE, TAG_COMPILATION, TAG_GENRE, TAG_COMPOSER,
 };
-static const enum tag_field track_fields[] = {
-    TAG_TITLE, TAG_ARTIST, TAG_TRACKNUMBER, TAG_DISCNUMBER, TAG_COMPOSER,
-};
-/* A disc number missing on a track is queued as this with its album's
- * other changes. */
-#define DISC_DEFAULT "1/1"
-
-/* Of the fields in multi (bits of fields with several values in a file),
- * those nylm does not change: all but the list fields, whose values are
- * replaced by the one new string. */
-static unsigned locked_bits(unsigned multi)
-{
-    unsigned bits = 0;
-    for (int i = 0; i < TAG_FIELDS; i++)
-        if ((multi & (1u << i)) && !tags_is_list((enum tag_field)i))
-            bits |= 1u << i;
-    return bits;
-}
-
 #define NALBUM_FIELDS (sizeof album_fields / sizeof album_fields[0])
-#define NTRACK_FIELDS (sizeof track_fields / sizeof track_fields[0])
+
+/* The tracks of the album of track ?1, in a query on "tracks t". */
+#define SAME_ALBUM                                                \
+    " t.album IS (SELECT album FROM tracks WHERE id = ?1)"        \
+    " AND t.albumartist IS (SELECT albumartist FROM tracks WHERE id = ?1)"
 
 /* ---- helpers ------------------------------------------------------------ */
 
@@ -100,14 +92,16 @@ static int lock_for_write(struct response *res)
     return fd >= 0 ? fd : -1;
 }
 
-/* Runs sql and returns its first row's first column as a number; -1 on
- * error (logged). */
-static long long single_number(const char *sql)
+/* Runs sql (?1 bound to id, if sql has it) and returns its first row's
+ * first column as a number; -1 on error (logged). */
+static long long single_number(const char *sql, long long id)
 {
     sqlite3_stmt *st = db_prepare(music_db, sql);
     if (st == NULL)
         return -1;
-    long long v = sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int64(st, 0) : -1;
+    long long v = -1;
+    if (sqlite3_bind_parameter_count(st) == 0 || sqlite3_bind_int64(st, 1, id) == SQLITE_OK)
+        v = sqlite3_step(st) == SQLITE_ROW ? sqlite3_column_int64(st, 0) : -1;
     if (v < 0)
         db_log_error(music_db, sql);
     sqlite3_finalize(st);
@@ -124,8 +118,27 @@ static int run_once(sqlite3_stmt *st)
     return rc == SQLITE_DONE ? 0 : -1;
 }
 
-/* Adds key: [names of the fields whose bit is set in bits]. NULL when out
- * of memory. */
+/* Appends one JSON object per row of st (its first ncols columns) to list,
+ * at most max. 0, or -1 on error (logged). */
+static int add_rows(cJSON *list, sqlite3_stmt *st, int ncols, int max)
+{
+    int rc, n = 0;
+    while (n < max && (rc = sqlite3_step(st)) == SQLITE_ROW) {
+        cJSON *obj = json_row(st, ncols);
+        if (obj == NULL || !cJSON_AddItemToArray(list, obj)) {
+            fprintf(stderr, "music: out of memory building a list\n");
+            return -1;
+        }
+        n++;
+    }
+    if (n == max)
+        return 0;
+    if (rc != SQLITE_DONE)
+        db_log_error(music_db, sqlite3_sql(st));
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+/* Adds key: [names of the fields whose bit is set]. NULL when out of memory. */
 static cJSON *add_field_names(cJSON *obj, const char *key, unsigned bits)
 {
     cJSON *list = cJSON_AddArrayToObject(obj, key);
@@ -139,95 +152,227 @@ static cJSON *add_field_names(cJSON *obj, const char *key, unsigned bits)
     return list;
 }
 
-/* Appends one JSON object per row of st (its first ncols columns) to list.
- * 0, or -1 on error (logged). */
-static int add_rows(cJSON *list, sqlite3_stmt *st, int ncols)
+/* Adds key: the values as JSON (a string, or for genre and composer a
+ * list; null when absent). NULL when out of memory. */
+static cJSON *add_values(cJSON *obj, const char *key, enum tag_field f,
+                         const struct tag_values *v)
 {
-    int rc;
-    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
-        cJSON *obj = json_row(st, ncols);
-        if (obj == NULL || !cJSON_AddItemToArray(list, obj)) {
-            fprintf(stderr, "music: out of memory building a list\n");
-            return -1;
+    if (tags_is_multi(f)) {
+        cJSON *list = cJSON_AddArrayToObject(obj, key);
+        for (size_t i = 0; list != NULL && i < v->n; i++) {
+            cJSON *s = cJSON_CreateString(v->v[i]);
+            if (s == NULL || !cJSON_AddItemToArray(list, s))
+                return NULL;
+        }
+        return list;
+    }
+    return v->n > 0 ? cJSON_AddStringToObject(obj, key, v->v[0])
+                    : cJSON_AddNullToObject(obj, key);
+}
+
+/* Adds key: a text column as JSON: genre and composer (a JSON array in the
+ * column) as a list, the rest as a string; null when NULL. NULL when out
+ * of memory or the array is invalid. */
+static cJSON *add_column(cJSON *obj, const char *key, enum tag_field f, sqlite3_stmt *st,
+                         int col)
+{
+    const char *s = (const char *)sqlite3_column_text(st, col);
+    if (s == NULL)
+        return cJSON_AddNullToObject(obj, key);
+    if (!tags_is_multi(f))
+        return cJSON_AddStringToObject(obj, key, s);
+    cJSON *list = cJSON_Parse(s);
+    return cJSON_IsArray(list) && cJSON_AddItemToObject(obj, key, list) ? list : NULL;
+}
+
+/* Reads a positive id from query parameter name; replies 400 if invalid. */
+static int query_id(const struct request *req, struct response *res, const char *name,
+                    long long *out)
+{
+    const char *s = NULL;
+    if (http_query(req, name, &s) == 0 && s[0] >= '1' && s[0] <= '9') {
+        char *end;
+        errno = 0;
+        long long v = strtoll(s, &end, 10);
+        if (errno == 0 && *end == '\0' && v <= ID_MAX) {
+            *out = v;
+            return 0;
         }
     }
-    if (rc != SQLITE_DONE)
-        db_log_error(music_db, sqlite3_sql(st));
-    return rc == SQLITE_DONE ? 0 : -1;
+    json_error(res, 400, message("query parameter '%s' must be a positive whole number%s",
+                                 name, ""));
+    return -1;
 }
 
-/* ---- audit -------------------------------------------------------------- */
-
-/* Records that an action starts (the caller holds the library lock). Its
- * row id, or -1 (logged): then the action must not happen. */
-static long audit_begin(const struct request *req, const char *action)
+/* Reads body[key] as a track id. NULL or an error message. */
+static const char *get_id(const cJSON *body, const char *key, long long *out)
 {
-    sqlite3_stmt *st = db_prepare(music_db, "INSERT INTO audit (client, action, detail, result)"
-                                            " VALUES (?, ?, '{}', 'started')");
-    int ok = st != NULL &&
-             sqlite3_bind_text(st, 1, req->client ? req->client : "-", -1, SQLITE_STATIC) ==
-                 SQLITE_OK &&
-             sqlite3_bind_text(st, 2, action, -1, SQLITE_STATIC) == SQLITE_OK &&
-             sqlite3_step(st) == SQLITE_DONE;
-    if (!ok)
-        fprintf(stderr, "music: can not write the audit log: %s\n", sqlite3_errmsg(music_db));
-    sqlite3_finalize(st);
-    return ok ? (long)sqlite3_last_insert_rowid(music_db) : -1;
+    long v = 0;
+    const char *err = json_get_int(body, key, 1, (long)ID_MAX, &v);
+    *out = v;
+    return err;
 }
 
-/* Records an action's result (logged as well when it failed). */
-static void audit_end(long id, const char *result)
+/* 1 if track id exists, 0 if not (replied 404), -1 on error (replied 500). */
+static int track_exists(struct response *res, long long id)
 {
-    sqlite3_stmt *st = db_prepare(music_db, "UPDATE audit SET result = ? WHERE id = ?");
-    int ok = st != NULL && sqlite3_bind_text(st, 1, result, -1, SQLITE_STATIC) == SQLITE_OK &&
-             sqlite3_bind_int64(st, 2, id) == SQLITE_OK && sqlite3_step(st) == SQLITE_DONE;
-    if (!ok)
-        fprintf(stderr, "music: can not record audit result %ld '%s': %s\n", id, result,
-                sqlite3_errmsg(music_db));
-    sqlite3_finalize(st);
-    if (strncmp(result, "ok", 2) != 0)
-        fprintf(stderr, "music: audit %ld: %s\n", id, result);
+    long long n = single_number("SELECT count(*) FROM tracks WHERE id = ?", id);
+    if (n < 0)
+        json_error(res, 500, "internal error");
+    else if (n == 0)
+        json_error(res, 404, "track not found");
+    return n < 0 ? -1 : n > 0;
+}
+
+/* ---- planned tags ------------------------------------------------------- */
+
+/*
+ * The track's tags from st's row (MUSIC_TAG_COLUMNS at col) with its
+ * pending changes applied (pending: "SELECT field, value FROM changes
+ * WHERE state = 'pending' AND track_id = ?"), into the arena. *changed:
+ * the bits of the fields with a pending change. 0 or -1 (logged).
+ */
+static int planned_tags(sqlite3_stmt *st, int col, long long id, sqlite3_stmt *pending,
+                        struct tags *out, unsigned *changed)
+{
+    *changed = 0;
+    if (music_track_tags(st, col, out) != 0 || sqlite3_bind_int64(pending, 1, id) != SQLITE_OK) {
+        fprintf(stderr, "music: track %lld: can not read its tags\n", id);
+        return -1;
+    }
+    int rc, bad = 0;
+    while ((rc = sqlite3_step(pending)) == SQLITE_ROW && !bad) {
+        int f = tags_field_of((const char *)sqlite3_column_text(pending, 0));
+        const char *v = (const char *)sqlite3_column_text(pending, 1);
+        const char *copy = v != NULL ? arena_strndup(v, (size_t)sqlite3_column_bytes(pending, 1))
+                                     : NULL;
+        bad = f < 0 || copy == NULL ||
+              (tags_is_multi((enum tag_field)f)
+                   ? music_values_parse(copy, &out->value[f]) != 0
+                   : tags_set_one(out, (enum tag_field)f, copy) != 0);
+        if (!bad)
+            *changed |= 1u << f;
+    }
+    if (rc != SQLITE_DONE && rc != SQLITE_ROW)
+        db_log_error(music_db, "pending changes");
+    sqlite3_reset(pending);
+    if (bad)
+        fprintf(stderr, "music: track %lld: a pending change can not be read\n", id);
+    return bad || (rc != SQLITE_DONE && rc != SQLITE_ROW) ? -1 : 0;
+}
+
+#define PENDING_SQL "SELECT field, value FROM changes WHERE state = 'pending' AND track_id = ?"
+
+/*
+ * What is wrong with planned tags, among the fields the web app edits:
+ * *missing the required ones without a value, *invalid those whose value
+ * breaks a rule (tags_check()).
+ */
+static void problems(const struct tags *t, unsigned *missing, unsigned *invalid)
+{
+    *missing = *invalid = 0;
+    for (int i = 0; i < TAG_FIELDS; i++) {
+        const struct tag_values *v = &t->value[i];
+        if (!tags_is_editable((enum tag_field)i))
+            continue; /* the sort tags are mirrored and cut when written */
+        int empty = v->n == 0 || (!tags_is_multi((enum tag_field)i) && v->v[0][0] == '\0');
+        if (empty)
+            *missing |= tags_is_required((enum tag_field)i) ? 1u << i : 0;
+        else if (tags_check((enum tag_field)i, v) != NULL)
+            *invalid |= 1u << i;
+    }
+}
+
+/* A 64-bit FNV-1a hash of a tag's values, to compare them between tracks. */
+static uint64_t hash_values(const struct tag_values *v)
+{
+    uint64_t h = 1469598103934665603ULL;
+    for (size_t i = 0; i < v->n; i++) {
+        for (const unsigned char *p = (const unsigned char *)v->v[i]; *p != '\0'; p++)
+            h = (h ^ *p) * 1099511628211ULL;
+        h = (h ^ 0x1f) * 1099511628211ULL; /* a separator no value has */
+    }
+    return (h ^ v->n) * 1099511628211ULL;
 }
 
 /* ---- reads -------------------------------------------------------------- */
 
-/* GET /api/music: whether music is set up, counts, pending changes, which
- * service runs (busy: "scan", "write" or null) and the last scan. */
+/* Adds the latest scan of the whole library (null if none) with the files
+ * it found that are not music, by extension. 0 or -1 (logged). */
+static int add_last_scan(cJSON *obj)
+{
+    sqlite3_stmt *st = db_prepare(music_db,
+        "SELECT id, requested, started, finished, state, files, parsed, removed, failed"
+        " FROM scans WHERE path IS NULL AND state <> 'queued' ORDER BY id DESC LIMIT 1");
+    int rc = st != NULL ? sqlite3_step(st) : SQLITE_ERROR;
+    cJSON *scan = rc == SQLITE_ROW ? json_row(st, 9) : cJSON_CreateNull();
+    long long id = rc == SQLITE_ROW ? sqlite3_column_int64(st, 0) : 0;
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE)
+        db_log_error(music_db, "last scan");
+    sqlite3_finalize(st);
+    if ((rc != SQLITE_ROW && rc != SQLITE_DONE) || scan == NULL ||
+        !cJSON_AddItemToObject(obj, "scan", scan))
+        return -1;
+    if (id == 0)
+        return 0;
+    cJSON *others = cJSON_AddArrayToObject(scan, "others");
+    st = others != NULL ? db_prepare(music_db, "SELECT ext, count FROM scan_extensions"
+                                               " WHERE scan_id = ? ORDER BY count DESC, ext")
+                        : NULL;
+    int ok = st != NULL && sqlite3_bind_int64(st, 1, id) == SQLITE_OK &&
+             add_rows(others, st, 2, MAX_LIST) == 0;
+    sqlite3_finalize(st);
+    return ok ? 0 : -1;
+}
+
+/*
+ * GET /api/music: whether music is set up, the folder, which service runs
+ * (busy: "scan", "write", "busy" or null), the scan running now (path null:
+ * the whole library) and how many wait, pending changes, the last scan of
+ * the whole library, and counts of the library.
+ */
 void music_overview(struct request *req, struct response *res)
 {
     (void)req;
     int error;
     const char *busy = music_busy(&error);
-    cJSON *obj = cJSON_CreateObject();
     int configured = music_root() != NULL;
-    long long albums = single_number("SELECT count(*) FROM albums");
-    long long tracks = single_number("SELECT count(*) FROM tracks");
-    long long pending = single_number("SELECT count(*) FROM changes WHERE state = 'pending'");
-    if (error || obj == NULL || albums < 0 || tracks < 0 || pending < 0 ||
-        cJSON_AddBoolToObject(obj, "configured", configured) == NULL ||
+    cJSON *obj = cJSON_CreateObject();
+    cJSON *stats = obj != NULL ? cJSON_AddObjectToObject(obj, "stats") : NULL;
+    long long tracks = single_number("SELECT count(*) FROM tracks", 0);
+    long long size = single_number("SELECT coalesce(sum(size), 0) FROM tracks", 0);
+    long long albums =
+        single_number("SELECT count(*) FROM (SELECT 1 FROM tracks GROUP BY album, albumartist)", 0);
+    long long pending = single_number("SELECT count(*) FROM changes WHERE state = 'pending'", 0);
+    long long queued = single_number("SELECT count(*) FROM scans WHERE state = 'queued'", 0);
+    if (error || stats == NULL || tracks < 0 || size < 0 || albums < 0 || pending < 0 ||
+        queued < 0 || cJSON_AddBoolToObject(obj, "configured", configured) == NULL ||
         cJSON_AddBoolToObject(obj, "available", configured && music_available()) == NULL ||
-        cJSON_AddNumberToObject(obj, "albums", (double)albums) == NULL ||
-        cJSON_AddNumberToObject(obj, "tracks", (double)tracks) == NULL ||
-        cJSON_AddNumberToObject(obj, "pending", (double)pending) == NULL ||
+        (configured ? cJSON_AddStringToObject(obj, "root", music_root())
+                    : cJSON_AddNullToObject(obj, "root")) == NULL ||
         (busy != NULL ? cJSON_AddStringToObject(obj, "busy", busy)
-                      : cJSON_AddNullToObject(obj, "busy")) == NULL)
+                      : cJSON_AddNullToObject(obj, "busy")) == NULL ||
+        cJSON_AddNumberToObject(obj, "pending", (double)pending) == NULL ||
+        cJSON_AddNumberToObject(obj, "queued_scans", (double)queued) == NULL ||
+        cJSON_AddNumberToObject(stats, "tracks", (double)tracks) == NULL ||
+        cJSON_AddNumberToObject(stats, "albums", (double)albums) == NULL ||
+        cJSON_AddNumberToObject(stats, "size", (double)size) == NULL ||
+        add_last_scan(obj) != 0)
         goto fail;
 
-    sqlite3_stmt *st = db_prepare(music_db,
-        "SELECT started, finished, files, parsed, failed, ok FROM scans ORDER BY id DESC LIMIT 1");
-    if (st == NULL)
-        goto fail;
-    int rc = sqlite3_step(st);
-    cJSON *scan = rc == SQLITE_ROW ? json_row(st, 6) : cJSON_CreateNull();
-    int scanning = busy != NULL && strcmp(busy, "scan") == 0;
-    const char *state = scanning ? "running"
-                      : rc != SQLITE_ROW ? "never"
-                      : sqlite3_column_type(st, 1) == SQLITE_NULL ? "interrupted"
-                      : sqlite3_column_int(st, 5) ? "done" : "failed";
+    cJSON *exts = cJSON_AddArrayToObject(stats, "extensions");
+    sqlite3_stmt *st = exts != NULL ? db_prepare(music_db,
+        "SELECT ext, count(*) AS tracks, sum(size) AS size FROM tracks GROUP BY ext"
+        " ORDER BY count(*) DESC, ext") : NULL;
+    int ok = st != NULL && add_rows(exts, st, 3, MAX_LIST) == 0;
     sqlite3_finalize(st);
-    if ((rc != SQLITE_ROW && rc != SQLITE_DONE) || scan == NULL ||
-        !cJSON_AddItemToObject(obj, "scan", scan) ||
-        cJSON_AddStringToObject(obj, "scan_state", state) == NULL)
+    st = ok ? db_prepare(music_db, "SELECT path, files, parsed FROM scans"
+                                   " WHERE state = 'running' ORDER BY id LIMIT 1") : NULL;
+    int rc = st != NULL ? sqlite3_step(st) : SQLITE_ERROR;
+    cJSON *running = rc == SQLITE_ROW ? json_row(st, 3) : cJSON_CreateNull();
+    sqlite3_finalize(st);
+    if (!ok || (rc != SQLITE_ROW && rc != SQLITE_DONE) || running == NULL ||
+        !cJSON_AddItemToObject(obj, "running", running))
         goto fail;
     json_reply(res, 200, obj);
     return;
@@ -236,194 +381,257 @@ fail:
     json_error(res, 500, "internal error");
 }
 
-/* Reads a positive id from the query string; replies 400 if invalid. */
-static int query_id(const struct request *req, struct response *res, long *out)
-{
-    const char *s = NULL;
-    if (http_query(req, "id", &s) == 0 && s[0] >= '1' && s[0] <= '9') {
-        char *end;
-        errno = 0;
-        long v = strtol(s, &end, 10);
-        if (errno == 0 && *end == '\0' && v <= ID_MAX) {
-            *out = v;
-            return 0;
-        }
-    }
-    json_error(res, 400, "query parameter 'id' must be a positive whole number");
-    return -1;
-}
-
-/* The album's folder, copied into the arena; NULL if it does not exist
- * (*error set on a database error). */
-static const char *album_dir(long id, int *error)
-{
-    sqlite3_stmt *st = db_prepare(music_db, "SELECT dir FROM albums WHERE id = ?");
-    *error = st == NULL || sqlite3_bind_int64(st, 1, id) != SQLITE_OK;
-    const char *dir = NULL;
-    if (!*error) {
-        int rc = sqlite3_step(st);
-        if (rc == SQLITE_ROW)
-            dir = arena_strndup((const char *)sqlite3_column_text(st, 0),
-                                (size_t)sqlite3_column_bytes(st, 0));
-        *error = (rc != SQLITE_ROW && rc != SQLITE_DONE) || (rc == SQLITE_ROW && dir == NULL);
-    }
-    if (*error)
-        db_log_error(music_db, "album dir");
-    sqlite3_finalize(st);
-    return dir;
-}
-
-/* The album-wide fields (shown in an album row, changed from the albums
- * table), as a list for SQL. */
-#define ALBUM_WIDE "'album', 'albumartist', 'genre', 'date', 'compilation', 'composer'"
-
-/* The album-wide fields in the order the album query returns them. */
-static const enum tag_field row_fields[] = {
-    TAG_ALBUM, TAG_ALBUMARTIST, TAG_GENRE, TAG_COMPOSER, TAG_DATE, TAG_COMPILATION,
-};
-#define NROW_FIELDS 6
-
-/* min, max and count of a column over an album's tracks. */
-#define MMC(c) " min(" c "), max(" c "), count(" c "),"
+/* A planned single-valued column: the pending change ("" removes it), else
+ * the file's value. */
+#define PLANNED(c)                                                                     \
+    "(SELECT CASE WHEN count(*) = 0 THEN t." c " ELSE nullif(max(c.value), '') END"    \
+    " FROM changes c WHERE c.state = 'pending' AND c.track_id = t.id AND c.field = '" c "')"
+/* The same for genre or composer, as a JSON array. */
+#define PLANNED_LIST(f)                                                                \
+    "(SELECT CASE WHEN count(*) = 0 THEN (SELECT json_group_array(value ORDER BY position)" \
+    " FROM track_values v WHERE v.track_id = t.id AND v.field = '" f "')"              \
+    " ELSE max(c.value) END"                                                           \
+    " FROM changes c WHERE c.state = 'pending' AND c.track_id = t.id AND c.field = '" f "')"
 
 /*
- * Every album (or the one with id ?, if not 0): id, dir, tracks, with_art,
- * album_pending and track_pending (pending changes to album-wide and to
- * track fields); then min, max and count of each album-wide field as in
- * the files (row_fields order), and the same as planned (pending changes
- * applied, "" = removed). The last column, the track count again, ends it.
+ * Every track (or those of the album of track ?1, if ?2 is 1), by album:
+ * id, the album key (the files' album and album artist), the planned
+ * album fields (album_fields order), then MUSIC_TAG_COLUMNS.
  */
 #define ALBUMS_SQL                                                                     \
-    "WITH pc AS (SELECT track_id,"                                                     \
-    "  max(CASE WHEN field = 'album' THEN new END) AS album,"                          \
-    "  max(CASE WHEN field = 'albumartist' THEN new END) AS albumartist,"              \
-    "  max(CASE WHEN field = 'genre' THEN new END) AS genre,"                          \
-    "  max(CASE WHEN field = 'composer' THEN new END) AS composer,"                    \
-    "  max(CASE WHEN field = 'date' THEN new END) AS date,"                            \
-    "  max(CASE WHEN field = 'compilation' THEN new END) AS compilation,"              \
-    "  sum(field IN (" ALBUM_WIDE ")) AS n_album,"                                     \
-    "  sum(field NOT IN (" ALBUM_WIDE ")) AS n_track"                                  \
-    "  FROM changes WHERE state = 'pending' AND track_id IS NOT NULL GROUP BY track_id)," \
-    " pt AS (SELECT t.album_id, t.pictures, pc.n_album, pc.n_track,"                   \
-    "  t.album AS a, t.albumartist AS b, t.genre AS c, t.composer AS d, t.date AS e,"  \
-    "  t.compilation AS f,"                                                            \
-    "  iif(pc.album IS NULL, t.album, nullif(pc.album, '')) AS pa,"                    \
-    "  iif(pc.albumartist IS NULL, t.albumartist, nullif(pc.albumartist, '')) AS pb,"  \
-    "  iif(pc.genre IS NULL, t.genre, nullif(pc.genre, '')) AS pc_,"                   \
-    "  iif(pc.composer IS NULL, t.composer, nullif(pc.composer, '')) AS pd,"           \
-    "  iif(pc.date IS NULL, t.date, nullif(pc.date, '')) AS pe,"                       \
-    "  iif(pc.compilation IS NULL, t.compilation, nullif(pc.compilation, '')) AS pf"   \
-    "  FROM tracks t LEFT JOIN pc ON pc.track_id = t.id)"                              \
-    " SELECT x.id, x.dir, count(*) AS tracks, sum(pt.pictures > 0) AS with_art,"       \
-    "  coalesce(sum(pt.n_album), 0) AS album_pending,"                                 \
-    "  coalesce(sum(pt.n_track), 0) AS track_pending,"                                 \
-    MMC("a") MMC("b") MMC("c") MMC("d") MMC("e") MMC("f")                             \
-    MMC("pa") MMC("pb") MMC("pc_") MMC("pd") MMC("pe") MMC("pf")                      \
-    " count(*)"                                                                        \
-    " FROM albums x JOIN pt ON pt.album_id = x.id"                                     \
-    " WHERE ? = 0 OR x.id = ?"                                                         \
-    " GROUP BY x.id"                                                                   \
-    " ORDER BY min(pt.b) COLLATE NOCASE, min(pt.a) COLLATE NOCASE, x.dir"
+    "SELECT t.id, t.album, t.albumartist, " PLANNED("album") ", " PLANNED("albumartist") \
+    ", " PLANNED("date") ", " PLANNED("compilation") ", " PLANNED_LIST("genre") ", "   \
+    PLANNED_LIST("composer") ", " MUSIC_TAG_COLUMNS                                    \
+    " FROM tracks t WHERE ?2 = 0 OR (" SAME_ALBUM ")"                                  \
+    " ORDER BY t.albumartist COLLATE NOCASE, t.album COLLATE NOCASE, t.albumartist,"   \
+    " t.album, t.id"
+#define ALBUMS_TAGS_COL (3 + (int)NALBUM_FIELDS)
 
-/*
- * Adds key: {field: value or null} and key_mixed: [fields] from the
- * min/max/count triples at col: a value all tracks share is the value; if
- * they differ (or some lack it) the field is null and listed as mixed.
- */
-static int add_values(cJSON *obj, const char *key, const char *mixed_key, sqlite3_stmt *st,
-                      int col, int tracks)
-{
-    cJSON *values = cJSON_AddObjectToObject(obj, key);
-    unsigned mixed = 0;
-    for (int i = 0; values != NULL && i < NROW_FIELDS; i++) {
-        const char *lo = (const char *)sqlite3_column_text(st, col + 3 * i);
-        const char *hi = (const char *)sqlite3_column_text(st, col + 3 * i + 1);
-        int count = sqlite3_column_int(st, col + 3 * i + 2);
-        int shared = (count == 0 || count == tracks) &&
-                     (lo == NULL ? hi == NULL : hi != NULL && strcmp(lo, hi) == 0);
-        const char *name = tags_name[row_fields[i]];
-        if (!shared)
-            mixed |= 1u << row_fields[i];
-        if ((shared && lo != NULL ? cJSON_AddStringToObject(values, name, lo)
-                                  : cJSON_AddNullToObject(values, name)) == NULL)
-            values = NULL;
-    }
-    return values != NULL && add_field_names(obj, mixed_key, mixed) != NULL ? 0 : -1;
-}
+/* What an album row says about its tracks, gathered track by track. */
+struct album_sum {
+    cJSON *row;
+    int tracks;
+    uint64_t hash[NALBUM_FIELDS], artist;
+    unsigned mixed, changed, missing, invalid;
+    int several_artists, all_compilation, no_art;
+};
 
-/* One album row: see ALBUMS_SQL. NULL when out of memory. */
+/* Starts an album row from its first track: id, the planned values. NULL
+ * when out of memory. */
 static cJSON *album_row(sqlite3_stmt *st)
 {
-    const int now = 6, next = now + 3 * NROW_FIELDS;
-    int tracks = sqlite3_column_int(st, 2);
-    cJSON *obj = json_row(st, now);
-    if (obj == NULL || add_values(obj, "now", "now_mixed", st, now, tracks) != 0 ||
-        add_values(obj, "next", "next_mixed", st, next, tracks) != 0)
+    cJSON *row = cJSON_CreateObject();
+    if (row == NULL || cJSON_AddNumberToObject(row, "track",
+                                               (double)sqlite3_column_int64(st, 0)) == NULL)
         return NULL;
-    return obj;
+    for (size_t i = 0; i < NALBUM_FIELDS; i++)
+        if (add_column(row, tags_name[album_fields[i]], album_fields[i], st, 3 + (int)i) == NULL)
+            return NULL;
+    return row;
+}
+
+/* Ends an album row: what was gathered. 0, or -1 when out of memory. */
+static int album_end(const struct album_sum *a)
+{
+    cJSON *row = a->row;
+    /* A mixed value is not the album's: the row shows none. */
+    for (size_t i = 0; i < NALBUM_FIELDS; i++) {
+        const char *name = tags_name[album_fields[i]];
+        if ((a->mixed & (1u << album_fields[i])) &&
+            !cJSON_ReplaceItemInObjectCaseSensitive(row, name, cJSON_CreateNull()))
+            return -1;
+    }
+    return cJSON_AddNumberToObject(row, "tracks", a->tracks) != NULL &&
+                   add_field_names(row, "mixed", a->mixed) != NULL &&
+                   add_field_names(row, "changed", a->changed) != NULL &&
+                   cJSON_AddBoolToObject(row, "missing", a->missing != 0) != NULL &&
+                   cJSON_AddBoolToObject(row, "invalid", a->invalid != 0) != NULL &&
+                   cJSON_AddBoolToObject(row, "several_artists",
+                                         a->several_artists && !a->all_compilation) != NULL &&
+                   cJSON_AddBoolToObject(row, "no_art", a->no_art) != NULL
+               ? 0
+               : -1;
+}
+
+/* 1 if the row's album key (columns 1 and 2) differs from the last one. */
+static int new_album(sqlite3_stmt *st, const char **album, const char **artist, int first)
+{
+    const char *a = (const char *)sqlite3_column_text(st, 1);
+    const char *b = (const char *)sqlite3_column_text(st, 2);
+    int same = !first && (a == NULL ? *album == NULL : *album != NULL && strcmp(a, *album) == 0) &&
+               (b == NULL ? *artist == NULL : *artist != NULL && strcmp(b, *artist) == 0);
+    return !same;
 }
 
 /*
- * GET /api/music/albums[?id=N]: every album (or one) with the album-wide
- * values its tracks share: "now" as in the files, "next" with the pending
- * changes applied; a field in now_mixed / next_mixed differs between tracks
- * (or is missing on some), its value is then null.
+ * GET /api/music/albums[?track=N]: every album (or the album of track N),
+ * one row each: track (one of its tracks), the planned album fields
+ * (null if absent or mixed), tracks, mixed and changed (fields), and
+ * whether a track misses a required tag, has an invalid one, the tracks
+ * have several artists without being a compilation, or a track has no
+ * picture.
  */
 void music_albums(struct request *req, struct response *res)
 {
-    long id = 0;
-    const char *s = NULL;
-    int found = http_query(req, "id", &s);
-    if (found < 0 || (found == 0 && query_id(req, res, &id) != 0)) {
+    long long one = 0;
+    const char *s;
+    int found = http_query(req, "track", &s);
+    if (found < 0 || (found == 0 && query_id(req, res, "track", &one) != 0)) {
         if (found < 0)
-            json_error(res, 400, "query parameter 'id' must be a positive whole number");
+            json_error(res, 400, "query parameter 'track' must be a positive whole number");
         return;
     }
+    if (one != 0 && track_exists(res, one) != 1)
+        return;
     cJSON *list = cJSON_CreateArray();
-    sqlite3_stmt *st = list == NULL ? NULL : db_prepare(music_db, ALBUMS_SQL);
-    if (st == NULL || sqlite3_bind_int64(st, 1, id) != SQLITE_OK ||
-        sqlite3_bind_int64(st, 2, id) != SQLITE_OK) {
-        sqlite3_finalize(st);
-        json_error(res, 500, "internal error");
-        return;
-    }
-    int rc;
-    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
-        cJSON *obj = album_row(st);
-        if (obj == NULL || !cJSON_AddItemToArray(list, obj)) {
-            rc = SQLITE_NOMEM;
-            break;
+    sqlite3_stmt *st = list != NULL ? db_prepare(music_db, ALBUMS_SQL) : NULL;
+    sqlite3_stmt *pending = st != NULL ? db_prepare(music_db, PENDING_SQL) : NULL;
+    int rc = pending != NULL && sqlite3_bind_int64(st, 1, one) == SQLITE_OK &&
+                     sqlite3_bind_int(st, 2, one != 0) == SQLITE_OK
+                 ? SQLITE_ROW
+                 : SQLITE_ERROR;
+
+    struct album_sum a;
+    memset(&a, 0, sizeof a);
+    const char *key_album = NULL, *key_artist = NULL;
+    while (rc == SQLITE_ROW && (rc = sqlite3_step(st)) == SQLITE_ROW) {
+        if (new_album(st, &key_album, &key_artist, a.row == NULL)) {
+            if (a.row != NULL && album_end(&a) != 0)
+                break;
+            memset(&a, 0, sizeof a);
+            a.all_compilation = 1;
+            a.row = album_row(st);
+            const char *k1 = (const char *)sqlite3_column_text(st, 1);
+            const char *k2 = (const char *)sqlite3_column_text(st, 2);
+            key_album = k1 != NULL ? arena_strndup(k1, strlen(k1)) : NULL;
+            key_artist = k2 != NULL ? arena_strndup(k2, strlen(k2)) : NULL;
+            if (a.row == NULL || !cJSON_AddItemToArray(list, a.row) ||
+                (k1 != NULL && key_album == NULL) || (k2 != NULL && key_artist == NULL))
+                break;
         }
+        /* The track itself is scratch: only what it adds to the row stays. */
+        size_t mark = arena_mark();
+        struct tags t;
+        unsigned changed, missing, invalid;
+        if (planned_tags(st, ALBUMS_TAGS_COL, sqlite3_column_int64(st, 0), pending, &t,
+                         &changed) != 0)
+            break;
+        problems(&t, &missing, &invalid);
+        for (size_t i = 0; i < NALBUM_FIELDS; i++) {
+            uint64_t h = hash_values(&t.value[album_fields[i]]);
+            if (a.tracks == 0)
+                a.hash[i] = h;
+            else if (h != a.hash[i])
+                a.mixed |= 1u << album_fields[i];
+        }
+        uint64_t artist = hash_values(&t.value[TAG_ARTIST]);
+        a.several_artists |= a.tracks > 0 && artist != a.artist;
+        a.artist = a.tracks == 0 ? artist : a.artist;
+        const struct tag_values *c = &t.value[TAG_COMPILATION];
+        a.all_compilation &= c->n == 1 && strcmp(c->v[0], "1") == 0;
+        a.no_art |= !t.has_art;
+        a.changed |= changed;
+        a.missing |= missing;
+        a.invalid |= invalid;
+        a.tracks++;
+        arena_rewind(mark);
     }
+    if (rc == SQLITE_DONE && a.row != NULL && album_end(&a) != 0)
+        rc = SQLITE_NOMEM;
     if (rc != SQLITE_DONE)
-        db_log_error(music_db, "albums");
+        fprintf(stderr, "music: albums list failed: %s\n", sqlite3_errmsg(music_db));
     sqlite3_finalize(st);
+    sqlite3_finalize(pending);
     if (rc != SQLITE_DONE) {
         json_error(res, 500, "internal error");
-        return;
-    }
-    if (id != 0 && cJSON_GetArraySize(list) == 0) {
-        json_error(res, 404, "album not found");
         return;
     }
     json_reply(res, 200, list);
 }
 
 /*
- * The values of a list column used anywhere: in the files (cache) or in
- * pending changes, each list split at "; ". At most 5000, sorted.
+ * GET /api/music/album?track=N: the tracks of the album of track N: their
+ * file (path, size, ext, scanned, has_art), tags as in the files, pending
+ * changes ({field: new value}), and which planned tags are missing or
+ * invalid.
  */
-#define VALUES_SQL(f)                                                             \
-    "WITH RECURSIVE src(v) AS ("                                                  \
-    "  SELECT " f " FROM tracks WHERE " f " IS NOT NULL AND " f " <> ''"          \
-    "  UNION SELECT new FROM changes"                                             \
-    "  WHERE state = 'pending' AND field = '" f "' AND new <> ''),"               \
-    " split(rest, part) AS ("                                                     \
-    "  SELECT v || '; ', NULL FROM src"                                           \
-    "  UNION ALL SELECT substr(rest, instr(rest, '; ') + 2),"                     \
-    "   substr(rest, 1, instr(rest, '; ') - 1) FROM split WHERE rest <> '')"     \
-    " SELECT DISTINCT part FROM split WHERE part IS NOT NULL AND part <> ''"      \
-    " ORDER BY part COLLATE NOCASE LIMIT 5000"
+void music_album(struct request *req, struct response *res)
+{
+    long long id;
+    if (query_id(req, res, "track", &id) != 0 || track_exists(res, id) != 1)
+        return;
+    long long n = single_number("SELECT count(*) FROM tracks t WHERE" SAME_ALBUM, id);
+    if (n < 0) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    if (n > MAX_TRACKS) {
+        json_error(res, 413, "this album has more than 2000 tracks: too many for one page");
+        return;
+    }
+    cJSON *list = cJSON_CreateArray();
+    sqlite3_stmt *st = list != NULL ? db_prepare(music_db,
+        "SELECT t.id, t.path, t.size, t.ext, t.scanned, " MUSIC_TAG_COLUMNS
+        " FROM tracks t WHERE" SAME_ALBUM " ORDER BY t.path") : NULL;
+    sqlite3_stmt *pending = st != NULL ? db_prepare(music_db, PENDING_SQL) : NULL;
+    int rc = pending != NULL && sqlite3_bind_int64(st, 1, id) == SQLITE_OK ? SQLITE_ROW
+                                                                            : SQLITE_ERROR;
+    const int tags_col = 5;
+    while (rc == SQLITE_ROW && (rc = sqlite3_step(st)) == SQLITE_ROW) {
+        long long tid = sqlite3_column_int64(st, 0);
+        size_t mark = arena_mark();
+        struct tags t;
+        unsigned changed, missing, invalid;
+        if (planned_tags(st, tags_col, tid, pending, &t, &changed) != 0) {
+            rc = SQLITE_ERROR;
+            break;
+        }
+        problems(&t, &missing, &invalid);
+        arena_rewind(mark);
+
+        /* The row as JSON: everything in it stays in the arena. */
+        cJSON *row = json_row(st, tags_col);
+        cJSON *tags = row != NULL ? cJSON_AddObjectToObject(row, "tags") : NULL;
+        cJSON *planned = row != NULL ? cJSON_AddObjectToObject(row, "pending") : NULL;
+        int ok = planned != NULL && cJSON_AddItemToArray(list, row) &&
+                 cJSON_AddBoolToObject(row, "has_art", sqlite3_column_int(st, tags_col)) != NULL &&
+                 add_field_names(row, "missing", missing) != NULL &&
+                 add_field_names(row, "invalid", invalid) != NULL &&
+                 planned_tags(st, tags_col, tid, pending, &t, &changed) == 0;
+        for (int f = 0; ok && f < TAG_FIELDS; f++)
+            ok = add_column(tags, tags_name[f], (enum tag_field)f, st, tags_col + 1 + f) != NULL &&
+                 (!(changed & (1u << f)) ||
+                  add_values(planned, tags_name[f], (enum tag_field)f, &t.value[f]) != NULL);
+        if (!ok) {
+            rc = SQLITE_NOMEM;
+            break;
+        }
+    }
+    if (rc != SQLITE_DONE)
+        fprintf(stderr, "music: album failed: %s\n", sqlite3_errmsg(music_db));
+    sqlite3_finalize(st);
+    sqlite3_finalize(pending);
+    if (rc != SQLITE_DONE) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, list);
+}
+
+/*
+ * The values of a column (or genre / composer) used anywhere: in the files
+ * (cache) or in pending changes. At most 5000, sorted.
+ */
+#define VALUES_SQL(c)                                                          \
+    "SELECT " c " FROM tracks WHERE " c " IS NOT NULL AND " c " <> ''"         \
+    " UNION SELECT value FROM changes"                                         \
+    " WHERE state = 'pending' AND field = '" c "' AND value <> ''"             \
+    " ORDER BY 1 COLLATE NOCASE LIMIT 5000"
+#define LIST_VALUES_SQL(f)                                                     \
+    "SELECT value FROM track_values WHERE field = '" f "'"                     \
+    " UNION SELECT j.value FROM changes c, json_each(c.value) j"               \
+    " WHERE c.state = 'pending' AND c.field = '" f "'"                         \
+    " ORDER BY 1 COLLATE NOCASE LIMIT 5000"
 
 /* GET /api/music/values?field=artist|albumartist|genre|composer: the values
  * in use, for choosing from. */
@@ -435,8 +643,8 @@ void music_values(struct request *req, struct response *res)
     } lists[] = {
         { "artist", VALUES_SQL("artist") },
         { "albumartist", VALUES_SQL("albumartist") },
-        { "genre", VALUES_SQL("genre") },
-        { "composer", VALUES_SQL("composer") },
+        { "genre", LIST_VALUES_SQL("genre") },
+        { "composer", LIST_VALUES_SQL("composer") },
     };
     const char *field = NULL;
     const char *sql = NULL;
@@ -473,119 +681,45 @@ void music_values(struct request *req, struct response *res)
     json_reply(res, 200, list);
 }
 
-/* The columns a track is read with; json_row() takes the first 14. */
-#define TRACK_COLUMNS                                                          \
-    "id, format, seconds, pictures, title, artist, album, albumartist, genre," \
-    " date, tracknumber, discnumber, compilation, composer, path, multi"
-#define TRACK_JSON_COLUMNS 14
-#define TRACK_ORDER \
-    " ORDER BY CAST(discnumber AS INTEGER), CAST(tracknumber AS INTEGER), path"
+/* A change's tag as the file has it now (genre and composer: JSON). */
+#define NOW_VALUE                                                                      \
+    "CASE c.field WHEN 'title' THEN t.title WHEN 'album' THEN t.album"                 \
+    " WHEN 'artist' THEN t.artist WHEN 'albumartist' THEN t.albumartist"               \
+    " WHEN 'tracknumber' THEN t.tracknumber WHEN 'discnumber' THEN t.discnumber"       \
+    " WHEN 'date' THEN t.date WHEN 'compilation' THEN t.compilation"                   \
+    " WHEN 'isrc' THEN t.isrc WHEN 'asin' THEN t.asin WHEN 'bpm' THEN t.bpm"           \
+    " WHEN 'copyright' THEN t.copyright WHEN 'encodedby' THEN t.encodedby"             \
+    " WHEN 'mood' THEN t.mood WHEN 'media' THEN t.media WHEN 'label' THEN t.label"     \
+    " WHEN 'catalognumber' THEN t.catalognumber WHEN 'barcode' THEN t.barcode"         \
+    " WHEN 'musicbrainz_trackid' THEN t.musicbrainz_trackid"                           \
+    " WHEN 'musicbrainz_albumid' THEN t.musicbrainz_albumid"                           \
+    " ELSE (SELECT json_group_array(value ORDER BY position) FROM track_values v"       \
+    "  WHERE v.track_id = t.id AND v.field = c.field) END"
 
-/* The track object in list with this id, or NULL. */
-static cJSON *track_by_id(const cJSON *list, long id)
-{
-    cJSON *t;
-    cJSON_ArrayForEach(t, list) {
-        const cJSON *tid = cJSON_GetObjectItemCaseSensitive(t, "id");
-        if (cJSON_IsNumber(tid) && (long)tid->valuedouble == id)
-            return t;
-    }
-    return NULL;
-}
-
-/* Adds to each track of the album its pending changes: "pending":
- * {field: new value}. 0 or -1 (logged). */
-static int add_pending(cJSON *tracks, long album_id)
-{
-    sqlite3_stmt *st = db_prepare(music_db,
-        "SELECT c.track_id, c.field, c.new FROM changes c JOIN tracks t ON t.id = c.track_id"
-        " WHERE t.album_id = ? AND c.state = 'pending' ORDER BY c.id");
-    if (st == NULL || sqlite3_bind_int64(st, 1, album_id) != SQLITE_OK) {
-        sqlite3_finalize(st);
-        return -1;
-    }
-    int rc;
-    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
-        cJSON *t = track_by_id(tracks, (long)sqlite3_column_int64(st, 0));
-        cJSON *pending = cJSON_GetObjectItemCaseSensitive(t, "pending");
-        if (pending == NULL ||
-            cJSON_AddStringToObject(pending, (const char *)sqlite3_column_text(st, 1),
-                                    (const char *)sqlite3_column_text(st, 2)) == NULL) {
-            rc = SQLITE_NOMEM;
-            break;
-        }
-    }
-    if (rc != SQLITE_DONE)
-        db_log_error(music_db, "album pending");
-    sqlite3_finalize(st);
-    return rc == SQLITE_DONE ? 0 : -1;
-}
-
-/* GET /api/music/album?id=N: the album's folder and its tracks' tags. A
- * field in a track's "locked" has several values and can not be changed;
- * "pending" holds the changes queued for it. */
-void music_album(struct request *req, struct response *res)
-{
-    long id;
-    if (query_id(req, res, &id) != 0)
-        return;
-    int error;
-    const char *dir = album_dir(id, &error);
-    if (dir == NULL) {
-        json_error(res, error ? 500 : 404, error ? "internal error" : "album not found");
-        return;
-    }
-    cJSON *obj = cJSON_CreateObject();
-    cJSON *tracks = obj != NULL ? cJSON_AddArrayToObject(obj, "tracks") : NULL;
-    sqlite3_stmt *st = tracks != NULL
-        ? db_prepare(music_db, "SELECT " TRACK_COLUMNS " FROM tracks WHERE album_id = ?"
-                               TRACK_ORDER)
-        : NULL;
-    int rc = st != NULL && sqlite3_bind_int64(st, 1, id) == SQLITE_OK &&
-                     cJSON_AddNumberToObject(obj, "id", (double)id) != NULL &&
-                     cJSON_AddStringToObject(obj, "dir", dir) != NULL
-                 ? SQLITE_ROW
-                 : SQLITE_ERROR;
-    while (rc == SQLITE_ROW && (rc = sqlite3_step(st)) == SQLITE_ROW) {
-        const char *path = (const char *)sqlite3_column_text(st, 14);
-        const char *slash = strrchr(path, '/');
-        cJSON *t = json_row(st, TRACK_JSON_COLUMNS);
-        if (t == NULL || !cJSON_AddItemToArray(tracks, t) ||
-            cJSON_AddStringToObject(t, "file", slash != NULL ? slash + 1 : path) == NULL ||
-            add_field_names(t, "locked", locked_bits((unsigned)sqlite3_column_int(st, 15))) ==
-                NULL ||
-            cJSON_AddObjectToObject(t, "pending") == NULL)
-            rc = SQLITE_NOMEM;
-    }
-    if (rc != SQLITE_DONE)
-        db_log_error(music_db, "album tracks");
-    sqlite3_finalize(st);
-    if (rc != SQLITE_DONE || add_pending(tracks, id) != 0) {
-        json_error(res, 500, "internal error");
-        return;
-    }
-    json_reply(res, 200, obj);
-}
-
-/* GET /api/music/changes: the pending changes, and the latest written ones
- * (done, warning, failed) with their notes. album_id is null when a scan
- * removed the track. */
+/*
+ * GET /api/music/changes: the pending changes (at most 5000, by batch; now
+ * is the file's value), how many there are, and the latest written ones
+ * (done, warning, failed) with their notes. track and path are null when
+ * a scan removed the track. Genre and composer values are JSON arrays.
+ */
 void music_changes(struct request *req, struct response *res)
 {
     (void)req;
-#define CHANGE_COLUMNS                                                                 \
-    "SELECT c.id, t.album_id, c.path, c.field, c.old, c.new, c.state, c.note, c.queued," \
-    " c.finished FROM changes c LEFT JOIN tracks t ON t.id = c.track_id"
     cJSON *obj = cJSON_CreateObject();
     cJSON *pending = obj != NULL ? cJSON_AddArrayToObject(obj, "pending") : NULL;
     cJSON *history = obj != NULL ? cJSON_AddArrayToObject(obj, "history") : NULL;
+    long long count = single_number("SELECT count(*) FROM changes WHERE state = 'pending'", 0);
     sqlite3_stmt *a = pending == NULL ? NULL : db_prepare(music_db,
-        CHANGE_COLUMNS " WHERE c.state = 'pending' ORDER BY c.path, c.id");
+        "SELECT c.id, c.batch, c.track_id AS track, t.path, t.title, c.field, c.value, "
+        NOW_VALUE " AS now FROM changes c LEFT JOIN tracks t ON t.id = c.track_id"
+        " WHERE c.state = 'pending' ORDER BY c.batch, t.path, c.id");
     sqlite3_stmt *b = history == NULL ? NULL : db_prepare(music_db,
-        CHANGE_COLUMNS " WHERE c.state <> 'pending' ORDER BY c.finished DESC, c.id DESC"
-        " LIMIT 200");
-    int ok = a != NULL && b != NULL && add_rows(pending, a, 10) == 0 &&
-             add_rows(history, b, 10) == 0;
+        "SELECT c.id, c.batch, c.track_id AS track, t.path, c.field, c.value, c.started,"
+        " c.finished, c.state, c.note FROM changes c LEFT JOIN tracks t ON t.id = c.track_id"
+        " WHERE c.done = 1 ORDER BY c.finished DESC, c.id DESC LIMIT 300");
+    int ok = a != NULL && b != NULL && count >= 0 &&
+             cJSON_AddNumberToObject(obj, "count", (double)count) != NULL &&
+             add_rows(pending, a, 8, MAX_LIST) == 0 && add_rows(history, b, 10, MAX_HISTORY) == 0;
     sqlite3_finalize(a);
     sqlite3_finalize(b);
     if (!ok) {
@@ -597,330 +731,268 @@ void music_changes(struct request *req, struct response *res)
 
 /* ---- queueing changes --------------------------------------------------- */
 
-struct track {
-    long id;
-    const char *path; /* relative to the music folder */
-    const char *value[TAG_FIELDS];
-    unsigned multi;
-    unsigned pending; /* bit (1u << field): a change is pending */
-    int requested;    /* listed in the request */
-    const char *set[TAG_FIELDS]; /* NULL: not in the request */
+/* One tag of one track to change. */
+struct edit {
+    long long track;
+    enum tag_field field;
+    struct tag_values value;
+    const char *stored; /* the value as the changes table keeps it */
 };
 
-/* Loads the album's tracks into the arena. Their count, or -1 (500). */
-static int load_tracks(long album_id, struct track **out)
+/*
+ * Reads a new value for field f from item: genre and composer a list of
+ * strings, the others a string ("" removes the tag). It must pass
+ * tags_check(). NULL, or an error message.
+ */
+static const char *read_value(const cJSON *item, enum tag_field f, struct edit *e)
 {
-    sqlite3_stmt *st = db_prepare(music_db, "SELECT " TRACK_COLUMNS
-                                            " FROM tracks WHERE album_id = ?" TRACK_ORDER);
-    struct track *list = arena_alloc(MAX_TRACKS * sizeof *list);
-    if (st == NULL || list == NULL || sqlite3_bind_int64(st, 1, album_id) != SQLITE_OK) {
-        sqlite3_finalize(st);
+    e->field = f;
+    e->value.n = 0;
+    e->value.v = NULL;
+    if (tags_is_multi(f)) {
+        if (!cJSON_IsArray(item) || cJSON_GetArraySize(item) > TAGS_MAX_VALUES)
+            return message("'%s' must be a list of at most 64 strings%s", tags_name[f], "");
+        e->value.v = arena_alloc((size_t)(cJSON_GetArraySize(item) + 1) * sizeof *e->value.v);
+        if (e->value.v == NULL)
+            return "out of memory";
+        const cJSON *s;
+        cJSON_ArrayForEach(s, item) {
+            if (!cJSON_IsString(s))
+                return message("'%s' must be a list of at most 64 strings%s", tags_name[f], "");
+            e->value.v[e->value.n++] = s->valuestring;
+        }
+        e->stored = music_values_json(&e->value);
+    } else {
+        if (!cJSON_IsString(item))
+            return message("'%s' must be a string%s", tags_name[f], "");
+        e->stored = item->valuestring;
+        if (item->valuestring[0] != '\0') {
+            e->value.v = arena_alloc(sizeof *e->value.v);
+            if (e->value.v == NULL)
+                return "out of memory";
+            e->value.v[0] = item->valuestring;
+            e->value.n = 1;
+        }
+    }
+    if (e->stored == NULL)
+        return "out of memory";
+    const char *why = tags_check(f, &e->value);
+    return why != NULL ? message("'%s' %s", tags_name[f], why) : NULL;
+}
+
+/* The editable field named by s, or -1. */
+static int editable_field(const char *s)
+{
+    int f = tags_field_of(s);
+    return f >= 0 && tags_is_editable((enum tag_field)f) ? f : -1;
+}
+
+/*
+ * {"album": track id, "set": {field: value, ...}}: the fields for every
+ * track of that album. Fills edits (MAX_EDITS). Their count, or -1 after
+ * replying.
+ */
+static int read_album_edits(const cJSON *body, struct response *res, struct edit *edits)
+{
+    long long album;
+    const char *err = get_id(body, "album", &album);
+    const cJSON *set = cJSON_GetObjectItemCaseSensitive(body, "set");
+    if (err == NULL && (!cJSON_IsObject(set) || set->child == NULL))
+        err = "'set' must be an object of at least one field";
+    struct edit fields[TAG_FIELDS];
+    int nfields = 0;
+    for (const cJSON *item = set != NULL ? set->child : NULL; err == NULL && item != NULL;
+         item = item->next) {
+        int f = editable_field(item->string);
+        if (f < 0)
+            err = message("'%.100s' is not a tag that can be changed%s", item->string, "");
+        for (int i = 0; err == NULL && i < nfields; i++)
+            if (fields[i].field == (enum tag_field)f)
+                err = message("'%s' is set twice%s", tags_name[f], "");
+        if (err == NULL)
+            err = read_value(item, (enum tag_field)f, &fields[nfields++]);
+    }
+    if (err != NULL) {
+        json_error(res, 400, err);
         return -1;
     }
-    int n = 0, rc;
-    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
-        if (n == MAX_TRACKS) {
-            fprintf(stderr, "music: album %ld has more than %d tracks\n", album_id, MAX_TRACKS);
+    if (track_exists(res, album) != 1)
+        return -1;
+
+    sqlite3_stmt *st = db_prepare(music_db, "SELECT t.id FROM tracks t WHERE" SAME_ALBUM);
+    int rc = st != NULL && sqlite3_bind_int64(st, 1, album) == SQLITE_OK ? SQLITE_ROW
+                                                                          : SQLITE_ERROR;
+    int n = 0;
+    while (rc == SQLITE_ROW && (rc = sqlite3_step(st)) == SQLITE_ROW) {
+        if (n + nfields > MAX_EDITS) {
             rc = SQLITE_FULL;
             break;
         }
-        struct track *t = &list[n++];
-        memset(t, 0, sizeof *t);
-        t->id = (long)sqlite3_column_int64(st, 0);
-        for (int i = 0; i < TAG_FIELDS; i++) {
-            const char *v = (const char *)sqlite3_column_text(st, 4 + i);
-            if (v != NULL &&
-                (t->value[i] = arena_strndup(v, (size_t)sqlite3_column_bytes(st, 4 + i))) == NULL)
-                rc = SQLITE_NOMEM;
-        }
-        t->path = arena_strndup((const char *)sqlite3_column_text(st, 14),
-                                (size_t)sqlite3_column_bytes(st, 14));
-        t->multi = (unsigned)sqlite3_column_int(st, 15);
-        if (t->path == NULL || rc == SQLITE_NOMEM) {
-            rc = SQLITE_NOMEM;
-            break;
+        for (int i = 0; i < nfields; i++) {
+            edits[n] = fields[i];
+            edits[n++].track = sqlite3_column_int64(st, 0);
         }
     }
-    if (rc != SQLITE_DONE)
-        db_log_error(music_db, "load album tracks");
+    if (rc != SQLITE_DONE && rc != SQLITE_FULL)
+        db_log_error(music_db, "album tracks");
     sqlite3_finalize(st);
-    if (rc != SQLITE_DONE)
+    if (rc == SQLITE_FULL)
+        json_error(res, 413, "too many changes at once (at most 2000 track tags)");
+    else if (rc != SQLITE_DONE)
+        json_error(res, 500, "internal error");
+    return rc == SQLITE_DONE ? n : -1;
+}
+
+/*
+ * {"edits": [{"track": id, "field": name, "value": value}, ...]}: one tag
+ * of one track each, none twice. Fills edits (MAX_EDITS). Their count, or
+ * -1 after replying.
+ */
+static int read_track_edits(const cJSON *body, struct response *res, struct edit *edits)
+{
+    const cJSON *list = cJSON_GetObjectItemCaseSensitive(body, "edits");
+    int size = cJSON_GetArraySize(list);
+    if (!cJSON_IsArray(list) || size < 1 || size > MAX_EDITS) {
+        json_error(res, 400, "'edits' must be a list of 1 to 2000 changes");
         return -1;
-    *out = list;
+    }
+    const char *err = NULL;
+    int n = 0;
+    const cJSON *item;
+    cJSON_ArrayForEach(item, list) {
+        const char *name = NULL;
+        if (!cJSON_IsObject(item)) {
+            err = "each edit must be an object";
+        } else if ((err = get_id(item, "track", &edits[n].track)) == NULL &&
+                   (err = json_get_string(item, "field", 1, 64, &name)) == NULL) {
+            int f = editable_field(name);
+            err = f < 0 ? message("'%.64s' is not a tag that can be changed%s", name, "")
+                        : read_value(cJSON_GetObjectItemCaseSensitive(item, "value"),
+                                     (enum tag_field)f, &edits[n]);
+        }
+        for (int i = 0; err == NULL && i < n; i++)
+            if (edits[i].track == edits[n].track && edits[i].field == edits[n].field)
+                err = message("'%s' of one track is changed twice%s",
+                              tags_name[edits[n].field], "");
+        if (err != NULL)
+            break;
+        n++;
+    }
+    if (err != NULL) {
+        json_error(res, 400, err);
+        return -1;
+    }
+    for (int i = 0; i < n; i++) {
+        long long found = single_number("SELECT count(*) FROM tracks WHERE id = ?",
+                                        edits[i].track);
+        if (found <= 0) {
+            json_error(res, found < 0 ? 500 : 404, found < 0 ? "internal error"
+                                                             : "a track in 'edits' is not found");
+            return -1;
+        }
+    }
     return n;
 }
 
 /*
- * Reads obj[tags_name[f]] into *out: absent or null leaves the tag alone
- * (NULL); a string is the new value ("" removes it); compilation is true /
- * false. NULL, or an error message.
+ * Queues e in batch: or, if the file already has that value, drops its
+ * pending change. Adds 1 to *queued or *dropped when it did. 0 or -1
+ * (logged).
  */
-static const char *get_tag(const cJSON *obj, enum tag_field f, const char **out)
-{
-    const cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, tags_name[f]);
-    *out = NULL;
-    if (item == NULL || cJSON_IsNull(item))
-        return NULL;
-    if (f == TAG_COMPILATION) {
-        if (!cJSON_IsBool(item))
-            return "'compilation' must be true, false or null";
-        *out = cJSON_IsTrue(item) ? "1" : "";
-        return NULL;
-    }
-    if (!cJSON_IsString(item))
-        return message("'%s' must be a string or null%s", tags_name[f], "");
-    const char *why = tags_check_value(f, item->valuestring);
-    if (why != NULL)
-        return message("'%s' %s", tags_name[f], why);
-    *out = item->valuestring;
-    return NULL;
-}
-
-/* Rejects keys of obj other than "id" (if allow_id) and the n fields. */
-static const char *only_fields(const cJSON *obj, const enum tag_field *fields, size_t n,
-                               int allow_id)
-{
-    for (const cJSON *item = obj->child; item != NULL; item = item->next) {
-        int known = allow_id && strcmp(item->string, "id") == 0;
-        for (size_t i = 0; i < n && !known; i++)
-            known = strcmp(item->string, tags_name[fields[i]]) == 0;
-        if (!known)
-            return message("unknown field '%.100s'%s", item->string, "");
-    }
-    return NULL;
-}
-
-/*
- * Reads the request's values into the tracks: album fields for every
- * track, then each listed track's own. NULL, or an error message.
- */
-static const char *read_changes(const cJSON *body, struct track *tracks, int n)
-{
-    const cJSON *album = cJSON_GetObjectItemCaseSensitive(body, "album");
-    const cJSON *list = cJSON_GetObjectItemCaseSensitive(body, "tracks");
-    if (!cJSON_IsObject(album))
-        return "'album' must be an object";
-    if (!cJSON_IsArray(list) || cJSON_GetArraySize(list) > MAX_TRACKS)
-        return "'tracks' must be a list of at most 500 tracks";
-    const char *err = only_fields(album, album_fields, NALBUM_FIELDS, 0);
-    for (size_t i = 0; i < NALBUM_FIELDS && err == NULL; i++) {
-        const char *v;
-        err = get_tag(album, album_fields[i], &v);
-        for (int k = 0; k < n && err == NULL; k++)
-            tracks[k].set[album_fields[i]] = v;
-    }
-
-    const cJSON *item;
-    cJSON_ArrayForEach(item, list) {
-        if (err != NULL)
-            break;
-        long id;
-        if (!cJSON_IsObject(item))
-            return "each track must be an object";
-        if ((err = only_fields(item, track_fields, NTRACK_FIELDS, 1)) != NULL ||
-            (err = json_get_int(item, "id", 1, ID_MAX, &id)) != NULL)
-            break;
-        struct track *t = NULL;
-        for (int k = 0; k < n && t == NULL; k++)
-            if (tracks[k].id == id)
-                t = &tracks[k];
-        if (t == NULL)
-            return "a track in 'tracks' is not in this album";
-        if (t->requested)
-            return "a track is listed twice in 'tracks'";
-        t->requested = 1;
-        for (size_t i = 0; i < NTRACK_FIELDS && err == NULL; i++)
-            err = get_tag(item, track_fields[i], &t->set[track_fields[i]]);
-    }
-    return err;
-}
-
-/* Marks which fields of the album's tracks have a pending change. 0 or -1
- * (logged). */
-static int load_pending(long album_id, struct track *tracks, int n)
-{
-    sqlite3_stmt *st = db_prepare(music_db,
-        "SELECT c.track_id, c.field FROM changes c JOIN tracks t ON t.id = c.track_id"
-        " WHERE t.album_id = ? AND c.state = 'pending'");
-    if (st == NULL || sqlite3_bind_int64(st, 1, album_id) != SQLITE_OK) {
-        sqlite3_finalize(st);
-        return -1;
-    }
-    int rc;
-    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
-        long id = (long)sqlite3_column_int64(st, 0);
-        int field = tags_field_of((const char *)sqlite3_column_text(st, 1));
-        for (int k = 0; k < n && field >= 0; k++)
-            if (tracks[k].id == id)
-                tracks[k].pending |= 1u << field;
-    }
-    if (rc != SQLITE_DONE)
-        db_log_error(music_db, "album pending fields");
-    sqlite3_finalize(st);
-    return rc == SQLITE_DONE ? 0 : -1;
-}
-
-/* The first track and field with several values that the request would
- * change (*field set), else NULL. */
-static const struct track *find_locked(const struct track *tracks, int n, int *field)
-{
-    for (int k = 0; k < n; k++)
-        for (int i = 0; i < TAG_FIELDS; i++)
-            if (tracks[k].set[i] != NULL && (locked_bits(tracks[k].multi) & (1u << i))) {
-                *field = i;
-                return &tracks[k];
-            }
-    return NULL;
-}
-
-/* 1 if the track will have no value for f: the file has none, none is
- * pending and the request sets none. */
-static int will_lack(const struct track *t, enum tag_field f)
-{
-    return (t->value[f] == NULL || t->value[f][0] == '\0') && !(t->pending & (1u << f)) &&
-           t->set[f] == NULL;
-}
-
-/* The first track that would still have no track number, or NULL. */
-static const struct track *find_no_track_number(const struct track *tracks, int n)
-{
-    for (int k = 0; k < n; k++)
-        if (will_lack(&tracks[k], TAG_TRACKNUMBER))
-            return &tracks[k];
-    return NULL;
-}
-
-/* Sets the disc number of every track that would have none to 1/1. */
-static void fill_disc_numbers(struct track *tracks, int n)
-{
-    for (int k = 0; k < n; k++)
-        if (will_lack(&tracks[k], TAG_DISCNUMBER) &&
-            !(locked_bits(tracks[k].multi) & (1u << TAG_DISCNUMBER)))
-            tracks[k].set[TAG_DISCNUMBER] = DISC_DEFAULT;
-}
-
-/*
- * Queues t's field as change (or, if the file already has that value,
- * drops a pending change for it). Adds 1 to *queued or *dropped when it
- * did. 0 or -1 (logged).
- */
-static int queue_one(const struct request *req, const struct track *t, int field, int *queued,
+static int queue_one(const struct edit *e, long long batch, sqlite3_stmt *track, int *queued,
                      int *dropped)
 {
-    const char *v = t->set[field];
-    int same = t->value[field] != NULL ? strcmp(t->value[field], v) == 0 : v[0] == '\0';
-    sqlite3_stmt *st;
-    if (same) {
-        st = db_prepare(music_db, "DELETE FROM changes"
-                                  " WHERE state = 'pending' AND track_id = ? AND field = ?");
-        if (st == NULL || sqlite3_bind_int64(st, 1, t->id) != SQLITE_OK ||
-            sqlite3_bind_text(st, 2, tags_name[field], -1, SQLITE_STATIC) != SQLITE_OK) {
-            sqlite3_finalize(st);
-            return -1;
-        }
-    } else {
-        st = db_prepare(music_db,
-            "INSERT INTO changes (track_id, path, field, old, new, client)"
-            " VALUES (?, ?, ?, ?, ?, ?)"
-            " ON CONFLICT (track_id, field) WHERE state = 'pending' DO UPDATE SET"
-            "  old = excluded.old, new = excluded.new, client = excluded.client,"
-            "  queued = excluded.queued"
-            " WHERE new IS NOT excluded.new");
-        int rc = st != NULL ? sqlite3_bind_int64(st, 1, t->id) : SQLITE_ERROR;
-        if (rc == SQLITE_OK)
-            rc = sqlite3_bind_text(st, 2, t->path, -1, SQLITE_STATIC);
-        if (rc == SQLITE_OK)
-            rc = sqlite3_bind_text(st, 3, tags_name[field], -1, SQLITE_STATIC);
-        if (rc == SQLITE_OK)
-            rc = t->value[field] != NULL
-                     ? sqlite3_bind_text(st, 4, t->value[field], -1, SQLITE_STATIC)
-                     : sqlite3_bind_null(st, 4);
-        if (rc == SQLITE_OK)
-            rc = sqlite3_bind_text(st, 5, v, -1, SQLITE_STATIC);
-        if (rc == SQLITE_OK)
-            rc = sqlite3_bind_text(st, 6, req->client ? req->client : "-", -1, SQLITE_STATIC);
-        if (rc != SQLITE_OK) {
-            sqlite3_finalize(st);
-            return -1;
-        }
-    }
-    if (run_once(st) != 0)
+    size_t mark = arena_mark();
+    struct tags now;
+    int rc = sqlite3_bind_int64(track, 1, e->track) == SQLITE_OK &&
+                     sqlite3_step(track) == SQLITE_ROW && music_track_tags(track, 0, &now) == 0
+                 ? 0
+                 : -1;
+    int same = rc == 0 && tags_equal(&now.value[e->field], &e->value);
+    sqlite3_reset(track);
+    arena_rewind(mark);
+    if (rc != 0) {
+        db_log_error(music_db, "queue: track");
         return -1;
+    }
+    sqlite3_stmt *st = same
+        ? db_prepare(music_db, "DELETE FROM changes"
+                               " WHERE state = 'pending' AND track_id = ?2 AND field = ?3")
+        : db_prepare(music_db,
+              "INSERT INTO changes (batch, track_id, field, value) VALUES (?1, ?2, ?3, ?4)"
+              " ON CONFLICT (track_id, field) WHERE state = 'pending' DO UPDATE SET"
+              "  batch = excluded.batch, value = excluded.value"
+              " WHERE value IS NOT excluded.value");
+    rc = st != NULL ? SQLITE_OK : SQLITE_ERROR;
+    if (rc == SQLITE_OK && !same)
+        rc = sqlite3_bind_int64(st, 1, batch);
+    if (rc == SQLITE_OK)
+        rc = sqlite3_bind_int64(st, 2, e->track);
+    if (rc == SQLITE_OK)
+        rc = sqlite3_bind_text(st, 3, tags_name[e->field], -1, SQLITE_STATIC);
+    if (rc == SQLITE_OK && !same)
+        rc = sqlite3_bind_text(st, 4, e->stored, -1, SQLITE_STATIC);
+    if (rc != SQLITE_OK || run_once(st) != 0) {
+        if (rc != SQLITE_OK)
+            sqlite3_finalize(st);
+        return -1;
+    }
     *(same ? dropped : queued) += sqlite3_changes(music_db) > 0;
     return 0;
 }
 
 /*
- * POST /api/music/album/save {id, album: {fields}, tracks: [{id, fields}]}
- * Queues the changes; nothing is written to the files until the write
- * service runs. Fields absent or null are left alone; a value the file
- * already has drops its pending change. Refused while a track would have
- * no track number; a missing disc number is queued as 1/1.
- * -> 200 {queued, dropped}
+ * POST /api/music/queue: queues tag changes, as one batch; nothing is
+ * written to the files until the write service runs. Either
+ *   {"album": track id, "set": {field: value, ...}}  every track of that album
+ *   {"edits": [{"track": id, "field": name, "value": value}, ...]}
+ * Values: a string ("" removes the tag), or for genre and composer a list
+ * of strings; each must pass the rules (tags_check()). A value the file
+ * already has drops the pending change instead.
+ * -> 200 {batch, queued, dropped}
  */
-void music_album_save(struct request *req, struct response *res)
+void music_queue(struct request *req, struct response *res)
 {
     cJSON *body = json_body(req, res);
-    long id;
     if (body == NULL)
         return;
-    const char *err = json_get_int(body, "id", 1, ID_MAX, &id);
-    if (err != NULL) {
-        json_error(res, 400, err);
+    int by_album = cJSON_GetObjectItemCaseSensitive(body, "album") != NULL;
+    if (by_album == (cJSON_GetObjectItemCaseSensitive(body, "edits") != NULL)) {
+        json_error(res, 400, "give either 'album' and 'set', or 'edits'");
         return;
     }
-    if (music_root() == NULL) {
-        json_error(res, 503, "music is not set up: set NYLM_MUSIC in /etc/nylm.conf");
-        return;
-    }
-    int error;
-    const char *dir = album_dir(id, &error);
-    if (dir == NULL) {
-        json_error(res, error ? 500 : 404, error ? "internal error" : "album not found");
-        return;
-    }
-    struct track *tracks;
-    int n = load_tracks(id, &tracks);
-    if (n < 0 || load_pending(id, tracks, n) != 0) {
+    struct edit *edits = arena_alloc(MAX_EDITS * sizeof *edits);
+    if (edits == NULL) {
         json_error(res, 500, "internal error");
         return;
     }
-    if ((err = read_changes(body, tracks, n)) != NULL) {
-        json_error(res, 400, err);
+    int n = by_album ? read_album_edits(body, res, edits) : read_track_edits(body, res, edits);
+    if (n < 0)
         return;
-    }
-    int field;
-    const struct track *locked = find_locked(tracks, n, &field);
-    if (locked != NULL) {
-        json_error(res, 409, message("%s: %s has several values; nylm does not change those",
-                                     locked->path, tags_name[field]));
-        return;
-    }
-    const struct track *missing = find_no_track_number(tracks, n);
-    if (missing != NULL) {
-        json_error(res, 400, message("%s has no track number: every track needs one before "
-                                     "its album's changes can be queued%s", missing->path, ""));
-        return;
-    }
-    fill_disc_numbers(tracks, n);
 
     int lock = lock_for_write(res);
     if (lock < 0)
         return;
     int queued = 0, dropped = 0;
-    int rc = db_exec(music_db, "BEGIN IMMEDIATE");
-    for (int k = 0; k < n && rc == 0; k++)
-        for (int i = 0; i < TAG_FIELDS && rc == 0; i++)
-            if (tracks[k].set[i] != NULL)
-                rc = queue_one(req, &tracks[k], i, &queued, &dropped);
+    long long batch = -1;
+    sqlite3_stmt *track = db_prepare(music_db,
+        "SELECT " MUSIC_TAG_COLUMNS " FROM tracks t WHERE t.id = ?");
+    int rc = track != NULL ? db_exec(music_db, "BEGIN IMMEDIATE") : -1;
+    if (rc == 0 &&
+        (batch = single_number("SELECT coalesce(max(batch), 0) + 1 FROM changes", 0)) < 0)
+        rc = -1;
+    for (int i = 0; i < n && rc == 0; i++)
+        rc = queue_one(&edits[i], batch, track, &queued, &dropped);
+    sqlite3_finalize(track);
     if (rc == 0)
         rc = db_exec(music_db, "COMMIT");
-    if (rc != 0)
+    if (rc != 0 && sqlite3_get_autocommit(music_db) == 0)
         db_exec(music_db, "ROLLBACK");
     music_unlock(lock);
 
     cJSON *out = cJSON_CreateObject();
-    if (rc != 0 || out == NULL || cJSON_AddNumberToObject(out, "queued", queued) == NULL ||
+    if (rc != 0 || out == NULL || cJSON_AddNumberToObject(out, "batch", (double)batch) == NULL ||
+        cJSON_AddNumberToObject(out, "queued", queued) == NULL ||
         cJSON_AddNumberToObject(out, "dropped", dropped) == NULL) {
         json_error(res, 500, "internal error");
         return;
@@ -928,95 +1000,34 @@ void music_album_save(struct request *req, struct response *res)
     json_reply(res, 200, out);
 }
 
-/* POST /api/music/changes/cancel {ids: [change ids]}: deletes those that
- * are still pending. -> 200 {cancelled} */
-void music_changes_cancel(struct request *req, struct response *res)
+/* POST /api/music/discard {batch}: deletes the batch's pending changes.
+ * -> 200 {discarded} */
+void music_discard(struct request *req, struct response *res)
 {
     cJSON *body = json_body(req, res);
+    long long batch;
     if (body == NULL)
         return;
-    const cJSON *ids = cJSON_GetObjectItemCaseSensitive(body, "ids");
-    if (!cJSON_IsArray(ids) || cJSON_GetArraySize(ids) < 1 ||
-        cJSON_GetArraySize(ids) > MAX_CANCEL) {
-        json_error(res, 400, "'ids' must be a list of 1 to 1000 change ids");
-        return;
-    }
-    const cJSON *item;
-    cJSON_ArrayForEach(item, ids) {
-        if (!cJSON_IsNumber(item) || item->valuedouble < 1 ||
-            item->valuedouble > (double)ID_MAX ||
-            item->valuedouble != (double)(long)item->valuedouble) {
-            json_error(res, 400, "'ids' must be a list of 1 to 1000 change ids");
-            return;
-        }
-    }
-
-    int lock = lock_for_write(res);
-    if (lock < 0)
-        return;
-    int cancelled = 0;
-    int rc = db_exec(music_db, "BEGIN IMMEDIATE");
-    cJSON_ArrayForEach(item, ids) {
-        if (rc != 0)
-            break;
-        sqlite3_stmt *st = db_prepare(music_db,
-            "DELETE FROM changes WHERE id = ? AND state = 'pending'");
-        if (st == NULL || sqlite3_bind_int64(st, 1, (long)item->valuedouble) != SQLITE_OK) {
-            sqlite3_finalize(st);
-            rc = -1;
-            break;
-        }
-        rc = run_once(st);
-        cancelled += rc == 0 && sqlite3_changes(music_db) > 0;
-    }
-    if (rc == 0)
-        rc = db_exec(music_db, "COMMIT");
-    if (rc != 0)
-        db_exec(music_db, "ROLLBACK");
-    music_unlock(lock);
-
-    cJSON *out = cJSON_CreateObject();
-    if (rc != 0 || out == NULL || cJSON_AddNumberToObject(out, "cancelled", cancelled) == NULL) {
-        json_error(res, 500, "internal error");
-        return;
-    }
-    json_reply(res, 200, out);
-}
-
-/* POST /api/music/changes/discard {album_id}: deletes every pending change
- * of the album's tracks. -> 200 {cancelled} */
-void music_changes_discard(struct request *req, struct response *res)
-{
-    cJSON *body = json_body(req, res);
-    long id;
-    if (body == NULL)
-        return;
-    const char *err = json_get_int(body, "album_id", 1, ID_MAX, &id);
+    const char *err = get_id(body, "batch", &batch);
     if (err != NULL) {
         json_error(res, 400, err);
-        return;
-    }
-    int error;
-    if (album_dir(id, &error) == NULL) {
-        json_error(res, error ? 500 : 404, error ? "internal error" : "album not found");
         return;
     }
     int lock = lock_for_write(res);
     if (lock < 0)
         return;
     sqlite3_stmt *st = db_prepare(music_db,
-        "DELETE FROM changes WHERE state = 'pending'"
-        " AND track_id IN (SELECT id FROM tracks WHERE album_id = ?)");
+        "DELETE FROM changes WHERE state = 'pending' AND batch = ?");
     int rc = -1;
-    if (st != NULL && sqlite3_bind_int64(st, 1, id) == SQLITE_OK)
+    if (st != NULL && sqlite3_bind_int64(st, 1, batch) == SQLITE_OK)
         rc = run_once(st); /* finalizes st */
     else
         sqlite3_finalize(st);
-    int cancelled = rc == 0 ? sqlite3_changes(music_db) : 0;
+    int discarded = rc == 0 ? sqlite3_changes(music_db) : 0;
     music_unlock(lock);
 
     cJSON *out = cJSON_CreateObject();
-    if (rc != 0 || out == NULL || cJSON_AddNumberToObject(out, "cancelled", cancelled) == NULL) {
+    if (rc != 0 || out == NULL || cJSON_AddNumberToObject(out, "discarded", discarded) == NULL) {
         json_error(res, 500, "internal error");
         return;
     }
@@ -1025,48 +1036,86 @@ void music_changes_discard(struct request *req, struct response *res)
 
 /* ---- starting the services ---------------------------------------------- */
 
-/*
- * Shared by POST /api/music/scan and /api/music/write {password}: checks
- * the password, then (holding the lock, so no service can start in
- * between) records the start in the audit table and runs the root action,
- * which starts the service. need_pending: refuse if nothing is queued.
- * -> 202
- */
-static void start_service(struct request *req, struct response *res, const char *action,
-                          int need_pending)
+/* Records that an action starts (the caller holds the library lock). Its
+ * row id, or -1 (logged): then the action must not happen. */
+static long long audit_begin(const struct request *req, const char *action, const char *detail)
+{
+    sqlite3_stmt *st = db_prepare(music_db, "INSERT INTO audit (client, action, detail, result)"
+                                            " VALUES (?, ?, ?, 'started')");
+    int ok = st != NULL &&
+             sqlite3_bind_text(st, 1, req->client ? req->client : "-", -1, SQLITE_STATIC) ==
+                 SQLITE_OK &&
+             sqlite3_bind_text(st, 2, action, -1, SQLITE_STATIC) == SQLITE_OK &&
+             sqlite3_bind_text(st, 3, detail, -1, SQLITE_STATIC) == SQLITE_OK &&
+             sqlite3_step(st) == SQLITE_DONE;
+    if (!ok)
+        fprintf(stderr, "music: can not write the audit log: %s\n", sqlite3_errmsg(music_db));
+    sqlite3_finalize(st);
+    return ok ? (long long)sqlite3_last_insert_rowid(music_db) : -1;
+}
+
+/* Records an action's result (logged as well when it failed). */
+static void audit_end(long long id, const char *result)
+{
+    sqlite3_stmt *st = db_prepare(music_db, "UPDATE audit SET result = ? WHERE id = ?");
+    int ok = st != NULL && sqlite3_bind_text(st, 1, result, -1, SQLITE_STATIC) == SQLITE_OK &&
+             sqlite3_bind_int64(st, 2, id) == SQLITE_OK && sqlite3_step(st) == SQLITE_DONE;
+    if (!ok)
+        fprintf(stderr, "music: can not record audit result %lld '%s': %s\n", id, result,
+                sqlite3_errmsg(music_db));
+    sqlite3_finalize(st);
+    if (strncmp(result, "ok", 2) != 0)
+        fprintf(stderr, "music: audit %lld: %s\n", id, result);
+}
+
+/* Checks the body's password (replies 400, 403 after a delay, or 500).
+ * The body, or NULL after replying. */
+static cJSON *password_checked(struct request *req, struct response *res)
 {
     cJSON *body = json_body(req, res);
     const char *password;
     if (body == NULL)
-        return;
+        return NULL;
     if (json_get_string(body, "password", 1, AUTH_MAX_PASSWORD, &password) != NULL) {
         json_error(res, 400, "'password' is required");
-        return;
+        return NULL;
     }
     if (!library_ready(res))
-        return;
+        return NULL;
     int ok = auth_check_password(password);
     if (ok < 0) {
         json_error(res, 500, "internal error");
-        return;
+        return NULL;
     }
     if (ok == 0) {
         sleep(PASSWORD_FAILURE_DELAY_SECONDS);
         json_error(res, 403, "wrong password");
+        return NULL;
+    }
+    return body;
+}
+
+/*
+ * Records the start in the audit table and runs the root action, which
+ * starts the service; the caller holds the lock, so no service can start
+ * in between, and has done what the service needs (rc 0) or not. -> 202
+ */
+static void start_action(struct request *req, struct response *res, int lock, int rc,
+                         const char *action, const char *detail)
+{
+    long long audit = rc == 0 ? audit_begin(req, action, detail) : -1;
+    if (audit < 0) {
+        if (sqlite3_get_autocommit(music_db) == 0)
+            db_exec(music_db, "ROLLBACK");
+        music_unlock(lock);
+        json_error(res, 500, rc == 0 ? "can not write the audit log; nothing was started"
+                                     : "internal error; nothing was started");
         return;
     }
-
-    int lock = lock_for_write(res);
-    if (lock < 0)
-        return;
-    long long pending =
-        need_pending ? single_number("SELECT count(*) FROM changes WHERE state = 'pending'") : 1;
-    long audit = pending > 0 ? audit_begin(req, action) : -1;
-    if (pending <= 0 || audit < 0) {
+    if (sqlite3_get_autocommit(music_db) == 0 && db_exec(music_db, "COMMIT") != 0) {
+        audit_end(audit, "failed: database error");
         music_unlock(lock);
-        json_error(res, pending == 0 ? 409 : 500,
-                   pending == 0 ? "there are no pending changes to write"
-                                : "can not write the audit log; nothing was started");
+        json_error(res, 500, "internal error");
         return;
     }
     /* The service waits a moment for this lock, so it starts after we
@@ -1081,14 +1130,65 @@ static void start_service(struct request *req, struct response *res, const char 
     json_reply(res, 202, cJSON_CreateObject());
 }
 
-/* POST /api/music/scan {password}: starts nylm-music-scan.service. */
+/*
+ * POST /api/music/scan {password, track?}: queues a scan of the whole
+ * library, or with track one of each track of that album (to read them
+ * again), and starts nylm-music-scan.service. -> 202
+ */
 void music_scan_start(struct request *req, struct response *res)
 {
-    start_service(req, res, "music-scan", 0);
+    cJSON *body = password_checked(req, res);
+    if (body == NULL)
+        return;
+    long long track = 0;
+    if (cJSON_GetObjectItemCaseSensitive(body, "track") != NULL) {
+        const char *err = get_id(body, "track", &track);
+        if (err != NULL) {
+            json_error(res, 400, err);
+            return;
+        }
+        if (track_exists(res, track) != 1)
+            return;
+        long long n = single_number("SELECT count(*) FROM tracks t WHERE" SAME_ALBUM, track);
+        if (n < 0 || n > MAX_TRACKS) {
+            json_error(res, n < 0 ? 500 : 413, n < 0 ? "internal error"
+                                                     : "this album has more than 2000 tracks");
+            return;
+        }
+    }
+    int lock = lock_for_write(res);
+    if (lock < 0)
+        return;
+    sqlite3_stmt *st = db_prepare(music_db, track == 0
+        ? "INSERT INTO scans (path) VALUES (NULL)"
+        : "INSERT INTO scans (path) SELECT t.path FROM tracks t WHERE" SAME_ALBUM
+          " ORDER BY t.path");
+    int rc = db_exec(music_db, "BEGIN IMMEDIATE");
+    if (rc == 0 && (st == NULL || (track != 0 && sqlite3_bind_int64(st, 1, track) != SQLITE_OK)))
+        rc = -1;
+    if (rc == 0)
+        rc = run_once(st);
+    else
+        sqlite3_finalize(st);
+    char detail[64];
+    snprintf(detail, sizeof detail, track != 0 ? "{\"album_of_track\":%lld}" : "{}", track);
+    start_action(req, res, lock, rc, "music-scan", detail);
 }
 
-/* POST /api/music/write {password}: starts nylm-music-write.service. */
+/* POST /api/music/write {password}: starts nylm-music-write.service. -> 202 */
 void music_write_start(struct request *req, struct response *res)
 {
-    start_service(req, res, "music-write", 1);
+    if (password_checked(req, res) == NULL)
+        return;
+    int lock = lock_for_write(res);
+    if (lock < 0)
+        return;
+    long long pending = single_number("SELECT count(*) FROM changes WHERE state = 'pending'", 0);
+    if (pending <= 0) {
+        music_unlock(lock);
+        json_error(res, pending == 0 ? 409 : 500,
+                   pending == 0 ? "there are no pending changes to write" : "internal error");
+        return;
+    }
+    start_action(req, res, lock, 0, "music-write", "{}");
 }

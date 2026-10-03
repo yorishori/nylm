@@ -1,29 +1,69 @@
 /* Music app. Shared look and parts: /style.css.
  *
- * Colour in the tables, all of it "queued, not written yet":
- *   lavender stripe  = the album has album-wide changes
- *   sky stripe       = some of its tracks have changes
- *   lavender ring    = this value will change
- * Rose and peach keep their meaning: failed and warning in the history,
- * a missing track number. */
+ * Colour in the tables:
+ *   lavender ring    = this value is changed, not written yet (and a
+ *                      lavender stripe on a row with changes)
+ *   rose ring        = this track's value differs from the rest of the album
+ *   rose tint        = missing or invalid (see the rules in Info)
+ * Rose and peach keep their meaning in the history: failed and warning. */
 
-/* Folder and file names: long, without spaces to break at. */
 .path { overflow-wrap: anywhere; }
 .warn { color: var(--peach); }
-.visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-.stack-tight { display: grid; gap: 0.4rem; justify-items: start; }
+.small { font-size: 0.8rem; }
+.nowrap { white-space: nowrap; }
 
 .album-head { gap: 0.3rem; }
 .album-head > h2 { font-size: 1.5rem; }
 
-/* ---- tables ------------------------------------------------------------- */
+/* ---- filters ------------------------------------------------------------- */
+
+.filters { margin-bottom: 0.5rem; }
+.filter-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+  gap: 0.5rem;
+}
+.filter-switches { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; }
+
+/* ---- the switch ---------------------------------------------------------- */
+
+/* A raised track with a knob; on: the knob right, lavender. */
+.switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  padding: 0.2rem 0;
+  cursor: pointer;
+}
+.switch .track {
+  position: relative;
+  flex: none;
+  width: 2.4rem;
+  height: 1.3rem;
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: inset 2px 2px 5px var(--shade), inset -2px -2px 5px var(--light);
+}
+.switch .knob {
+  position: absolute;
+  top: 0.15rem;
+  left: 0.15rem;
+  width: 1rem;
+  height: 1rem;
+  border-radius: 999px;
+  background: var(--muted);
+  transition: left 0.15s, background 0.15s;
+}
+.switch[aria-checked="true"] .knob { left: 1.25rem; background: var(--lavender); }
+.switch[aria-checked="mixed"] .knob { left: 0.7rem; background: var(--peach); }
+.switch:disabled { cursor: default; opacity: 0.6; }
+.switch:focus-visible { outline: 2px solid var(--lavender); outline-offset: 3px; border-radius: 8px; }
+
+/* ---- tables -------------------------------------------------------------- */
 
 /* Wide tables scroll sideways inside the page, never the page itself. */
 .grid-wrap {
@@ -52,32 +92,29 @@
   white-space: nowrap;
 }
 .grid .num { text-align: right; white-space: nowrap; }
-.grid .col-dir { min-width: 12rem; font-size: 0.8rem; }
 .grid .col-album, .grid .col-title { min-width: 12rem; }
-.grid .col-albumartist, .grid .col-artist, .grid .col-genre, .grid .col-composer { min-width: 10rem; }
-.grid .col-date, .grid .col-compilation { min-width: 6rem; }
+.grid .col-albumartist, .grid .col-artist, .grid .col-genre, .grid .col-composer,
+.grid .col-copyright, .grid .col-label { min-width: 10rem; }
+.grid .col-date, .grid .col-bpm { min-width: 5.5rem; }
 .grid .col-discnumber, .grid .col-tracknumber { min-width: 4.5rem; }
+.grid .col-musicbrainz_trackid, .grid .col-musicbrainz_albumid { min-width: 18rem; }
+.grid .col-isrc, .grid .col-asin, .grid .col-encodedby, .grid .col-mood, .grid .col-media,
+.grid .col-catalognumber, .grid .col-barcode { min-width: 8rem; }
+.grid.tracks td.path { min-width: 14rem; font-size: 0.8rem; }
 
-/* A row's stripe on its first cell: album-wide changes, track changes. */
-.grid tr.album-edits > :first-child, .grid tbody.album-edits > tr > :first-child {
-  box-shadow: inset 5px 0 0 var(--lavender);
-}
-.grid tr.track-edits > :first-child, .grid tbody.track-edits > tr > :first-child {
-  box-shadow: inset 5px 0 0 var(--sky);
-}
-.grid tr.album-edits.track-edits > :first-child,
-.grid tbody.album-edits.track-edits > tr > :first-child {
-  box-shadow: inset 5px 0 0 var(--lavender), inset 10px 0 0 var(--sky);
-}
+/* A row with changes: a stripe on its first cell. */
+.grid tr.pending > :first-child { box-shadow: inset 5px 0 0 var(--lavender); }
 
 /* A cell: pressed into the surface, like an input; pressing it edits. */
-.cell {
+.cell, .cell-input {
   display: block;
   width: 100%;
   min-height: 2rem;
   padding: 0.35rem 0.6rem;
-  border: 0;
   border-radius: 10px;
+}
+.cell {
+  border: 0;
   background: var(--surface);
   box-shadow: inset 2px 2px 5px var(--shade), inset -2px -2px 5px var(--light);
   color: var(--text);
@@ -87,72 +124,56 @@
   overflow-wrap: anywhere;
 }
 .cell:disabled { cursor: default; opacity: 0.75; }
-.cell.empty { color: var(--muted); font-style: italic; }
-.cell-input { min-height: 2rem; padding: 0.35rem 0.6rem; border-radius: 10px; }
-td.edited .cell, td.edited .cell-text, .mark.edited-cell {
+.cell.empty, .cell-input::placeholder { color: var(--muted); font-style: italic; }
+td.edited .cell, td.edited .cell-input, td.edited .switch .track, .mark.edited {
   box-shadow: inset 0 0 0 2px var(--lavender);
 }
-td.missing .cell { color: var(--rose); font-style: italic; }
-
-/* The changes table: the files' values, then the new ones underneath. */
-.changes-grid .which { color: var(--muted); font-weight: 400; width: 3rem; }
-.changes-grid .old-values td { border-bottom: 0; }
-.changes-grid tbody { border-bottom: 2px solid var(--edge); }
-.cell-text {
-  display: block;
-  padding: 0.35rem 0.6rem;
-  border-radius: 10px;
-  overflow-wrap: anywhere;
+td.differs .cell, td.differs .cell-input, td.differs .switch .track, .mark.differs {
+  box-shadow: inset 0 0 0 2px var(--rose);
 }
-.cell-text.empty { color: var(--muted); font-style: italic; }
-.changes-grid td.replaced .cell-text { color: var(--muted); text-decoration: line-through; }
-.track-count { color: var(--sky); }
-.track-detail td { background: var(--surface); }
+td.edited.differs .cell, td.edited.differs .cell-input {
+  box-shadow: inset 0 0 0 2px var(--lavender), inset 0 0 0 4px var(--rose);
+}
+td.bad .cell, td.bad .cell-input, td.bad .switch .track, .mark.bad {
+  background: color-mix(in srgb, var(--rose) 18%, var(--surface));
+}
+.missing-art { color: var(--rose); }
+
+/* The tracks count, which opens the album. */
+.count-btn { min-width: 3rem; justify-content: center; }
 
 /* What the colours mean. */
 .legend { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center; }
 .mark { padding: 0.1rem 0.6rem; border-radius: 8px; }
-.mark.album-edits { box-shadow: inset 5px 0 0 var(--lavender); padding-left: 0.9rem; }
-.mark.track-edits { box-shadow: inset 5px 0 0 var(--sky); padding-left: 0.9rem; }
 
-/* ---- the list popup ------------------------------------------------------ */
+/* ---- popups -------------------------------------------------------------- */
 
 .popover.floating {
   position: fixed;
   top: auto;
   left: auto;
   min-width: min(20rem, calc(100vw - 1rem));
-  max-width: min(24rem, calc(100vw - 1rem));
+  max-width: min(26rem, calc(100vw - 1rem));
   display: grid;
   gap: 0.6rem;
 }
-.chips { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.4rem; }
-.chip.value {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.3rem;
-  background: var(--lavender);
-  color: var(--ink);
-  padding: 0.15rem 0.2rem 0.15rem 0.7rem;
-}
-.chip-x {
-  border: 0;
-  border-radius: 999px;
-  background: none;
-  color: var(--ink);
-  font: inherit;
-  font-weight: 700;
-  padding: 0 0.45rem;
-  cursor: pointer;
-}
-.chip-x:focus-visible { outline: 2px solid var(--ink); }
 .suggestions { max-height: 12rem; }
 .suggestions:empty { display: none; }
 
-/* ---- history ------------------------------------------------------------- */
+/* An ordered list of values: each with up, down, remove. */
+.ordered { margin: 0; padding-left: 1.6rem; display: grid; gap: 0.3rem; }
+.ordered li { display: flex; align-items: center; gap: 0.3rem; }
+.ordered .value { flex: 1; overflow-wrap: anywhere; }
+.btn.mini { padding: 0.15rem 0.5rem; min-height: 0; }
 
-.changes { margin: 0.5rem 0 0; padding-left: 1.2rem; display: grid; gap: 0.2rem; }
-.changes .old { text-decoration: line-through; color: var(--muted); }
+.number-pair { display: flex; align-items: center; gap: 0.5rem; }
+.number-pair input { width: 6rem; }
+
+/* ---- changes and history ------------------------------------------------- */
+
+.batch-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; }
+.old { color: var(--muted); text-decoration: line-through; overflow-wrap: anywhere; }
+.edited-text { color: var(--lavender); overflow-wrap: anywhere; }
 .history > header {
   display: flex;
   flex-wrap: wrap;
@@ -160,6 +181,7 @@ td.missing .cell { color: var(--rose); font-style: italic; }
   gap: 0.25rem 1rem;
 }
 .note { overflow-wrap: anywhere; color: var(--muted); }
+.rules { margin: 0; padding-left: 1.2rem; display: grid; gap: 0.3rem; }
 
 @media (max-width: 21rem) {
   /* The popup is a sheet along the bottom, like the other popovers. */
@@ -171,5 +193,5 @@ td.missing .cell { color: var(--rose); font-style: italic; }
     max-width: none;
   }
   .grid { font-size: 0.8rem; }
-  .grid .col-album, .grid .col-title, .grid .col-dir { min-width: 9rem; }
+  .grid .col-album, .grid .col-title { min-width: 9rem; }
 }

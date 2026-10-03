@@ -168,7 +168,9 @@ static void usage(void)
     fprintf(stderr,
             "usage: nylm                 run the server\n"
             "       nylm set-password    set the login password (reads stdin)\n"
-            "       nylm music-scan      read new and changed music files into the cache\n"
+            "       nylm music-scan      run the queued music scans, or scan the whole\n"
+            "                            library if none is queued\n"
+            "       nylm music-scan PATH scan a folder or file in the music library\n"
             "       nylm music-write     write the pending music tag changes\n"
             "\n"
             "environment (defaults in brackets):\n"
@@ -187,9 +189,11 @@ int main(int argc, char **argv)
         usage();
         return 0;
     }
-    const char *cmd = argc == 2 ? argv[1] : "";
-    if (argc > 2 || (argc == 2 && strcmp(cmd, "set-password") != 0 &&
-                     strcmp(cmd, "music-scan") != 0 && strcmp(cmd, "music-write") != 0)) {
+    const char *cmd = argc >= 2 ? argv[1] : "";
+    int scan_path = argc == 3 && strcmp(cmd, "music-scan") == 0;
+    if ((argc > 2 && !scan_path) ||
+        (argc == 2 && strcmp(cmd, "set-password") != 0 && strcmp(cmd, "music-scan") != 0 &&
+         strcmp(cmd, "music-write") != 0)) {
         usage();
         return 2;
     }
@@ -202,14 +206,20 @@ int main(int argc, char **argv)
     }
 
     int rc;
-    if (strcmp(cmd, "set-password") == 0)
+    if (strcmp(cmd, "set-password") == 0) {
         rc = cmd_set_password();
-    else if (strcmp(cmd, "music-scan") == 0)
-        rc = arena_init(ARENA_SIZE) == 0 ? music_scan() : 1;
-    else if (strcmp(cmd, "music-write") == 0)
-        rc = arena_init(ARENA_SIZE) == 0 ? music_write() : 1;
-    else
+    } else if (strcmp(cmd, "music-scan") == 0 || strcmp(cmd, "music-write") == 0) {
+        if (arena_init(ARENA_SIZE) != 0) {
+            fprintf(stderr, "out of memory\n");
+            rc = 1;
+        } else {
+            json_init();
+            rc = strcmp(cmd, "music-scan") == 0 ? music_scan(scan_path ? argv[2] : NULL)
+                                                : music_write();
+        }
+    } else {
         rc = cmd_serve();
+    }
     db_close_all();
     return rc;
 }

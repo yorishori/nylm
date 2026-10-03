@@ -31,11 +31,10 @@ void plants_log_delete(struct request *req, struct response *res);
 void music_overview(struct request *req, struct response *res);
 void music_albums(struct request *req, struct response *res);
 void music_album(struct request *req, struct response *res);
-void music_album_save(struct request *req, struct response *res);
-void music_changes(struct request *req, struct response *res);
-void music_changes_cancel(struct request *req, struct response *res);
-void music_changes_discard(struct request *req, struct response *res);
 void music_values(struct request *req, struct response *res);
+void music_changes(struct request *req, struct response *res);
+void music_queue(struct request *req, struct response *res);
+void music_discard(struct request *req, struct response *res);
 void music_scan_start(struct request *req, struct response *res);
 void music_write_start(struct request *req, struct response *res);
 

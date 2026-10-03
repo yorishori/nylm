@@ -90,14 +90,14 @@ static int migrate(sqlite3 *conn, const char *path, const char *const *migration
     return 0;
 }
 
-/* Oldest SQLite with everything the schema uses: STRICT tables (3.37) and
- * unixepoch() (3.38). */
-#define MIN_SQLITE_VERSION 3038000
+/* Oldest SQLite with everything nylm uses: STRICT tables (3.37), unixepoch()
+ * (3.38) and ORDER BY inside an aggregate (3.44). */
+#define MIN_SQLITE_VERSION 3044000
 
 sqlite3 *db_open(const char *path, const char *const *migrations, int count)
 {
     if (sqlite3_libversion_number() < MIN_SQLITE_VERSION) {
-        fprintf(stderr, "db: SQLite %s is too old, need 3.38 or newer\n", sqlite3_libversion());
+        fprintf(stderr, "db: SQLite %s is too old, need 3.44 or newer\n", sqlite3_libversion());
         return NULL;
     }
     sqlite3 *conn = NULL;

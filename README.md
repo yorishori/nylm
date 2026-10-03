@@ -81,59 +81,81 @@ is its chip, and only late (rose) and today (peach) colour the due label.
 
 ## Music
 
-Album-first tag editor for the music folder `NYLM_MUSIC` (`src/api_music.c`,
-API under `/api/music`). The files are the truth: `music.db` caches their
-tags. An album is a folder; its tracks are the `.mp3` and `.flac` files in
-it. Dot files are skipped and symlinks never followed.
+Tag editor for the music folder `NYLM_MUSIC` (`src/api_music.c`, API under
+`/api/music`). The files are the truth: `music.db` caches their tags. A
+track is any file below the folder with a music extension (mp3, mp2,
+flac, ogg, oga, opus, m4a, m4b, m4p, mp4, aac, wav, aif, aiff, aifc, afc,
+ape, wv, tta, mpc, spx, wma, asf, shn, mka, dsf, dff, dsdiff; any case).
+An album is the tracks that share ALBUM and ALBUMARTIST. Dot files are
+skipped and symlinks never followed. Only TagLib opens the files, and only
+these tags are read or written: TITLE ALBUM ARTIST ALBUMARTIST TRACKNUMBER
+DISCNUMBER DATE GENRE COMPOSER COMPILATION ISRC ASIN BPM COPYRIGHT
+ENCODEDBY MOOD MEDIA LABEL CATALOGNUMBER BARCODE TITLESORT ALBUMSORT
+ARTISTSORT ALBUMARTISTSORT COMPOSERSORT MUSICBRAINZ_TRACKID
+MUSICBRAINZ_ALBUMID NAVIDROME_ID. Genre and composer keep several values,
+in order; another tag with several values shows them joined by `"; "` and
+is written back as one.
 
-The server never opens a music file. It reads the cache, queues changes,
-and starts the two services that do work on the files, each its own
-process, started by hand or from the web app (password again, recorded in
-the `audit` table) through a root action that only starts its unit:
+The server never opens a music file. It reads the cache, queues changes
+and scans, and starts the two services that do work on the files, each its
+own process, started by hand or from the web app (password again,
+recorded in the `audit` table) through a root action that only starts its
+unit:
 
-- `nylm music-scan` (`nylm-music-scan.service`): reads new and changed
-  files (size or mtime) into the cache, drops files that are gone.
-- `nylm music-write` (`nylm-music-write.service`): writes the pending rows
-  of the `changes` table into the files.
+- `nylm music-scan [PATH]` (`nylm-music-scan.service`): with a path (the
+  folder, or a folder or file in it) scans that; without, runs the scans
+  the web app queued (the whole library, or an album's files to read them
+  again), or the whole library if none is queued. A folder's new and
+  changed files are read (size, or ctime after the last scan), a single
+  file always; tracks no longer there leave the cache. A scan of the whole
+  library also counts the other files by extension (`[blank]`: none).
+- `nylm music-write` (`nylm-music-write.service`): writes the pending
+  changes, track by track, then reads each track back into the cache.
 
 They never run together: each holds `$NYLM_DATA/music/library.lock`
 exclusively. The server holds it shared for its own writes to `music.db`,
-and refuses to queue or cancel anything while a service runs (409).
+and refuses to queue or discard anything while a service runs (409).
 
-The Albums tab is a table of every album, edited in place: album, album
-artist, genre, composer, date and compilation for all its tracks; the
-album page does the same per track (title, artist, composer, track and
-disc number). Each edit is queued as soon as the cell is left, no save
-button: one `changes` row per tag of a file, with the value it had when
-queued. List fields (artist, album artist, genre, composer) are edited in
-a popup of values with suggestions from the library. Colours mark albums
-with album-wide or track changes and each value that will change. The
-Changes tab shows each changed album twice, now and new, with its track
-changes underneath and a Discard button. Every track needs a track
-number: an album's changes are refused while one has none; a missing
-disc number is queued as `1/1` with the album's changes.
+The web app has three tabs. Albums: the last scan and a button to scan
+again, filters (search, a field each, and switches for albums with
+invalid tags, missing tags, several artists without being a compilation,
+tracks without art), and a table of albums edited in place: album, album
+artist, date, composers, genres, compilation, for every track at once.
+The tracks count opens the album: every track with every tag, edited in
+place; a value that differs from the rest of the album is ringed rose.
+Disc and track numbers are set in a popup, X first and Y worked out:
+saving numbers the whole album again (Y per disc for track numbers; a
+missing X gets the lowest free number). Every edit is queued at once as
+one batch (`changes` table), and colours what will change. Changes: the
+pending changes by batch, Discard per batch, and Write. Info: library
+counts, the rules, and the written changes with their results.
 
-The rules for a value: one line of UTF-8, at most 500 bytes, no leading
-or trailing space; title, artist, album, album artist, track and disc
-number can not be empty; dates `YYYY[-MM[-DD]]`; numbers `N` or `N/M`;
-list fields are values separated by `"; "` (none empty, no `;` inside),
-written as one string; a genre's values are words of lowercase `a-z` and
-`-` with single spaces (`hip hop; pop-punk`).
+The rules for a value: required are title, album, artist, album artist,
+track and disc number, date, genre, composer and compilation; text is
+UTF-8 without control characters, at most 500 bytes; track and disc
+number `X/Y`, positive whole numbers, X at most Y; date (the year) and BPM
+positive whole numbers; compilation `0` or `1` (absent reads as `0`);
+genres lowercase `a-z`, `0-9` and `-`.
 
-The write service, per file, only through TagLib (`src/tags.c`): checks
-each value again against those rules and that the file still has the
-queued-against value, sets the tags and saves, then reads the file back.
-Each change ends `done`, `failed` (with the cause), or `warning`:
-written, but TagLib also changed other tags, pictures or audio
-properties, listed in its note. It only changes tags, never a file's
-path. A tag with several values in the file is not changed, except a
-list field: its values are replaced by the one new string.
+The write service, per track, only through TagLib (`src/tags.c`): applies
+the track's pending changes to the cached tags; mirrors TITLESORT,
+ALBUMSORT, ARTISTSORT, ALBUMARTISTSORT and COMPOSERSORT (the composers
+joined by `"; "`) from the tags that change, cutting them to 500 bytes;
+sets a missing or invalid disc number to `1/1`; checks every tag against
+the rules; checks that the file still has the cached tags; writes what
+differs and reads the file back. Each change ends `done`, `warning` (done,
+and what nylm also changed, e.g. the disc number) or `failed` (with the
+cause: an invalid tag, a file changed since the scan, a file that does not
+read back as written).
 
 TagLib writes in place. It saves MP3 tags as ID3v2.4 (upgrading ID3v2.3)
 and adds an ID3v1 tag; both stay as TagLib writes them.
 
-After updating to a version that reads a new tag (composer), run a scan:
-it reads every file again once.
+Album art, later: the scan records whether a track has a picture
+(`has_art`). Uploading art will be a pending change like the others (the
+picture saved under `$NYLM_DATA/music/`, the write service setting it
+through TagLib's PICTURE property), and showing it a read of the cache. A
+picture can be bigger than the 1 MiB request body limit allows today.
 
 ## Commands
 
@@ -143,13 +165,15 @@ make test                         # unit + end-to-end tests
 sudo deploy/install.sh            # on the server: install or update
 journalctl -u nylm -f             # server logs
 sudo -u nylm env NYLM_DATA=/mnt/data/nylm nylm set-password
-sudo systemctl start nylm-music-scan   # scan the music folder
+sudo systemctl start nylm-music-scan   # scan the music folder (or what is queued)
 sudo systemctl start nylm-music-write  # write the pending tag changes
+sudo -u nylm env NYLM_DATA=/mnt/data/nylm NYLM_MUSIC=/mnt/data/music \
+    nylm music-scan /mnt/data/music/Some/Album   # scan one folder or file
 journalctl -u nylm-music-scan -u nylm-music-write   # their output
 NYLM_DATA=dev-data ./nylm-debug set-password   # password for make run
 ```
 
 Configuration is environment variables; `nylm --help` lists them.
-Build needs `gcc`, `make` and the system libraries `sqlite` (3.38+), `cjson`,
+Build needs `gcc`, `make` and the system libraries `sqlite` (3.44+), `cjson`,
 `openssl` (3.2+) and `taglib` (2.0+), linked dynamically: `pacman -Syu`
 brings their fixes.

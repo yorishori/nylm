@@ -42,3 +42,14 @@ void arena_reset(void)
 {
     used = 0;
 }
+
+size_t arena_mark(void)
+{
+    return used;
+}
+
+void arena_rewind(size_t mark)
+{
+    if (mark <= used)
+        used = mark;
+}

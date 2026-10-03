@@ -1,6 +1,7 @@
-/* Music tags: validation, reading, and writes through TagLib, on copies of
- * the files in tests/data (MP3 with ID3v2.3; FLAC; FLAC with two genres;
- * MP3 with the track number "0/0", which TagLib drops on save). */
+/* Music tags: the field table, the rules, preparing a write, reading and
+ * writing through TagLib on copies of the files in tests/data (MP3 with
+ * ID3v2.3; FLAC; FLAC with two genres and two titles; MP3 with the track
+ * number "0/0", which TagLib drops on save). */
 #define _POSIX_C_SOURCE 200809L
 
 #include <dirent.h>
@@ -9,131 +10,236 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <taglib/tag_c.h>
+
 #include "../src/arena.h"
 #include "../src/tags.h"
 #include "test.h"
 
 static char dir[] = "/tmp/nylm-tags-XXXXXX";
 
-static void test_format(void)
+/* One value, or none for NULL. */
+static struct tag_values one(const char *s)
 {
-    CHECK(tags_format_of("a.mp3") == TAGS_MP3);
-    CHECK(tags_format_of("a.MP3") == TAGS_MP3);
-    CHECK(tags_format_of("a.b.flac") == TAGS_FLAC);
-    CHECK(tags_format_of("a.FLAC") == TAGS_FLAC);
-    CHECK(tags_format_of("a.ogg") == TAGS_NONE);
-    CHECK(tags_format_of("mp3") == TAGS_NONE);
-    CHECK(tags_format_of("a.mp3.jpg") == TAGS_NONE);
-    CHECK(tags_format_of("") == TAGS_NONE);
+    static const char *slot[16];
+    static int next;
+    struct tag_values v = { 0, NULL };
+    if (s != NULL) {
+        next = (next + 1) % 16;
+        slot[next] = s;
+        v.n = 1;
+        v.v = &slot[next];
+    }
+    return v;
 }
 
-static int ok(enum tag_field f, const char *v)
+static int ok(enum tag_field f, const char *s)
 {
-    return tags_check_value(f, v) == NULL;
+    struct tag_values v = one(s);
+    return tags_check(f, &v) == NULL;
 }
 
-static void test_values(void)
+/* n values: list[0..n). */
+static int ok_list(enum tag_field f, const char **list, size_t n)
+{
+    struct tag_values v = { n, list };
+    return tags_check(f, &v) == NULL;
+}
+
+static void test_fields(void)
+{
+    for (int i = 0; i < TAG_FIELDS; i++) {
+        CHECK(tags_field_of(tags_name[i]) == i);
+        for (const char *k = tags_key[i], *n = tags_name[i]; *k != '\0' || *n != '\0'; k++, n++)
+            CHECK(*n == (*k >= 'A' && *k <= 'Z' ? *k - 'A' + 'a' : *k)); /* same name */
+    }
+    CHECK(tags_field_of("TITLE") == -1);
+    CHECK(tags_field_of("") == -1);
+    CHECK(tags_field_of("comment") == -1);
+
+    CHECK(tags_is_multi(TAG_GENRE) && tags_is_multi(TAG_COMPOSER));
+    CHECK(!tags_is_multi(TAG_ARTIST) && !tags_is_multi(TAG_TITLE));
+    for (int i = 0; i < TAG_SINGLE_FIELDS; i++)
+        CHECK(!tags_is_multi((enum tag_field)i));
+
+    CHECK(tags_is_editable(TAG_TITLE) && tags_is_editable(TAG_GENRE));
+    CHECK(tags_is_editable(TAG_MUSICBRAINZ_TRACKID) && tags_is_editable(TAG_MUSICBRAINZ_ALBUMID));
+    CHECK(!tags_is_editable(TAG_TITLESORT) && !tags_is_editable(TAG_ALBUMSORT));
+    CHECK(!tags_is_editable(TAG_ARTISTSORT) && !tags_is_editable(TAG_ALBUMARTISTSORT));
+    CHECK(!tags_is_editable(TAG_COMPOSERSORT) && !tags_is_editable(TAG_NAVIDROME_ID));
+
+    int required = 0;
+    for (int i = 0; i < TAG_FIELDS; i++)
+        required += tags_is_required((enum tag_field)i);
+    CHECK(required == 10);
+    CHECK(tags_is_required(TAG_COMPILATION) && tags_is_required(TAG_COMPOSER));
+    CHECK(!tags_is_required(TAG_BPM) && !tags_is_required(TAG_ISRC));
+
+    const char *music[] = { "mp3", "mp2", "flac", "ogg", "oga", "opus", "m4a", "m4b", "m4p",
+                            "mp4", "aac", "wav", "aif", "aiff", "aifc", "afc", "ape", "wv",
+                            "tta", "mpc", "spx", "wma", "asf", "shn", "mka", "dsf", "dff",
+                            "dsdiff" };
+    for (size_t i = 0; i < sizeof music / sizeof music[0]; i++)
+        CHECK(tags_is_music(music[i]));
+    CHECK(!tags_is_music("MP3")); /* callers lower-case it */
+    CHECK(!tags_is_music("jpg"));
+    CHECK(!tags_is_music(""));
+    CHECK(!tags_is_music("[blank]"));
+    CHECK(!tags_is_music("mp"));
+    CHECK(!tags_is_music("flacc"));
+}
+
+static void test_check(void)
 {
     char s[TAGS_MAX_VALUE + 2];
 
-    CHECK(ok(TAG_TITLE, "Song"));
+    /* required: absent or empty */
+    CHECK(!ok(TAG_TITLE, NULL));
+    CHECK(!ok(TAG_TITLE, ""));
+    CHECK(strcmp(tags_check(TAG_DATE, &(struct tag_values){ 0, NULL }), "is required") == 0);
+    CHECK(ok(TAG_ISRC, NULL));     /* not required */
+    CHECK(ok(TAG_BPM, NULL));
+    CHECK(ok(TAG_NAVIDROME_ID, NULL));
+    CHECK(!ok_list(TAG_GENRE, NULL, 0));
+    CHECK(!ok_list(TAG_COMPOSER, NULL, 0));
+
+    /* text: UTF-8 without control characters, at most 500 bytes */
     CHECK(ok(TAG_TITLE, "Ça va – 日本"));
-    CHECK(!ok(TAG_TITLE, ""));        /* required */
-    CHECK(!ok(TAG_ARTIST, ""));
-    CHECK(!ok(TAG_ALBUM, ""));
-    CHECK(!ok(TAG_ALBUMARTIST, ""));
-    CHECK(!ok(TAG_TRACKNUMBER, ""));
-    CHECK(ok(TAG_GENRE, ""));         /* removable */
-    CHECK(ok(TAG_DATE, ""));
-    CHECK(!ok(TAG_DISCNUMBER, ""));    /* required */
-    CHECK(ok(TAG_COMPILATION, ""));
-    CHECK(!ok(TAG_TITLE, " Song"));
-    CHECK(!ok(TAG_TITLE, "Song "));
+    CHECK(ok(TAG_TITLE, " leading and trailing "));
     CHECK(!ok(TAG_TITLE, "a\nb"));
     CHECK(!ok(TAG_TITLE, "a\tb"));
-    CHECK(!ok(TAG_TITLE, "\xff"));    /* not UTF-8 */
+    CHECK(!ok(TAG_COPYRIGHT, "\xff"));
+    CHECK(!ok(TAG_LABEL, "\xc3")); /* cut UTF-8 */
     memset(s, 'a', TAGS_MAX_VALUE);
     s[TAGS_MAX_VALUE] = '\0';
-    CHECK(ok(TAG_GENRE, s));          /* max */
+    CHECK(ok(TAG_ALBUM, s));       /* max */
+    CHECK(ok(TAG_TITLESORT, s));
     s[TAGS_MAX_VALUE] = 'a';
     s[TAGS_MAX_VALUE + 1] = '\0';
-    CHECK(!ok(TAG_GENRE, s));         /* max + 1 */
+    CHECK(!ok(TAG_ALBUM, s));      /* max + 1 */
+    CHECK(!ok(TAG_ALBUMSORT, s));
+    CHECK(ok(TAG_ALBUM, "a"));     /* min */
 
-    CHECK(ok(TAG_DATE, "1999"));
-    CHECK(ok(TAG_DATE, "1999-12"));
-    CHECK(ok(TAG_DATE, "2000-02-29"));
-    CHECK(!ok(TAG_DATE, "1900-02-29"));
-    CHECK(!ok(TAG_DATE, "1999-02-29"));
-    CHECK(!ok(TAG_DATE, "1999-04-31"));
-    CHECK(!ok(TAG_DATE, "1999-13"));
-    CHECK(!ok(TAG_DATE, "1999-00"));
-    CHECK(!ok(TAG_DATE, "1999-01-00"));
-    CHECK(!ok(TAG_DATE, "99"));
-    CHECK(!ok(TAG_DATE, "1999/01/01"));
-    CHECK(!ok(TAG_DATE, "1999-1-1"));
-    CHECK(!ok(TAG_DATE, "19a9"));
+    /* one value only, for single-valued tags */
+    const char *two[] = { "a", "b" };
+    CHECK(!ok_list(TAG_ARTIST, two, 2));
 
-    CHECK(ok(TAG_TRACKNUMBER, "1"));
-    CHECK(ok(TAG_TRACKNUMBER, "03"));
+    /* track and disc number: X/Y, positive, X <= Y, at most 4 digits */
+    CHECK(ok(TAG_TRACKNUMBER, "1/1"));
     CHECK(ok(TAG_TRACKNUMBER, "3/12"));
-    CHECK(ok(TAG_TRACKNUMBER, "9999/9999"));
-    CHECK(ok(TAG_DISCNUMBER, "1/1"));
-    CHECK(!ok(TAG_TRACKNUMBER, "0"));
-    CHECK(!ok(TAG_TRACKNUMBER, "12/3"));
-    CHECK(!ok(TAG_TRACKNUMBER, "10000"));
-    CHECK(!ok(TAG_TRACKNUMBER, "1/10000"));
-    CHECK(!ok(TAG_TRACKNUMBER, "1/"));
-    CHECK(!ok(TAG_TRACKNUMBER, "/1"));
+    CHECK(ok(TAG_TRACKNUMBER, "03/12"));
+    CHECK(ok(TAG_TRACKNUMBER, "12/12"));
+    CHECK(ok(TAG_DISCNUMBER, "9999/9999"));
+    CHECK(!ok(TAG_TRACKNUMBER, "13/12"));
+    CHECK(!ok(TAG_TRACKNUMBER, "0/12"));
+    CHECK(!ok(TAG_TRACKNUMBER, "1/0"));
+    CHECK(!ok(TAG_TRACKNUMBER, "3"));
+    CHECK(!ok(TAG_TRACKNUMBER, "3/"));
+    CHECK(!ok(TAG_TRACKNUMBER, "/3"));
     CHECK(!ok(TAG_TRACKNUMBER, "1/2/3"));
-    CHECK(!ok(TAG_TRACKNUMBER, "-1"));
-    CHECK(!ok(TAG_TRACKNUMBER, "A1"));
+    CHECK(!ok(TAG_TRACKNUMBER, "-1/2"));
+    CHECK(!ok(TAG_TRACKNUMBER, " 1/2"));
+    CHECK(!ok(TAG_TRACKNUMBER, "1/2 "));
+    CHECK(!ok(TAG_TRACKNUMBER, "a/b"));
+    CHECK(!ok(TAG_DISCNUMBER, "1/10000"));
+    CHECK(!ok(TAG_DISCNUMBER, "00001/2"));
+    int x = 0, y = 0;
+    CHECK(tags_number("03/12", &x, &y) == 0 && x == 3 && y == 12);
+    CHECK(tags_number("2/1", &x, &y) == -1);
+    CHECK(tags_number("", &x, &y) == -1);
 
-    /* genres: words of lowercase a-z and '-' with single spaces, several
-     * separated by "; " */
-    CHECK(ok(TAG_GENRE, "hip hop"));
-    CHECK(ok(TAG_GENRE, "hip hop; drum and bass; lo-fi"));
-    CHECK(!ok(TAG_GENRE, "hip  hop"));
-    CHECK(!ok(TAG_GENRE, "hip hop ; jazz"));
-    CHECK(!ok(TAG_GENRE, "hip hop;jazz"));
-    CHECK(!ok(TAG_GENRE, "hip ; hop"));
-    CHECK(!ok(TAG_GENRE, "rock;  pop-punk"));
-    CHECK(ok(TAG_GENRE, "rock"));
-    CHECK(ok(TAG_GENRE, "pop-punk"));
-    CHECK(ok(TAG_GENRE, "rock; pop-punk; jazz"));
-    CHECK(ok(TAG_GENRE, "-"));
-    CHECK(!ok(TAG_GENRE, "Rock"));
-    CHECK(!ok(TAG_GENRE, "rock;pop"));
-    CHECK(!ok(TAG_GENRE, "rock,pop"));
-    CHECK(!ok(TAG_GENRE, "rock;  pop"));
-    CHECK(!ok(TAG_GENRE, "rock ; pop"));
-    CHECK(!ok(TAG_GENRE, "rock; "));
-    CHECK(!ok(TAG_GENRE, "rock;"));
-    CHECK(!ok(TAG_GENRE, "; rock"));
-    CHECK(!ok(TAG_GENRE, "rock; ; pop"));
-    CHECK(!ok(TAG_GENRE, "rock2"));
-    CHECK(!ok(TAG_GENRE, "rock_pop"));
-    CHECK(!ok(TAG_GENRE, "rock/pop"));
-    CHECK(!ok(TAG_GENRE, "électro"));
+    /* date: a year; BPM: a positive whole number */
+    CHECK(ok(TAG_DATE, "1999"));
+    CHECK(ok(TAG_DATE, "1"));
+    CHECK(ok(TAG_DATE, "9999"));
+    CHECK(!ok(TAG_DATE, "0"));
+    CHECK(!ok(TAG_DATE, "10000"));
+    CHECK(!ok(TAG_DATE, "1999-01-02"));
+    CHECK(!ok(TAG_DATE, "19a9"));
+    CHECK(!ok(TAG_DATE, "-1999"));
+    CHECK(ok(TAG_BPM, "120"));
+    CHECK(ok(TAG_BPM, "0120"));
+    CHECK(!ok(TAG_BPM, "0"));
+    CHECK(!ok(TAG_BPM, "120.5"));
+    CHECK(!ok(TAG_BPM, "fast"));
+    CHECK(!ok(TAG_BPM, ""));        /* empty is not "absent" here */
 
-    /* lists: artist, album artist, composer (genre: see above) */
-    CHECK(ok(TAG_ARTIST, "Some Artist"));
-    CHECK(ok(TAG_ARTIST, "AC/DC; Sunn O)))"));
-    CHECK(ok(TAG_ALBUMARTIST, "A; B; C"));
-    CHECK(ok(TAG_COMPOSER, ""));             /* removable */
-    CHECK(ok(TAG_COMPOSER, "Bach; Händel"));
-    CHECK(!ok(TAG_ARTIST, ""));
-    CHECK(!ok(TAG_ARTIST, "A;B"));
-    CHECK(!ok(TAG_ARTIST, "A ; B"));
-    CHECK(!ok(TAG_ARTIST, "A;  B"));
-    CHECK(!ok(TAG_ARTIST, "A; ; B"));
-    CHECK(!ok(TAG_ARTIST, "A;"));
-    CHECK(!ok(TAG_ARTIST, "; A"));
-    CHECK(!ok(TAG_COMPOSER, "A; B;"));
-    CHECK(ok(TAG_TITLE, "A;B"));             /* not a list field */
-
+    /* compilation */
+    CHECK(ok(TAG_COMPILATION, "0"));
     CHECK(ok(TAG_COMPILATION, "1"));
-    CHECK(!ok(TAG_COMPILATION, "0"));
+    CHECK(!ok(TAG_COMPILATION, "2"));
     CHECK(!ok(TAG_COMPILATION, "yes"));
+    CHECK(!ok(TAG_COMPILATION, "01"));
+
+    /* genre: lowercase a-z, 0-9 and '-' */
+    const char *genres[] = { "rock", "hip-hop", "80s", "-" };
+    CHECK(ok_list(TAG_GENRE, genres, 4));
+    const char *bad_genres[] = { "Rock", "hip hop", "rock_pop", "électro", "rock;pop", "" };
+    for (size_t i = 0; i < sizeof bad_genres / sizeof bad_genres[0]; i++)
+        CHECK(!ok_list(TAG_GENRE, &bad_genres[i], 1));
+    const char *mixed[] = { "rock", "Pop" };
+    CHECK(!ok_list(TAG_GENRE, mixed, 2));
+
+    /* composer: any text, none empty, at most 64 */
+    const char *composers[] = { "J. S. Bach", "Händel; and co" };
+    CHECK(ok_list(TAG_COMPOSER, composers, 2));
+    const char *empty[] = { "Bach", "" };
+    CHECK(!ok_list(TAG_COMPOSER, empty, 2));
+    const char *many[TAGS_MAX_VALUES + 1];
+    for (int i = 0; i <= TAGS_MAX_VALUES; i++)
+        many[i] = "x";
+    CHECK(ok_list(TAG_COMPOSER, many, TAGS_MAX_VALUES));       /* max */
+    CHECK(!ok_list(TAG_COMPOSER, many, TAGS_MAX_VALUES + 1));  /* max + 1 */
+}
+
+static void test_prepare(void)
+{
+    struct tags t;
+    char note[TAGS_MAX_NOTE];
+
+    /* the sort tags of changed fields mirror them; others stay */
+    memset(&t, 0, sizeof t);
+    const char *composers[] = { "Bach", "Händel" };
+    t.value[TAG_TITLE] = one("New Title");
+    t.value[TAG_TITLESORT] = one("Old, The");
+    t.value[TAG_ALBUM] = one("Album");
+    t.value[TAG_ALBUMSORT] = one("Album, The");
+    t.value[TAG_COMPOSER] = (struct tag_values){ 2, composers };
+    t.value[TAG_DISCNUMBER] = one("1/2");
+    note[0] = '\0';
+    CHECK(tags_prepare(&t, (1u << TAG_TITLE) | (1u << TAG_COMPOSER) | (1u << TAG_ARTIST), note,
+                       sizeof note) == 0);
+    CHECK_STR(t.value[TAG_TITLESORT].v[0], "New Title");
+    CHECK_STR(t.value[TAG_ALBUMSORT].v[0], "Album, The");
+    CHECK_STR(t.value[TAG_COMPOSERSORT].v[0], "Bach; Händel");
+    CHECK(t.value[TAG_ARTISTSORT].n == 0); /* its source is absent */
+    CHECK_STR(t.value[TAG_DISCNUMBER].v[0], "1/2");
+    CHECK(note[0] == '\0');
+
+    /* an invalid or missing disc number becomes 1/1 */
+    t.value[TAG_DISCNUMBER] = one("2/1");
+    CHECK(tags_prepare(&t, 0, note, sizeof note) == 0);
+    CHECK_STR(t.value[TAG_DISCNUMBER].v[0], "1/1");
+    CHECK(strstr(note, "disc number set to 1/1") != NULL);
+    t.value[TAG_DISCNUMBER] = one(NULL);
+    note[0] = '\0';
+    CHECK(tags_prepare(&t, 0, note, sizeof note) == 0);
+    CHECK_STR(t.value[TAG_DISCNUMBER].v[0], "1/1");
+
+    /* COMPOSERSORT over 500 bytes is cut at a character boundary */
+    static char a[300], b[300];
+    memset(a, 'a', 299);
+    for (int i = 0; i + 1 < 299; i += 2)
+        memcpy(b + i, "\xc3\xa9", 2); /* "é" */
+    b[298] = '\0';
+    const char *long_list[] = { a, b };
+    t.value[TAG_COMPOSER] = (struct tag_values){ 2, long_list };
+    note[0] = '\0';
+    CHECK(tags_prepare(&t, 1u << TAG_COMPOSER, note, sizeof note) == 0);
+    const char *cs = t.value[TAG_COMPOSERSORT].v[0];
+    CHECK(strlen(cs) == 499); /* 299 + 2 + 198: the 500th byte would split an "é" */
+    CHECK(tags_check(TAG_COMPOSERSORT, &t.value[TAG_COMPOSERSORT]) == NULL);
+    CHECK(strstr(note, "COMPOSERSORT cut to 500 bytes") != NULL);
 }
 
 /* Copies tests/data/name into the test folder as `as`; its path in out. */
@@ -153,7 +259,7 @@ static void copy_fixture(const char *name, const char *as, char *out, size_t siz
         CHECK(fclose(to) == 0);
 }
 
-/* The whole file into a static buffer; its length, or -1. */
+/* The whole file into buf; its length, or -1. */
 static long slurp(const char *path, char *buf, size_t size)
 {
     FILE *f = fopen(path, "rb");
@@ -164,112 +270,112 @@ static long slurp(const char *path, char *buf, size_t size)
     return (long)n;
 }
 
-/* An edit of path as it is now, changing nothing yet. */
 static void test_read(void)
 {
     char path[512], err[256];
     struct tags t;
 
     copy_fixture("tagged.mp3", "read.mp3", path, sizeof path);
-    CHECK(tags_read(path, TAGS_MP3, &t, err, sizeof err) == 0);
-    CHECK_STR(t.value[TAG_TITLE], "Song One");
-    CHECK_STR(t.value[TAG_ALBUMARTIST], "Some Artist");
-    CHECK_STR(t.value[TAG_TRACKNUMBER], "1/2");
-    CHECK_STR(t.value[TAG_DATE], "2001");
-    CHECK(t.value[TAG_DISCNUMBER] == NULL);
-    CHECK(t.multi == 0 && t.pictures == 0 && t.seconds == 1);
+    CHECK(tags_read(path, &t, err, sizeof err) == 0);
+    CHECK_STR(t.value[TAG_TITLE].v[0], "Song One");
+    CHECK_STR(t.value[TAG_ALBUMARTIST].v[0], "Some Artist");
+    CHECK_STR(t.value[TAG_TRACKNUMBER].v[0], "1/2");
+    CHECK_STR(t.value[TAG_DATE].v[0], "2001");
+    CHECK(t.value[TAG_GENRE].n == 1 && strcmp(t.value[TAG_GENRE].v[0], "Rock") == 0);
+    CHECK(t.value[TAG_DISCNUMBER].n == 0);
+    CHECK(t.value[TAG_COMPOSER].n == 0);
+    CHECK_STR(t.value[TAG_COMPILATION].v[0], "0"); /* absent reads as 0 */
+    CHECK(!t.has_art);
 
+    /* several values: genre keeps them, a single-valued tag joins them */
     copy_fixture("multi.flac", "read.flac", path, sizeof path);
-    CHECK(tags_read(path, TAGS_FLAC, &t, err, sizeof err) == 0);
-    CHECK_STR(t.value[TAG_GENRE], "Rock; Pop");
-    CHECK_STR(t.value[TAG_ARTIST], "Some Artist; Other Artist");
-    CHECK_STR(t.value[TAG_TITLE], "Song Two; Other Title");
-    CHECK(t.value[TAG_COMPOSER] == NULL);
-    CHECK(t.multi == ((1u << TAG_GENRE) | (1u << TAG_ARTIST) | (1u << TAG_TITLE)));
+    CHECK(tags_read(path, &t, err, sizeof err) == 0);
+    CHECK(t.value[TAG_GENRE].n == 2);
+    CHECK_STR(t.value[TAG_GENRE].v[0], "Rock");
+    CHECK_STR(t.value[TAG_GENRE].v[1], "Pop");
+    CHECK(t.value[TAG_TITLE].n == 1);
+    CHECK_STR(t.value[TAG_TITLE].v[0], "Song Two; Other Title");
+    CHECK_STR(t.value[TAG_ARTIST].v[0], "Some Artist; Other Artist");
 
-    /* not audio */
+    /* any music extension, any case: TagLib picks the type from it */
+    copy_fixture("tagged.flac", "upper.FLAC", path, sizeof path);
+    CHECK(tags_read(path, &t, err, sizeof err) == 0);
+    CHECK_STR(t.value[TAG_TITLE].v[0], "Song Two");
+
+    /* not audio, missing */
     snprintf(path, sizeof path, "%s/text.mp3", dir);
     FILE *f = fopen(path, "w");
     CHECK(f != NULL && fputs("not an mp3\n", f) >= 0 && fclose(f) == 0);
-    CHECK(tags_read(path, TAGS_MP3, &t, err, sizeof err) == -1);
+    CHECK(tags_read(path, &t, err, sizeof err) == -1);
     snprintf(path, sizeof path, "%s/missing.flac", dir);
-    CHECK(tags_read(path, TAGS_FLAC, &t, err, sizeof err) == -1);
+    CHECK(tags_read(path, &t, err, sizeof err) == -1);
 }
 
-/* A change of field from old to value, as the write service builds it. */
-static struct tags_change change(enum tag_field field, const char *old, const char *value)
+/* Adds a picture to the file through TagLib. */
+static void add_picture(const char *path)
 {
-    struct tags_change c;
-    memset(&c, 0, sizeof c);
-    c.field = field;
-    c.old = old;
-    c.value = value;
-    return c;
+    static const char data[] = "\xff\xd8\xff\xe0 not really a jpeg";
+    TagLib_File *f = taglib_file_new(path);
+    CHECK(f != NULL);
+    if (f == NULL)
+        return;
+    TAGLIB_COMPLEX_PROPERTY_PICTURE(pic, data, sizeof data, "test", "image/jpeg",
+                                    "Front Cover");
+    CHECK(taglib_complex_property_set(f, "PICTURE", pic));
+    CHECK(taglib_file_save(f));
+    taglib_file_free(f);
 }
 
-static void test_write_mp3(void)
+static void test_write(void)
 {
     char path[512], err[256];
-    struct tags t;
+    struct tags now, want, t;
     struct stat sb;
 
     copy_fixture("tagged.mp3", "write.mp3", path, sizeof path);
     CHECK(chmod(path, 0640) == 0);
-    struct tags_change c[] = {
-        change(TAG_GENRE, "Rock", "jazz"),
-        change(TAG_TITLE, "Song One", "Song Uno – ñ"),
-        change(TAG_DATE, "2001", ""),          /* remove */
-        change(TAG_DISCNUMBER, NULL, "1/1"),   /* add */
-    };
-    CHECK(tags_write(path, TAGS_MP3, c, 4) == 1);
-    for (int i = 0; i < 4; i++)
-        CHECK(!c[i].failed && c[i].note[0] == '\0');
-
-    CHECK(tags_read(path, TAGS_MP3, &t, err, sizeof err) == 0);
-    CHECK_STR(t.value[TAG_GENRE], "jazz");
-    CHECK_STR(t.value[TAG_TITLE], "Song Uno – ñ");
-    CHECK(t.value[TAG_DATE] == NULL);
-    CHECK_STR(t.value[TAG_DISCNUMBER], "1/1");
-    CHECK_STR(t.value[TAG_ARTIST], "Some Artist"); /* untouched */
-    CHECK_STR(t.value[TAG_TRACKNUMBER], "1/2");
+    CHECK(tags_read(path, &now, err, sizeof err) == 0);
+    want = now;
+    const char *genres[] = { "rock", "pop" }, *composers[] = { "Bach", "Händel" };
+    want.value[TAG_TITLE] = one("Song Uno – ñ");
+    want.value[TAG_GENRE] = (struct tag_values){ 2, genres };
+    want.value[TAG_COMPOSER] = (struct tag_values){ 2, composers };
+    want.value[TAG_DISCNUMBER] = one("1/1");
+    want.value[TAG_ISRC] = one("USRC17607839");
+    want.value[TAG_MUSICBRAINZ_ALBUMID] = one("1b1a7e2c-0000-4000-8000-000000000000");
+    want.value[TAG_COMPILATION] = one("1");
+    CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_WRITTEN);
+    CHECK(tags_read(path, &t, err, sizeof err) == 0);
+    CHECK_STR(t.value[TAG_TITLE].v[0], "Song Uno – ñ");
+    CHECK(t.value[TAG_GENRE].n == 2 && strcmp(t.value[TAG_GENRE].v[1], "pop") == 0);
+    CHECK(t.value[TAG_COMPOSER].n == 2 && strcmp(t.value[TAG_COMPOSER].v[0], "Bach") == 0);
+    CHECK_STR(t.value[TAG_DISCNUMBER].v[0], "1/1");
+    CHECK_STR(t.value[TAG_ISRC].v[0], "USRC17607839");
+    CHECK_STR(t.value[TAG_COMPILATION].v[0], "1");
+    CHECK_STR(t.value[TAG_ARTIST].v[0], "Some Artist"); /* untouched */
     CHECK(stat(path, &sb) == 0 && (sb.st_mode & 0777) == 0640); /* written in place */
-}
 
-static void test_write_flac(void)
-{
-    char path[512], err[256];
-    struct tags t;
+    /* remove a tag, keep a picture */
+    add_picture(path);
+    CHECK(tags_read(path, &now, err, sizeof err) == 0 && now.has_art);
+    want = now;
+    want.value[TAG_ISRC] = one(NULL);
+    want.value[TAG_COMPILATION] = one("0");
+    CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_WRITTEN);
+    CHECK(tags_read(path, &t, err, sizeof err) == 0);
+    CHECK(t.value[TAG_ISRC].n == 0 && t.has_art);
+    CHECK_STR(t.value[TAG_COMPILATION].v[0], "0");
 
+    /* FLAC */
     copy_fixture("tagged.flac", "write.flac", path, sizeof path);
-    struct tags_change c[] = {
-        change(TAG_ALBUM, "Some Album", "Other Album"),
-        change(TAG_COMPILATION, NULL, "1"),
-    };
-    CHECK(tags_write(path, TAGS_FLAC, c, 2) == 1);
-    CHECK(!c[0].failed && !c[1].failed);
-    CHECK(tags_read(path, TAGS_FLAC, &t, err, sizeof err) == 0);
-    CHECK_STR(t.value[TAG_ALBUM], "Other Album");
-    CHECK_STR(t.value[TAG_COMPILATION], "1");
-    CHECK_STR(t.value[TAG_GENRE], "Rock");
-
-    /* a valid and an invalid change: only the valid one is written */
-    struct tags_change d[] = {
-        change(TAG_GENRE, "Rock", "pop"),
-        change(TAG_TITLE, "Song Two", ""),     /* required */
-        change(TAG_DATE, "2001", "2001-02-30"),
-        change(TAG_ARTIST, "Some Artist", " Spaced"),
-        change(TAG_GENRE, "Rock", "blues"),    /* the same tag twice */
-    };
-    CHECK(tags_write(path, TAGS_FLAC, d, 5) == 1);
-    CHECK(!d[0].failed);
-    CHECK(d[1].failed && strstr(d[1].note, "can not be empty") != NULL);
-    CHECK(d[2].failed && strstr(d[2].note, "must be a date") != NULL);
-    CHECK(d[3].failed && strstr(d[3].note, "space") != NULL);
-    CHECK(d[4].failed && strstr(d[4].note, "twice") != NULL);
-    CHECK(tags_read(path, TAGS_FLAC, &t, err, sizeof err) == 0);
-    CHECK_STR(t.value[TAG_GENRE], "pop");
-    CHECK_STR(t.value[TAG_TITLE], "Song Two");
-    CHECK_STR(t.value[TAG_DATE], "2001");
+    CHECK(tags_read(path, &now, err, sizeof err) == 0);
+    want = now;
+    want.value[TAG_ALBUM] = one("Other Album");
+    want.value[TAG_ALBUMSORT] = one("Other Album");
+    CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_WRITTEN);
+    CHECK(tags_read(path, &t, err, sizeof err) == 0);
+    CHECK_STR(t.value[TAG_ALBUM].v[0], "Other Album");
+    CHECK_STR(t.value[TAG_ALBUMSORT].v[0], "Other Album");
 }
 
 /* Refusals leave the file byte for byte as it was. */
@@ -277,82 +383,52 @@ static void test_refusals(void)
 {
     char path[512], err[256];
     static char a[16384], b[16384];
-    struct tags t;
+    struct tags now, want;
 
-    /* the file no longer has the value the change was queued against */
+    /* the file no longer has what the cache says */
     copy_fixture("tagged.flac", "stale.flac", path, sizeof path);
     long len = slurp(path, a, sizeof a);
-    struct tags_change c[] = {
-        change(TAG_GENRE, "Pop", "jazz"),
-        change(TAG_DISCNUMBER, "1", "2"),  /* absent in the file */
-    };
-    CHECK(tags_write(path, TAGS_FLAC, c, 2) == 0);
-    CHECK(c[0].failed && strstr(c[0].note, "it now has Rock") != NULL);
-    CHECK(c[1].failed && strstr(c[1].note, "it now has no value") != NULL);
+    CHECK(tags_read(path, &now, err, sizeof err) == 0);
+    want = now;
+    want.value[TAG_TITLE] = one("New");
+    now.value[TAG_DATE] = one("1999");
+    CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_NOT_WRITTEN);
+    CHECK(strstr(err, "changed since it was scanned (DATE)") != NULL);
+    now.value[TAG_DATE] = one("2001");
+    now.has_art = 1;
+    CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_NOT_WRITTEN);
+    CHECK(strstr(err, "(the picture)") != NULL);
     CHECK(slurp(path, b, sizeof b) == len && memcmp(a, b, (size_t)len) == 0);
-
-    /* all changes invalid: nothing written */
-    struct tags_change bad = change(TAG_TITLE, "Song Two", "a\nb");
-    CHECK(tags_write(path, TAGS_FLAC, &bad, 1) == 0 && bad.failed);
-    CHECK(slurp(path, b, sizeof b) == len && memcmp(a, b, (size_t)len) == 0);
-
-    /* several values: a list field (artist, album artist, genre, composer)
-     * is replaced by the one new string once the file still has the
-     * queued-against values; other tags are refused */
-    copy_fixture("multi.flac", "locked.flac", path, sizeof path);
-    len = slurp(path, a, sizeof a);
-    struct tags_change m = change(TAG_TITLE, "Song Two; Other Title", "Me");
-    CHECK(tags_write(path, TAGS_FLAC, &m, 1) == 0);
-    CHECK(m.failed && strstr(m.note, "title has several values") != NULL);
-    m = change(TAG_GENRE, "Rock", "rock");
-    CHECK(tags_write(path, TAGS_FLAC, &m, 1) == 0);
-    CHECK(m.failed && strstr(m.note, "it now has Rock; …") != NULL);
-    CHECK(slurp(path, b, sizeof b) == len && memcmp(a, b, (size_t)len) == 0);
-    struct tags_change r[] = {
-        change(TAG_GENRE, "Rock; Pop", "rock; pop"),
-        change(TAG_ARTIST, "Some Artist; Other Artist", "Some Artist; Another"),
-        change(TAG_COMPOSER, NULL, "Composer A; Composer B"),
-    };
-    CHECK(tags_write(path, TAGS_FLAC, r, 3) == 1);
-    CHECK(!r[0].failed && !r[1].failed && !r[2].failed);
-    CHECK(r[0].note[0] == '\0');
-    CHECK(tags_read(path, TAGS_FLAC, &t, err, sizeof err) == 0);
-    CHECK_STR(t.value[TAG_GENRE], "rock; pop");
-    CHECK_STR(t.value[TAG_ARTIST], "Some Artist; Another");
-    CHECK_STR(t.value[TAG_COMPOSER], "Composer A; Composer B");
-    CHECK_STR(t.value[TAG_TITLE], "Song Two; Other Title");
-    CHECK(t.multi == 1u << TAG_TITLE); /* the list fields are one value now */
 
     /* not audio, missing, a symlink, a folder */
-    struct tags_change g = change(TAG_GENRE, NULL, "pop");
     snprintf(path, sizeof path, "%s/text.mp3", dir);
-    CHECK(tags_write(path, TAGS_MP3, &g, 1) == 0 && g.failed);
+    CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_NOT_WRITTEN);
     snprintf(path, sizeof path, "%s/gone.flac", dir);
-    CHECK(tags_write(path, TAGS_FLAC, &g, 1) == 0 && strstr(g.note, "not found") != NULL);
+    CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_NOT_WRITTEN);
+    CHECK(strstr(err, "not found") != NULL);
     char link[512];
     copy_fixture("tagged.flac", "target.flac", path, sizeof path);
     snprintf(link, sizeof link, "%s/link.flac", dir);
     CHECK(symlink(path, link) == 0);
-    g = change(TAG_GENRE, "Rock", "pop");
-    CHECK(tags_write(link, TAGS_FLAC, &g, 1) == 0 && strstr(g.note, "regular") != NULL);
-    CHECK(tags_write(dir, TAGS_FLAC, &g, 1) == 0 && g.failed);
+    CHECK(tags_write(link, &now, &want, err, sizeof err) == TAGS_NOT_WRITTEN);
+    CHECK(strstr(err, "regular") != NULL);
+    CHECK(tags_write(dir, &now, &want, err, sizeof err) == TAGS_NOT_WRITTEN);
 }
 
-/* TagLib normalising another tag on save: done, with a warning. */
-static void test_warning(void)
+/* A file that does not read back as written: TagLib drops the track number
+ * "0/0" on save. */
+static void test_read_back(void)
 {
     char path[512], err[256];
-    struct tags t;
+    struct tags now, want;
 
     copy_fixture("odd.mp3", "odd.mp3", path, sizeof path);
-    CHECK(tags_read(path, TAGS_MP3, &t, err, sizeof err) == 0);
-    CHECK_STR(t.value[TAG_TRACKNUMBER], "0/0");
-    struct tags_change c = change(TAG_GENRE, "Rock", "jazz");
-    CHECK(tags_write(path, TAGS_MP3, &c, 1) == 1);
-    CHECK(!c.failed);
-    CHECK(strstr(c.note, "TagLib also changed: TRACKNUMBER") != NULL);
-    CHECK(tags_read(path, TAGS_MP3, &t, err, sizeof err) == 0);
-    CHECK_STR(t.value[TAG_GENRE], "jazz");
+    CHECK(tags_read(path, &now, err, sizeof err) == 0);
+    CHECK_STR(now.value[TAG_TRACKNUMBER].v[0], "0/0");
+    want = now;
+    want.value[TAG_MOOD] = one("calm");
+    CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_WRITTEN_BAD);
+    CHECK(strstr(err, "after saving, TRACKNUMBER reads nothing") != NULL);
 }
 
 int main(void)
@@ -360,13 +436,13 @@ int main(void)
     if (mkdtemp(dir) == NULL || arena_init(1024 * 1024) != 0)
         return 1;
 
-    test_format();
-    test_values();
+    test_fields();
+    test_check();
+    test_prepare();
     test_read();
-    test_write_mp3();
-    test_write_flac();
+    test_write();
     test_refusals();
-    test_warning();
+    test_read_back();
 
     /* the test folder holds only files */
     DIR *d = opendir(dir);

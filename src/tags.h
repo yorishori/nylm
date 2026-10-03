@@ -5,96 +5,136 @@
 
 /*
  * Music file tags through TagLib's C API. TagLib is the only thing that
- * opens music files (nylm itself only lstat()s them). Only MP3 and FLAC.
+ * opens music files (nylm itself only lstat()s them), and only the tags
+ * below are read or written.
  */
 
-/* The tags nylm reads and edits, by index. */
+/* The tags, by index: the single-valued ones first (in the column order of
+ * the tracks table), then the two that hold several values. */
 enum tag_field {
     TAG_TITLE,
-    TAG_ARTIST,
     TAG_ALBUM,
+    TAG_ARTIST,
     TAG_ALBUMARTIST,
-    TAG_GENRE,
-    TAG_DATE,
     TAG_TRACKNUMBER,
     TAG_DISCNUMBER,
+    TAG_DATE,
     TAG_COMPILATION,
-    TAG_COMPOSER, /* added later: new fields go last, the bits in tracks.multi stay */
+    TAG_ISRC,
+    TAG_ASIN,
+    TAG_BPM,
+    TAG_COPYRIGHT,
+    TAG_ENCODEDBY,
+    TAG_MOOD,
+    TAG_MEDIA,
+    TAG_LABEL,
+    TAG_CATALOGNUMBER,
+    TAG_BARCODE,
+    TAG_TITLESORT,
+    TAG_ALBUMSORT,
+    TAG_ARTISTSORT,
+    TAG_ALBUMARTISTSORT,
+    TAG_COMPOSERSORT,
+    TAG_MUSICBRAINZ_TRACKID,
+    TAG_MUSICBRAINZ_ALBUMID,
+    TAG_NAVIDROME_ID,
+    TAG_GENRE,    /* several values: table track_values */
+    TAG_COMPOSER, /* several values: table track_values */
     TAG_FIELDS
 };
+
+#define TAG_SINGLE_FIELDS TAG_GENRE /* fields before this hold one value */
 
 extern const char *const tags_key[TAG_FIELDS];  /* TagLib property: "TITLE" */
 extern const char *const tags_name[TAG_FIELDS]; /* JSON and column name: "title" */
 
-/*
- * 1 for the list fields: artist, album artist, genre, composer. Their
- * value is several values separated by "; ", written as one string; a file
- * that holds several separate values for one of them may be rewritten.
- */
-int tags_is_list(enum tag_field field);
-
-#define TAGS_MAX_VALUE 500  /* bytes in one tag value */
-#define TAGS_MAX_PATH  4096
-#define TAGS_MAX_NOTE  256  /* bytes in a change's note */
-
-enum tags_format { TAGS_NONE, TAGS_MP3, TAGS_FLAC };
-
-/* The format a file name stands for (".mp3", ".flac", any case). */
-enum tags_format tags_format_of(const char *name);
-
 /* The field called name ("title", ...), or -1. */
 int tags_field_of(const char *name);
 
+/* 1 for genre and composer: several values, kept in order. */
+int tags_is_multi(enum tag_field f);
+
+/* 1 if the web app may change it: all but the sort tags (written by nylm
+ * from their source tag) and the Navidrome id. */
+int tags_is_editable(enum tag_field f);
+
+/* 1 if every track must have it. */
+int tags_is_required(enum tag_field f);
+
+#define TAGS_MAX_VALUE  500  /* bytes in one value */
+#define TAGS_MAX_VALUES 64   /* values of one genre or composer tag */
+#define TAGS_MAX_PATH   4096
+#define TAGS_MAX_EXT    16   /* bytes in a file name extension we keep */
+#define TAGS_MAX_NOTE   512  /* bytes in a change's note */
+
+/* 1 if ext (lower case, without the dot) is a music file extension. */
+int tags_is_music(const char *ext);
+
+/* One tag's values: n == 0 is absent. A single-valued tag has at most one
+ * (a file's several values are read joined by "; "). */
+struct tag_values {
+    size_t n;
+    const char **v;
+};
+
 struct tags {
-    const char *value[TAG_FIELDS]; /* NULL: absent; several values joined by "; " */
-    unsigned multi;                /* bit (1u << field) set: several values */
-    int pictures;                  /* embedded pictures */
-    int seconds;                   /* audio length */
+    struct tag_values value[TAG_FIELDS];
+    int has_art; /* an embedded picture */
+};
+
+/* 1 if a and b hold the same values in the same order. */
+int tags_equal(const struct tag_values *a, const struct tag_values *b);
+
+/* Sets t's field to the one value s (NULL or "": absent). 0, or -1 when out
+ * of memory. */
+int tags_set_one(struct tags *t, enum tag_field f, const char *s);
+
+/*
+ * Reads a file's tags; strings go into the arena. An absent compilation
+ * reads as "0". 0, or -1 with a reason in err.
+ */
+int tags_read(const char *path, struct tags *out, char *err, size_t errlen);
+
+/*
+ * Checks one tag's values. NULL if valid, else what is wrong:
+ *  - required tags must have a value;
+ *  - text: UTF-8 without control characters, at most 500 bytes each;
+ *  - genre and composer: at most 64 values, none empty; a genre is
+ *    lowercase a-z, 0-9 and '-';
+ *  - track and disc number "X/Y", positive whole numbers, X <= Y;
+ *  - date (the year) and BPM: a positive whole number;
+ *  - compilation "0" or "1".
+ */
+const char *tags_check(enum tag_field f, const struct tag_values *v);
+
+/* Parses "X/Y" as tags_check() allows it. 0 and *x, *y; or -1. */
+int tags_number(const char *s, int *x, int *y);
+
+/*
+ * Makes t ready to write, after its changes were applied:
+ *  - the sort tags of the fields in changed (bit 1u << field) mirror them
+ *    (TITLESORT = TITLE, ..., COMPOSERSORT = the composers joined by "; ");
+ *  - a sort tag over 500 bytes is cut at a character boundary;
+ *  - an invalid or missing disc number becomes "1/1".
+ * What it did, if anything, is appended to note (a warning for the user).
+ * 0, or -1 when out of memory.
+ */
+int tags_prepare(struct tags *t, unsigned changed, char *note, size_t notelen);
+
+enum tags_result {
+    TAGS_NOT_WRITTEN, /* refused or failed before saving: the file is as it was */
+    TAGS_WRITTEN,     /* saved, and reads back as want */
+    TAGS_WRITTEN_BAD, /* saved, but does not read back as want (or at all) */
 };
 
 /*
- * Reads a file's tags; strings go into the arena. 0, or -1 with a reason
- * in err.
+ * Writes want into the file in place, through TagLib. First the file must
+ * still hold now (what the cache has); then every tag that differs is set
+ * (a genre or composer value by value, in order) and the file is saved
+ * once; then it is read back: every tag must read as want, and the picture
+ * must still be there (or not). err says why when not TAGS_WRITTEN.
  */
-int tags_read(const char *path, enum tags_format format, struct tags *out, char *err,
-              size_t errlen);
-
-/*
- * Checks a new value for a field. "" means remove the tag; title, artist,
- * album, album artist, track and disc number can not be removed. In a list
- * field each value is non-empty, without ';' and without spaces around it,
- * the values separated by "; "; a genre's values are also words of
- * lowercase a-z and '-' with single spaces. NULL if valid, else what is
- * wrong.
- */
-const char *tags_check_value(enum tag_field field, const char *value);
-
-/* One tag to change, and what became of it. */
-struct tags_change {
-    enum tag_field field;
-    const char *old;   /* the value it was queued against (NULL: absent) */
-    const char *value; /* the new value; "" removes the tag */
-    int failed;        /* set by tags_write: 1 if not done */
-    char note[TAGS_MAX_NOTE]; /* why it failed, or what else changed */
-};
-
-/*
- * Writes the changes into the file in place, through TagLib. Each change
- * is checked first: a valid value (tags_check_value), and the file still
- * has the old value, with a single value (a list field may have several:
- * they are all replaced by the new string). Failing changes are skipped;
- * the others are set and the file is saved once. Then it is read back:
- * every change must read as asked; any other tag, picture or audio
- * property that differs from before is listed in each done change's note
- * (a warning: the file is already written).
- *
- * Returns 1 if the file was saved, 0 if nothing was written (all changes
- * failed, each with its note).
- */
-int tags_write(const char *path, enum tags_format format, struct tags_change *changes, int n);
-
-/* A file's modification time in ns, as stored for a scan. */
-struct stat;
-long long tags_mtime(const struct stat *sb);
+enum tags_result tags_write(const char *path, const struct tags *now, const struct tags *want,
+                            char *err, size_t errlen);
 
 #endif

@@ -94,49 +94,110 @@ const char *const plants_migrations[] = {
 const int plants_migration_count = sizeof plants_migrations / sizeof plants_migrations[0];
 
 const char *const music_migrations[] = {
-    /* 1: the music library. The files are the truth: albums and tracks are a
-     * cache of them, filled by `nylm music-scan` and refreshed after every
-     * edit; deleting them loses nothing. An album is a folder. Paths are
-     * relative to NYLM_MUSIC. Tag columns hold the file's value (NULL when
-     * absent); a tag with several values holds them joined by "; " and has
-     * its bit (1 << field, see src/tags.h) set in multi.
-     * scans and audit are not a cache: they record what happened. */
-    "CREATE TABLE albums ("
-    "    id  INTEGER PRIMARY KEY,"
-    "    dir TEXT    NOT NULL UNIQUE"
-    ") STRICT;"
+    /* 1: the music library (written before the app was first installed:
+     * the earlier drafts were replaced, not migrated).
+     *
+     * tracks and track_values are a cache of the files, filled by `nylm
+     * music-scan` and refreshed after every write; deleting them loses
+     * nothing. path is the file's full path. A tag column holds the file's
+     * value (NULL: absent; several values joined by "; "); the column
+     * order is that of src/tags.h. Genre and composer can hold several
+     * values: they are rows of track_values, in order. scanned is when a
+     * scan last saw the file (unix time); a file whose ctime is older is
+     * not read again.
+     *
+     * scans are requests to scan (path NULL: the whole library, else a
+     * folder or a file) and what came of them; scan_extensions counts the
+     * files a scan found that are not music, by extension.
+     *
+     * changes are the tag changes queued by the web app and written by
+     * `nylm music-write`: one row per tag of a track, the changes saved
+     * together sharing a batch. value is the new value ("" removes the
+     * tag; for genre and composer a JSON array of the values). A track has
+     * at most one pending change per tag. Written rows stay as history.
+     *
+     * audit records every start of a service from the web app. */
     "CREATE TABLE tracks ("
-    "    id          INTEGER PRIMARY KEY,"
-    "    album_id    INTEGER NOT NULL REFERENCES albums(id),"
-    "    path        TEXT    NOT NULL UNIQUE,"
-    "    format      TEXT    NOT NULL CHECK (format IN ('mp3', 'flac')),"
-    "    size        INTEGER NOT NULL,"
-    "    mtime       INTEGER NOT NULL," /* ns */
-    "    seconds     INTEGER NOT NULL,"
-    "    pictures    INTEGER NOT NULL,"
-    "    multi       INTEGER NOT NULL,"
-    "    title       TEXT,"
-    "    artist      TEXT,"
-    "    album       TEXT,"
-    "    albumartist TEXT,"
-    "    genre       TEXT,"
-    "    date        TEXT,"
-    "    tracknumber TEXT,"
-    "    discnumber  TEXT,"
-    "    compilation TEXT,"
-    "    scan        INTEGER NOT NULL" /* the last scan that saw the file */
+    "    id                  INTEGER PRIMARY KEY,"
+    "    path                TEXT    NOT NULL UNIQUE,"
+    "    size                INTEGER NOT NULL,"
+    "    ext                 TEXT    NOT NULL,"
+    "    scanned             INTEGER NOT NULL,"
+    "    has_art             INTEGER NOT NULL CHECK (has_art IN (0, 1)),"
+    "    title               TEXT,"
+    "    album               TEXT,"
+    "    artist              TEXT,"
+    "    albumartist         TEXT,"
+    "    tracknumber         TEXT,"
+    "    discnumber          TEXT,"
+    "    date                TEXT,"
+    "    compilation         TEXT    NOT NULL DEFAULT '0',"
+    "    isrc                TEXT,"
+    "    asin                TEXT,"
+    "    bpm                 TEXT,"
+    "    copyright           TEXT,"
+    "    encodedby           TEXT,"
+    "    mood                TEXT,"
+    "    media               TEXT,"
+    "    label               TEXT,"
+    "    catalognumber       TEXT,"
+    "    barcode             TEXT,"
+    "    titlesort           TEXT,"
+    "    albumsort           TEXT,"
+    "    artistsort          TEXT,"
+    "    albumartistsort     TEXT,"
+    "    composersort        TEXT,"
+    "    musicbrainz_trackid TEXT,"
+    "    musicbrainz_albumid TEXT,"
+    "    navidrome_id        TEXT"
     ") STRICT;"
-    "CREATE INDEX tracks_by_album ON tracks (album_id);"
+    "CREATE INDEX tracks_by_album ON tracks (album, albumartist);"
+    "CREATE TABLE track_values ("
+    "    track_id INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,"
+    "    field    TEXT    NOT NULL CHECK (field IN ('genre', 'composer')),"
+    "    position INTEGER NOT NULL,"
+    "    value    TEXT    NOT NULL,"
+    "    PRIMARY KEY (track_id, field, position)"
+    ") STRICT, WITHOUT ROWID;"
     "CREATE TABLE scans ("
-    "    id       INTEGER PRIMARY KEY,"
-    "    started  INTEGER NOT NULL DEFAULT (unixepoch()),"
-    "    finished INTEGER,"
-    "    files    INTEGER NOT NULL DEFAULT 0," /* music files found */
-    "    parsed   INTEGER NOT NULL DEFAULT 0," /* new or changed: tags read */
-    "    failed   INTEGER NOT NULL DEFAULT 0," /* unreadable files and folders */
-    "    ok       INTEGER CHECK (ok IN (0, 1))"
+    "    id        INTEGER PRIMARY KEY,"
+    "    path      TEXT,"
+    "    requested INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "    started   INTEGER,"
+    "    finished  INTEGER,"
+    "    state     TEXT    NOT NULL DEFAULT 'queued' CHECK (state IN"
+    "                      ('queued', 'running', 'done', 'incomplete', 'failed')),"
+    "    files     INTEGER NOT NULL DEFAULT 0," /* music files found */
+    "    parsed    INTEGER NOT NULL DEFAULT 0," /* new or changed: tags read */
+    "    removed   INTEGER NOT NULL DEFAULT 0," /* tracks gone from the cache */
+    "    failed    INTEGER NOT NULL DEFAULT 0"  /* unreadable files and folders */
     ") STRICT;"
-    /* Every change nylm makes to the library, or tries to. */
+    "CREATE TABLE scan_extensions ("
+    "    scan_id INTEGER NOT NULL REFERENCES scans(id) ON DELETE CASCADE,"
+    "    ext     TEXT    NOT NULL," /* lower case; "[blank]": none */
+    "    count   INTEGER NOT NULL,"
+    "    PRIMARY KEY (scan_id, ext)"
+    ") STRICT, WITHOUT ROWID;"
+    "CREATE TABLE changes ("
+    "    id       INTEGER PRIMARY KEY,"
+    "    batch    INTEGER NOT NULL,"
+    "    track_id INTEGER REFERENCES tracks(id) ON DELETE SET NULL,"
+    "    field    TEXT    NOT NULL CHECK (field IN ('title', 'album', 'artist', 'albumartist',"
+    "                     'tracknumber', 'discnumber', 'date', 'compilation', 'isrc', 'asin',"
+    "                     'bpm', 'copyright', 'encodedby', 'mood', 'media', 'label',"
+    "                     'catalognumber', 'barcode', 'musicbrainz_trackid',"
+    "                     'musicbrainz_albumid', 'genre', 'composer')),"
+    "    value    TEXT    NOT NULL,"
+    "    started  INTEGER,"
+    "    finished INTEGER,"
+    "    state    TEXT    NOT NULL DEFAULT 'pending' CHECK (state IN"
+    "                     ('pending', 'running', 'done', 'warning', 'failed')),"
+    "    done     INTEGER NOT NULL DEFAULT 0 CHECK (done IN (0, 1))," /* finished */
+    "    note     TEXT    NOT NULL DEFAULT ''"
+    ") STRICT;"
+    "CREATE UNIQUE INDEX changes_one_pending ON changes (track_id, field)"
+    "    WHERE state = 'pending';"
+    "CREATE INDEX changes_by_state ON changes (state, batch);"
     "CREATE TABLE audit ("
     "    id     INTEGER PRIMARY KEY,"
     "    at     INTEGER NOT NULL DEFAULT (unixepoch()),"
@@ -145,66 +206,6 @@ const char *const music_migrations[] = {
     "    detail TEXT    NOT NULL," /* JSON */
     "    result TEXT    NOT NULL"
     ") STRICT;",
-
-    /* 2: tag changes, queued by the web app and written by `nylm
-     * music-write`. One row per tag of one file. old is the cached value
-     * when it was queued (NULL: absent); the write is refused if the file
-     * no longer has it. new "" removes the tag. A track has at most one
-     * pending change per tag. Written rows stay as history: done, warning
-     * (written, but TagLib also changed what note lists) or failed (note
-     * says why). path keeps the history readable after a scan removes the
-     * track. */
-    "CREATE TABLE changes ("
-    "    id       INTEGER PRIMARY KEY,"
-    "    track_id INTEGER REFERENCES tracks(id) ON DELETE SET NULL,"
-    "    path     TEXT    NOT NULL,"
-    "    field    TEXT    NOT NULL CHECK (field IN ('title', 'artist', 'album',"
-    "                     'albumartist', 'genre', 'date', 'tracknumber', 'discnumber',"
-    "                     'compilation')),"
-    "    old      TEXT,"
-    "    new      TEXT    NOT NULL,"
-    "    client   TEXT    NOT NULL," /* IP address that queued it */
-    "    queued   INTEGER NOT NULL DEFAULT (unixepoch()),"
-    "    state    TEXT    NOT NULL DEFAULT 'pending'"
-    "                     CHECK (state IN ('pending', 'done', 'warning', 'failed')),"
-    "    finished INTEGER,"
-    "    note     TEXT    NOT NULL DEFAULT ''"
-    ") STRICT;"
-    "CREATE UNIQUE INDEX changes_one_pending ON changes (track_id, field)"
-    "    WHERE state = 'pending';"
-    "CREATE INDEX changes_by_state ON changes (state, track_id);",
-
-    /* 3: the composer tag. A column for it in tracks, and 'composer' among
-     * the fields of changes (SQLite can not change a CHECK: the table is
-     * rebuilt with the same rows). mtime = 0 makes the next scan read
-     * every file again, to fill in the composers. */
-    "ALTER TABLE tracks ADD COLUMN composer TEXT;"
-    "UPDATE tracks SET mtime = 0;"
-    "CREATE TABLE changes_new ("
-    "    id       INTEGER PRIMARY KEY,"
-    "    track_id INTEGER REFERENCES tracks(id) ON DELETE SET NULL,"
-    "    path     TEXT    NOT NULL,"
-    "    field    TEXT    NOT NULL CHECK (field IN ('title', 'artist', 'album',"
-    "                     'albumartist', 'genre', 'date', 'tracknumber', 'discnumber',"
-    "                     'compilation', 'composer')),"
-    "    old      TEXT,"
-    "    new      TEXT    NOT NULL,"
-    "    client   TEXT    NOT NULL,"
-    "    queued   INTEGER NOT NULL DEFAULT (unixepoch()),"
-    "    state    TEXT    NOT NULL DEFAULT 'pending'"
-    "                     CHECK (state IN ('pending', 'done', 'warning', 'failed')),"
-    "    finished INTEGER,"
-    "    note     TEXT    NOT NULL DEFAULT ''"
-    ") STRICT;"
-    "INSERT INTO changes_new (id, track_id, path, field, old, new, client, queued, state,"
-    "                         finished, note)"
-    "    SELECT id, track_id, path, field, old, new, client, queued, state, finished, note"
-    "    FROM changes;"
-    "DROP TABLE changes;"
-    "ALTER TABLE changes_new RENAME TO changes;"
-    "CREATE UNIQUE INDEX changes_one_pending ON changes (track_id, field)"
-    "    WHERE state = 'pending';"
-    "CREATE INDEX changes_by_state ON changes (state, track_id);",
 };
 
 const int music_migration_count = sizeof music_migrations / sizeof music_migrations[0];

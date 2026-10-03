@@ -23,7 +23,7 @@ async function musicSummary() {
   const o = await api("GET", "/api/music");
   if (!o.configured) return [el("span", { class: "pill" }, "Not set up")];
   return [
-    el("span", { class: "pill" }, plural(o.albums, "album", "albums")),
+    el("span", { class: "pill" }, plural(o.stats.albums, "album", "albums")),
     o.pending ? el("span", { class: "pill" }, `${o.pending} pending`) : null,
     o.busy === "scan" ? el("span", { class: "pill" }, "Scanning") : null,
     o.busy === "write" ? el("span", { class: "pill" }, "Writing") : null,

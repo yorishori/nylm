@@ -1,15 +1,22 @@
 #ifndef MUSIC_H
 #define MUSIC_H
 
+#include <sqlite3.h>
+
+#include "tags.h"
+
 /*
  * The music library: the folder NYLM_MUSIC and its cache in music_db.
- * An album is a folder; its tracks are the .mp3 and .flac files directly
- * in it. Dot files and folders are skipped, symlinks are never followed.
+ * A track is a file with a music extension (tags_is_music()) anywhere
+ * below the folder; an album is the tracks that share ALBUM and
+ * ALBUMARTIST. Dot files and folders are skipped, symlinks never followed.
  *
  * Only two services touch the files, each its own process, one at a time:
  *   music_scan   reads tags into the cache;
- *   music_write  writes the pending rows of the changes table.
- * The server only reads the database, queues changes, and starts them.
+ *   music_write  writes the pending rows of the changes table, then reads
+ *                each file it wrote back into the cache.
+ * The server only reads the database, queues changes and scans, and
+ * starts the services.
  *
  * The library lock (<NYLM_DATA>/music/library.lock) keeps them apart: a
  * service holds it exclusively while it runs; the server holds it shared
@@ -34,16 +41,24 @@ const char *music_root(void);
 /* 1 if the library folder is an existing folder, 0 if not (logged). */
 int music_available(void);
 
-/*
- * `nylm music-scan`: brings the cache in line with the files, reading the
- * tags of new and changed files only. Prints progress; 0 or 1 (exit code).
- */
-int music_scan(void);
+/* 1 if path is the library folder or a path below it: absolute, UTF-8,
+ * without empty, "." or ".." parts, shorter than TAGS_MAX_PATH. */
+int music_inside(const char *path);
 
 /*
- * `nylm music-write`: writes every pending change (src/tags.c checks and
- * verifies each) and records its result in the changes table; refreshes
- * the cache of the files written. 0, or 1 if it could not run.
+ * `nylm music-scan [path]`: with a path (the library folder or a folder or
+ * file in it), scans that. Without, runs the scans the web app queued, or
+ * the whole library if none is queued. A folder's new and changed files
+ * are read (a single file always is); tracks no longer there are dropped
+ * from the cache. Prints what it did; 0 or 1 (exit code).
+ */
+int music_scan(const char *path);
+
+/*
+ * `nylm music-write`: writes the pending changes, one track at a time
+ * (src/tags.c checks the file and verifies the write), records each
+ * result, and reads each track back into the cache. 0, or 1 if it could
+ * not run.
  */
 int music_write(void);
 
@@ -55,5 +70,33 @@ void music_unlock(int fd);
 /* The service running now: "scan", "write", "busy" (just starting), or
  * NULL if none (or on error: *error set, logged). */
 const char *music_busy(int *error);
+
+/*
+ * The columns of a track's tags in a query on "tracks t": has_art, the
+ * single-valued tags in tags.h order, then genre and composer as JSON
+ * arrays. music_track_tags() reads them.
+ */
+#define MUSIC_TAG_COLUMNS                                                               \
+    "t.has_art, t.title, t.album, t.artist, t.albumartist, t.tracknumber,"              \
+    " t.discnumber, t.date, t.compilation, t.isrc, t.asin, t.bpm, t.copyright,"         \
+    " t.encodedby, t.mood, t.media, t.label, t.catalognumber, t.barcode, t.titlesort,"  \
+    " t.albumsort, t.artistsort, t.albumartistsort, t.composersort,"                    \
+    " t.musicbrainz_trackid, t.musicbrainz_albumid, t.navidrome_id,"                    \
+    " (SELECT json_group_array(value ORDER BY position) FROM track_values v"            \
+    "  WHERE v.track_id = t.id AND v.field = 'genre'),"                                 \
+    " (SELECT json_group_array(value ORDER BY position) FROM track_values v"            \
+    "  WHERE v.track_id = t.id AND v.field = 'composer')"
+#define MUSIC_TAG_NCOLS (1 + TAG_FIELDS)
+
+/* Reads MUSIC_TAG_COLUMNS from column col of st's row into out (strings in
+ * the arena). 0, or -1 when out of memory or a JSON array is invalid. */
+int music_track_tags(sqlite3_stmt *st, int col, struct tags *out);
+
+/* A JSON array of strings (as stored for genre and composer) into out, in
+ * the arena. 0, or -1 if it is not one or out of memory. */
+int music_values_parse(const char *json, struct tag_values *out);
+
+/* v as a JSON array of strings, in the arena; NULL when out of memory. */
+const char *music_values_json(const struct tag_values *v);
 
 #endif

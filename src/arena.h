@@ -14,4 +14,9 @@ void *arena_alloc(size_t size); /* NULL when the arena is full */
 char *arena_strndup(const char *s, size_t len);
 void arena_reset(void);
 
+/* For scratch work inside a request: arena_rewind(arena_mark()) frees what
+ * was allocated since the mark (nothing allocated since may still be used). */
+size_t arena_mark(void);
+void arena_rewind(size_t mark);
+
 #endif
