@@ -443,11 +443,13 @@ MA=$(grep -o '"id":[0-9]*,"dir":"Artist/Multi"' "$TMP/body" | grep -o '[0-9]*' |
 
 expect 200 "music album"       -b "$JAR" "$B/api/music/album?id=$MA"
 expect_body '"genre":"Rock; Pop"' "album shows several values joined"
-expect_body '"file":"01.flac","locked":["genre"],"pending":{}' "album marks the locked field"
+expect_body '"file":"01.flac","locked":["artist"],"pending":{}' "album marks the locked field (not the genre)"
 MT=$(grep -o '"tracks":\[{"id":[0-9]*' "$TMP/body" | grep -o '[0-9]*$')
 expect 200 "music album (2)"   -b "$JAR" "$B/api/music/album?id=$A"
 expect_body '"title":"Song One"' "album track tags"
 T1=$(grep -o '"tracks":\[{"id":[0-9]*' "$TMP/body" | grep -o '[0-9]*$')
+T2=$(grep -o '"id":[0-9]*,"format"' "$TMP/body" | sed -n 2p | grep -o '[0-9]*')
+DISCS="{\"id\":$T1,\"discnumber\":\"1/1\"},{\"id\":$T2,\"discnumber\":\"1/1\"}"
 expect 400 "album no id"       -b "$JAR" "$B/api/music/album"
 expect 400 "album id 0"        -b "$JAR" "$B/api/music/album?id=0"
 expect 400 "album id text"     -b "$JAR" "$B/api/music/album?id=x"
@@ -456,21 +458,24 @@ expect 404 "album missing"     -b "$JAR" "$B/api/music/album?id=999"
 # Queueing changes writes no file.
 S=/api/music/album/save
 cp "$M/Artist/Album/01.mp3" "$TMP/before.mp3"
-post "queue genre for album"   200 $S "{\"id\":$A,\"album\":{\"genre\":\"Jazz\"},\"tracks\":[]}"
-expect_body '{"queued":2,"dropped":0}' "queue counts"
+post "queue without disc numbers" 400 $S "{\"id\":$A,\"album\":{\"genre\":\"jazz\"},\"tracks\":[]}"
+expect_body "Artist/Album/01.mp3 has no disc number" "missing disc number message"
+post "queue genre and discs"   200 $S "{\"id\":$A,\"album\":{\"genre\":\"jazz\"},\"tracks\":[$DISCS]}"
+expect_body '{"queued":4,"dropped":0}' "queue counts"
 same_file "queueing leaves the file alone" "$TMP/before.mp3" "$M/Artist/Album/01.mp3"
 expect 200 "album with pending" -b "$JAR" "$B/api/music/album?id=$A"
-expect_body '"genre":"Rock","date":"2001","tracknumber":"1/2","discnumber":null,"compilation":null,"file":"01.mp3","locked":[],"pending":{"genre":"Jazz"}' "album shows the file value and the pending one"
-post "queue the same again"    200 $S "{\"id\":$A,\"album\":{\"genre\":\"Jazz\"},\"tracks\":[]}"
-expect_body '{"queued":0,"dropped":0}' "same pending value is not queued again"
-post "queue back to the file value" 200 $S "{\"id\":$A,\"album\":{\"genre\":\"Rock\"},\"tracks\":[]}"
-expect_body '{"queued":0,"dropped":2}' "the file's own value drops the pending change"
+expect_body '"genre":"Rock","date":"2001","tracknumber":"1/2","discnumber":null,"compilation":null,"file":"01.mp3","locked":[],"pending":{"genre":"jazz","discnumber":"1/1"}' "album shows the file value and the pending one"
+post "queue the same again"    200 $S "{\"id\":$A,\"album\":{\"genre\":\"jazz\"},\"tracks\":[]}"
+expect_body '{"queued":0,"dropped":0}' "same pending value is not queued again (pending discs count)"
 post "queue track title"       200 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1,\"title\":\"New Title\",\"artist\":null}]}"
 expect_body '{"queued":1,"dropped":0}' "queue one track field"
-post "queue several"           200 $S "{\"id\":$A,\"album\":{\"genre\":\"Jazz\",\"date\":\"\",\"compilation\":true},\"tracks\":[]}"
-expect_body '{"queued":6,"dropped":0}' "queue album fields"
+post "queue back to the file value" 200 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1,\"title\":\"Song One\"}]}"
+expect_body '{"queued":0,"dropped":1}' "the file's own value drops the pending change"
+post "queue track title again" 200 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1,\"title\":\"New Title\"}]}"
+post "queue several"           200 $S "{\"id\":$A,\"album\":{\"date\":\"\",\"compilation\":true},\"tracks\":[]}"
+expect_body '{"queued":4,"dropped":0}' "queue album fields"
 expect 200 "overview pending"  -b "$JAR" "$B/api/music"
-expect_body '"pending":7,"busy":null' "overview counts pending changes"
+expect_body '"pending":9,"busy":null' "overview counts pending changes"
 
 expect 415 "save needs json"   -b "$JAR" -d "{\"id\":$A}" "$B$S"
 post "save no id"              400 $S '{"album":{},"tracks":[]}'
@@ -487,6 +492,13 @@ post "save compilation text"   400 $S "{\"id\":$A,\"album\":{\"compilation\":\"1
 post "save genre number"       400 $S "{\"id\":$A,\"album\":{\"genre\":5},\"tracks\":[]}"
 post "save genre newline"      400 $S "{\"id\":$A,\"album\":{\"genre\":\"a\\nb\"},\"tracks\":[]}"
 post "save genre too long"     400 $S "{\"id\":$A,\"album\":{\"genre\":\"$(printf '%0501d' 0)\"},\"tracks\":[]}"
+post "save genre capitals"     400 $S "{\"id\":$A,\"album\":{\"genre\":\"Jazz\"},\"tracks\":[]}"
+expect_body "'genre' must be lowercase a-z and -" "genre rule message"
+post "save genre no space"     400 $S "{\"id\":$A,\"album\":{\"genre\":\"rock;pop\"},\"tracks\":[]}"
+post "save genre two words"    400 $S "{\"id\":$A,\"album\":{\"genre\":\"hip hop\"},\"tracks\":[]}"
+post "save empty disc number"  400 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1,\"discnumber\":\"\"}]}"
+expect_body "'discnumber' can not be empty" "disc number required message"
+post "save empty track number" 400 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1,\"tracknumber\":\"\"}]}"
 post "save bad track number"   400 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1,\"tracknumber\":\"3/2\"}]}"
 post "save track not object"   400 $S "{\"id\":$A,\"album\":{},\"tracks\":[1]}"
 post "save track no id"        400 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"title\":\"x\"}]}"
@@ -494,8 +506,17 @@ post "save track elsewhere"    400 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id
 post "save track twice"        400 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1},{\"id\":$T1}]}"
 post "save track album field"  400 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1,\"genre\":\"x\"}]}"
 post "save album missing"      404 $S '{"id":999,"album":{},"tracks":[]}'
-post "save locked field"       409 $S "{\"id\":$MA,\"album\":{\"genre\":\"Rock\"},\"tracks\":[]}"
-expect_body "genre has several values" "locked field message"
+post "save locked field"       409 $S "{\"id\":$MA,\"album\":{},\"tracks\":[{\"id\":$MT,\"artist\":\"x\",\"discnumber\":\"1/1\"}]}"
+expect_body "artist has several values" "locked field message"
+
+# A track without a track number blocks its album until it is filled in.
+sqlite3 "$TMP/data/music/music.db" "UPDATE tracks SET tracknumber = NULL WHERE id = $T1"
+post "queue, track number missing" 400 $S "{\"id\":$A,\"album\":{\"genre\":\"jazz\"},\"tracks\":[]}"
+expect_body "Artist/Album/01.mp3 has no track number" "missing track number message"
+post "queue, track number filled in" 200 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1,\"tracknumber\":\"1/2\"}]}"
+expect_body '{"queued":1,"dropped":0}' "filling in the track number queues it"
+sqlite3 "$TMP/data/music/music.db" "UPDATE tracks SET tracknumber = '1/2' WHERE id = $T1;
+    DELETE FROM changes WHERE field = 'tracknumber'"
 
 # The list of changes, and cancelling pending ones.
 C=/api/music/changes/cancel
@@ -529,7 +550,7 @@ LOCKER=$!
 sleep 0.3
 expect 200 "overview while busy" -b "$JAR" "$B/api/music"
 expect_body '"busy":"' "overview shows the library busy"
-post "queue while busy"        409 $S "{\"id\":$A,\"album\":{\"genre\":\"Pop\"},\"tracks\":[]}"
+post "queue while busy"        409 $S "{\"id\":$A,\"album\":{\"genre\":\"pop\"},\"tracks\":[]}"
 expect_body "the library is busy" "busy message"
 post "cancel while busy"       409 $C '{"ids":[1]}'
 post "scan while busy"         409 /api/music/scan '{"password":"smoke test password"}'
@@ -545,12 +566,12 @@ sleep 0.2
 
 # The write service writes the pending changes.
 service 0 "music-write"        music-write
-logged "2 files written; 5 changes done, 0 with warnings, 0 failed" "write counts"
+logged "2 files written; 7 changes done, 0 with warnings, 0 failed" "write counts"
 wait "$LOCKER"
 if tail -c 128 "$M/Artist/Album/01.mp3" | head -c 3 | grep -q TAG; then
     PASSED=$((PASSED + 1)); else FAILED=$((FAILED + 1)); echo "FAIL: TagLib's ID3v1 tag removed"; fi
 expect 200 "album after write" -b "$JAR" "$B/api/music/album?id=$A"
-expect_body '"title":"New Title","artist":"Some Artist","album":"Some Album","albumartist":"Some Artist","genre":"Jazz","date":null,"tracknumber":"1/2","discnumber":null,"compilation":null,"file":"01.mp3","locked":[],"pending":{}' "written tags read back"
+expect_body '"title":"New Title","artist":"Some Artist","album":"Some Album","albumartist":"Some Artist","genre":"jazz","date":null,"tracknumber":"1/2","discnumber":"1/1","compilation":null,"file":"01.mp3","locked":[],"pending":{}' "written tags read back"
 expect 200 "changes after write" -b "$JAR" "$B/api/music/changes"
 expect_body '"pending":[],' "nothing pending after the write"
 expect_body '"field":"title","old":"Song One","new":"New Title","state":"done","note":""' "history keeps the change"
@@ -559,7 +580,7 @@ expect_body "no pending changes" "nothing to write message"
 
 # A file changed after its change was queued: that change fails, the other
 # file is written.
-post "queue genre again"       200 $S "{\"id\":$A,\"album\":{\"genre\":\"Blues\"},\"tracks\":[]}"
+post "queue genre again"       200 $S "{\"id\":$A,\"album\":{\"genre\":\"blues\"},\"tracks\":[]}"
 cp tests/data/tagged.flac "$M/Artist/Album/02.flac"
 cp "$M/Artist/Album/02.flac" "$TMP/before.flac"
 service 0 "music-write, one file changed" music-write
@@ -567,7 +588,7 @@ logged "1 files written; 1 changes done, 0 with warnings, 1 failed" "write count
 logged "the file changed since this was queued: it now has Rock" "failure logged"
 same_file "a failed change leaves the file alone" "$TMP/before.flac" "$M/Artist/Album/02.flac"
 expect 200 "changes after failure" -b "$JAR" "$B/api/music/changes"
-expect_body '"path":"Artist/Album/02.flac","field":"genre","old":"Jazz","new":"Blues","state":"failed","note":"the file changed since this was queued: it now has Rock"' "failure recorded with its cause"
+expect_body '"path":"Artist/Album/02.flac","field":"genre","old":"jazz","new":"blues","state":"failed","note":"the file changed since this was queued: it now has Rock"' "failure recorded with its cause"
 
 # The service checks the table itself: a bad value put there directly fails.
 service 0 "rescan" music-scan
@@ -579,24 +600,25 @@ expect 200 "album after invalid" -b "$JAR" "$B/api/music/album?id=$A"
 expect_body '"title":"New Title"' "invalid value not written"
 
 # A file removed by a scan: its pending change fails.
-post "queue on the other album" 200 $S "{\"id\":$MA,\"album\":{\"album\":\"Multi\"},\"tracks\":[]}"
+post "queue on the other album" 200 $S "{\"id\":$MA,\"album\":{\"album\":\"Multi\",\"genre\":\"rock; pop\"},\"tracks\":[{\"id\":$MT,\"discnumber\":\"1/1\"}]}"
+expect_body '{"queued":3,"dropped":0}' "a genre with several values can be queued"
 mv "$M/Artist/Multi" "$TMP/multi.away"
 service 0 "scan after removing a folder" music-scan
 service 0 "music-write, file gone" music-write
-logged "1 failed" "change for a removed file fails"
+logged "3 failed" "changes for a removed file fail"
 expect 200 "changes after removal" -b "$JAR" "$B/api/music/changes"
 expect_body '"album_id":null,"path":"Artist/Multi/01.flac","field":"album","old":"Some Album","new":"Multi","state":"failed","note":"the file is no longer in the library"' "removed file recorded"
 mv "$TMP/multi.away" "$M/Artist/Multi"
 service 0 "rescan after restoring the folder" music-scan
 
 # The folder is gone (drive not mounted): services and their start refuse.
-post "queue for folder test"   200 $S "{\"id\":$A,\"album\":{\"genre\":\"Pop\"},\"tracks\":[]}"
+post "queue for folder test"   200 $S "{\"id\":$A,\"album\":{\"genre\":\"pop\"},\"tracks\":[{\"id\":$T2,\"discnumber\":\"1/1\"}]}"
 mv "$M" "$TMP/music.away"
 post "write, folder missing"   503 $W '{"password":"smoke test password"}'
 post "scan, folder missing"    503 /api/music/scan '{"password":"smoke test password"}'
 service 1 "music-write, folder missing" music-write
 expect 200 "overview, folder missing" -b "$JAR" "$B/api/music"
-expect_body '"configured":true,"available":false,"albums":2,"tracks":3,"pending":2' "pending changes kept while the folder is missing"
+expect_body '"configured":true,"available":false,"albums":2,"tracks":3,"pending":3' "pending changes kept while the folder is missing"
 mv "$TMP/music.away" "$M"
 
 post "scan no password"        400 /api/music/scan '{}'

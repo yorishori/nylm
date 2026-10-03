@@ -53,8 +53,9 @@ int tags_read(const char *path, enum tags_format format, struct tags *out, char 
 
 /*
  * Checks a new value for a field. "" means remove the tag; title, artist,
- * album, album artist and track number can not be removed. NULL if valid,
- * else what is wrong.
+ * album, album artist, track and disc number can not be removed. A genre is
+ * lowercase a-z and '-', several separated by "; " (written as one string).
+ * NULL if valid, else what is wrong.
  */
 const char *tags_check_value(enum tag_field field, const char *value);
 
@@ -70,7 +71,8 @@ struct tags_change {
 /*
  * Writes the changes into the file in place, through TagLib. Each change
  * is checked first: a valid value (tags_check_value), and the file still
- * has the old value, with a single value. Failing changes are skipped;
+ * has the old value, with a single value (a genre may have several: they
+ * are all replaced by the new string). Failing changes are skipped;
  * the others are set and the file is saved once. Then it is read back:
  * every change must read as asked; any other tag, picture or audio
  * property that differs from before is listed in each done change's note

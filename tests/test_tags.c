@@ -45,7 +45,7 @@ static void test_values(void)
     CHECK(!ok(TAG_TRACKNUMBER, ""));
     CHECK(ok(TAG_GENRE, ""));         /* removable */
     CHECK(ok(TAG_DATE, ""));
-    CHECK(ok(TAG_DISCNUMBER, ""));
+    CHECK(!ok(TAG_DISCNUMBER, ""));    /* required */
     CHECK(ok(TAG_COMPILATION, ""));
     CHECK(!ok(TAG_TITLE, " Song"));
     CHECK(!ok(TAG_TITLE, "Song "));
@@ -87,6 +87,26 @@ static void test_values(void)
     CHECK(!ok(TAG_TRACKNUMBER, "1/2/3"));
     CHECK(!ok(TAG_TRACKNUMBER, "-1"));
     CHECK(!ok(TAG_TRACKNUMBER, "A1"));
+
+    /* genres: lowercase a-z and '-', several separated by "; " */
+    CHECK(ok(TAG_GENRE, "rock"));
+    CHECK(ok(TAG_GENRE, "pop-punk"));
+    CHECK(ok(TAG_GENRE, "rock; pop-punk; jazz"));
+    CHECK(ok(TAG_GENRE, "-"));
+    CHECK(!ok(TAG_GENRE, "Rock"));
+    CHECK(!ok(TAG_GENRE, "rock;pop"));
+    CHECK(!ok(TAG_GENRE, "rock,pop"));
+    CHECK(!ok(TAG_GENRE, "rock;  pop"));
+    CHECK(!ok(TAG_GENRE, "rock ; pop"));
+    CHECK(!ok(TAG_GENRE, "rock; "));
+    CHECK(!ok(TAG_GENRE, "rock;"));
+    CHECK(!ok(TAG_GENRE, "; rock"));
+    CHECK(!ok(TAG_GENRE, "rock; ; pop"));
+    CHECK(!ok(TAG_GENRE, "hip hop"));
+    CHECK(!ok(TAG_GENRE, "rock2"));
+    CHECK(!ok(TAG_GENRE, "rock_pop"));
+    CHECK(!ok(TAG_GENRE, "rock/pop"));
+    CHECK(!ok(TAG_GENRE, "électro"));
 
     CHECK(ok(TAG_COMPILATION, "1"));
     CHECK(!ok(TAG_COMPILATION, "0"));
@@ -139,7 +159,8 @@ static void test_read(void)
     copy_fixture("multi.flac", "read.flac", path, sizeof path);
     CHECK(tags_read(path, TAGS_FLAC, &t, err, sizeof err) == 0);
     CHECK_STR(t.value[TAG_GENRE], "Rock; Pop");
-    CHECK(t.multi == 1u << TAG_GENRE);
+    CHECK_STR(t.value[TAG_ARTIST], "Some Artist; Other Artist");
+    CHECK(t.multi == ((1u << TAG_GENRE) | (1u << TAG_ARTIST)));
 
     /* not audio */
     snprintf(path, sizeof path, "%s/text.mp3", dir);
@@ -170,7 +191,7 @@ static void test_write_mp3(void)
     copy_fixture("tagged.mp3", "write.mp3", path, sizeof path);
     CHECK(chmod(path, 0640) == 0);
     struct tags_change c[] = {
-        change(TAG_GENRE, "Rock", "Jazz"),
+        change(TAG_GENRE, "Rock", "jazz"),
         change(TAG_TITLE, "Song One", "Song Uno – ñ"),
         change(TAG_DATE, "2001", ""),          /* remove */
         change(TAG_DISCNUMBER, NULL, "1/1"),   /* add */
@@ -180,7 +201,7 @@ static void test_write_mp3(void)
         CHECK(!c[i].failed && c[i].note[0] == '\0');
 
     CHECK(tags_read(path, TAGS_MP3, &t, err, sizeof err) == 0);
-    CHECK_STR(t.value[TAG_GENRE], "Jazz");
+    CHECK_STR(t.value[TAG_GENRE], "jazz");
     CHECK_STR(t.value[TAG_TITLE], "Song Uno – ñ");
     CHECK(t.value[TAG_DATE] == NULL);
     CHECK_STR(t.value[TAG_DISCNUMBER], "1/1");
@@ -208,11 +229,11 @@ static void test_write_flac(void)
 
     /* a valid and an invalid change: only the valid one is written */
     struct tags_change d[] = {
-        change(TAG_GENRE, "Rock", "Pop"),
+        change(TAG_GENRE, "Rock", "pop"),
         change(TAG_TITLE, "Song Two", ""),     /* required */
         change(TAG_DATE, "2001", "2001-02-30"),
         change(TAG_ARTIST, "Some Artist", " Spaced"),
-        change(TAG_GENRE, "Rock", "Blues"),    /* the same tag twice */
+        change(TAG_GENRE, "Rock", "blues"),    /* the same tag twice */
     };
     CHECK(tags_write(path, TAGS_FLAC, d, 5) == 1);
     CHECK(!d[0].failed);
@@ -221,7 +242,7 @@ static void test_write_flac(void)
     CHECK(d[3].failed && strstr(d[3].note, "space") != NULL);
     CHECK(d[4].failed && strstr(d[4].note, "twice") != NULL);
     CHECK(tags_read(path, TAGS_FLAC, &t, err, sizeof err) == 0);
-    CHECK_STR(t.value[TAG_GENRE], "Pop");
+    CHECK_STR(t.value[TAG_GENRE], "pop");
     CHECK_STR(t.value[TAG_TITLE], "Song Two");
     CHECK_STR(t.value[TAG_DATE], "2001");
 }
@@ -237,7 +258,7 @@ static void test_refusals(void)
     copy_fixture("tagged.flac", "stale.flac", path, sizeof path);
     long len = slurp(path, a, sizeof a);
     struct tags_change c[] = {
-        change(TAG_GENRE, "Pop", "Jazz"),
+        change(TAG_GENRE, "Pop", "jazz"),
         change(TAG_DISCNUMBER, "1", "2"),  /* absent in the file */
     };
     CHECK(tags_write(path, TAGS_FLAC, c, 2) == 0);
@@ -250,21 +271,31 @@ static void test_refusals(void)
     CHECK(tags_write(path, TAGS_FLAC, &bad, 1) == 0 && bad.failed);
     CHECK(slurp(path, b, sizeof b) == len && memcmp(a, b, (size_t)len) == 0);
 
-    /* several values in the tag; other tags can still change */
+    /* several values: other tags are refused, a genre is replaced by the
+     * one new string (once the file still has the queued-against values) */
     copy_fixture("multi.flac", "locked.flac", path, sizeof path);
     len = slurp(path, a, sizeof a);
-    struct tags_change m = change(TAG_GENRE, "Rock; Pop", "Rock");
+    struct tags_change m = change(TAG_ARTIST, "Some Artist; Other Artist", "Me");
     CHECK(tags_write(path, TAGS_FLAC, &m, 1) == 0);
     CHECK(m.failed && strstr(m.note, "several values") != NULL);
+    m = change(TAG_GENRE, "Rock", "rock");
+    CHECK(tags_write(path, TAGS_FLAC, &m, 1) == 0);
+    CHECK(m.failed && strstr(m.note, "it now has Rock; …") != NULL);
     CHECK(slurp(path, b, sizeof b) == len && memcmp(a, b, (size_t)len) == 0);
-    struct tags_change r = change(TAG_TITLE, "Song Two", "Renamed");
-    CHECK(tags_write(path, TAGS_FLAC, &r, 1) == 1 && !r.failed);
+    struct tags_change r[] = {
+        change(TAG_GENRE, "Rock; Pop", "rock; pop"),
+        change(TAG_TITLE, "Song Two", "Renamed"),
+    };
+    CHECK(tags_write(path, TAGS_FLAC, r, 2) == 1 && !r[0].failed && !r[1].failed);
+    CHECK(r[0].note[0] == '\0');
     CHECK(tags_read(path, TAGS_FLAC, &t, err, sizeof err) == 0);
+    CHECK_STR(t.value[TAG_GENRE], "rock; pop");
     CHECK_STR(t.value[TAG_TITLE], "Renamed");
-    CHECK_STR(t.value[TAG_GENRE], "Rock; Pop");
+    CHECK_STR(t.value[TAG_ARTIST], "Some Artist; Other Artist");
+    CHECK(t.multi == 1u << TAG_ARTIST); /* the genre is one value now */
 
     /* not audio, missing, a symlink, a folder */
-    struct tags_change g = change(TAG_GENRE, NULL, "Pop");
+    struct tags_change g = change(TAG_GENRE, NULL, "pop");
     snprintf(path, sizeof path, "%s/text.mp3", dir);
     CHECK(tags_write(path, TAGS_MP3, &g, 1) == 0 && g.failed);
     snprintf(path, sizeof path, "%s/gone.flac", dir);
@@ -273,7 +304,7 @@ static void test_refusals(void)
     copy_fixture("tagged.flac", "target.flac", path, sizeof path);
     snprintf(link, sizeof link, "%s/link.flac", dir);
     CHECK(symlink(path, link) == 0);
-    g = change(TAG_GENRE, "Rock", "Pop");
+    g = change(TAG_GENRE, "Rock", "pop");
     CHECK(tags_write(link, TAGS_FLAC, &g, 1) == 0 && strstr(g.note, "regular") != NULL);
     CHECK(tags_write(dir, TAGS_FLAC, &g, 1) == 0 && g.failed);
 }
@@ -287,12 +318,12 @@ static void test_warning(void)
     copy_fixture("odd.mp3", "odd.mp3", path, sizeof path);
     CHECK(tags_read(path, TAGS_MP3, &t, err, sizeof err) == 0);
     CHECK_STR(t.value[TAG_TRACKNUMBER], "0/0");
-    struct tags_change c = change(TAG_GENRE, "Rock", "Jazz");
+    struct tags_change c = change(TAG_GENRE, "Rock", "jazz");
     CHECK(tags_write(path, TAGS_MP3, &c, 1) == 1);
     CHECK(!c.failed);
     CHECK(strstr(c.note, "TagLib also changed: TRACKNUMBER") != NULL);
     CHECK(tags_read(path, TAGS_MP3, &t, err, sizeof err) == 0);
-    CHECK_STR(t.value[TAG_GENRE], "Jazz");
+    CHECK_STR(t.value[TAG_GENRE], "jazz");
 }
 
 int main(void)

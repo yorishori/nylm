@@ -244,6 +244,22 @@ static int number_valid(const char *s)
     return s[a] == '/' && b >= 1 && b <= 4 && t[b] == '\0' && digits(t, b) >= n;
 }
 
+/* Genres: lowercase a-z and '-', several separated by "; " ("rock; pop-punk"). */
+static int genre_valid(const char *s)
+{
+    for (;;) {
+        size_t n = strspn(s, "abcdefghijklmnopqrstuvwxyz-");
+        if (n == 0)
+            return 0;
+        s += n;
+        if (*s == '\0')
+            return 1;
+        if (s[0] != ';' || s[1] != ' ')
+            return 0;
+        s += 2;
+    }
+}
+
 const char *tags_check_value(enum tag_field field, const char *value)
 {
     size_t len = strlen(value);
@@ -253,7 +269,8 @@ const char *tags_check_value(enum tag_field field, const char *value)
         return "must be one line of UTF-8 text";
     if (len == 0) {
         int required = field == TAG_TITLE || field == TAG_ARTIST || field == TAG_ALBUM ||
-                       field == TAG_ALBUMARTIST || field == TAG_TRACKNUMBER;
+                       field == TAG_ALBUMARTIST || field == TAG_TRACKNUMBER ||
+                       field == TAG_DISCNUMBER;
         return required ? "can not be empty" : NULL;
     }
     if (value[0] == ' ' || value[len - 1] == ' ')
@@ -266,6 +283,9 @@ const char *tags_check_value(enum tag_field field, const char *value)
         return number_valid(value) ? NULL : "must be a number like 3 or 3/12";
     case TAG_COMPILATION:
         return strcmp(value, "1") == 0 ? NULL : "must be 1 or empty";
+    case TAG_GENRE:
+        return genre_valid(value) ? NULL
+                                  : "must be lowercase a-z and -, several separated by \"; \"";
     default:
         return NULL;
     }
@@ -419,23 +439,46 @@ static void check_values(struct tags_change *c, int n)
     }
 }
 
-/* Fails the changes whose tag no longer has the value it was queued
- * against, or has several values. */
+/* 1 if old is p's values joined by "; " (as tags_read shows them); an
+ * absent tag matches only NULL. */
+static int same_as_queued(const char *old, const struct prop *p)
+{
+    if (p == NULL || p->n == 0)
+        return old == NULL;
+    if (old == NULL)
+        return 0;
+    for (size_t i = 0; i < p->n; i++) {
+        size_t len = strlen(p->values[i]);
+        if (strncmp(old, p->values[i], len) != 0)
+            return 0;
+        old += len;
+        if (i + 1 < p->n) {
+            if (strncmp(old, "; ", 2) != 0)
+                return 0;
+            old += 2;
+        }
+    }
+    return *old == '\0';
+}
+
+/*
+ * Fails the changes whose tag no longer has the value it was queued
+ * against, or has several values (a genre may: its values are replaced by
+ * the one new string).
+ */
 static void check_old_values(struct tags_change *c, int n, const struct propmap *before)
 {
     for (int i = 0; i < n; i++) {
         if (c[i].failed)
             continue;
         const struct prop *p = find(before, tags_key[c[i].field]);
-        size_t count = p != NULL ? p->n : 0;
-        const char *now = count == 1 ? p->values[0] : NULL;
-        if (count > 1)
+        if (p != NULL && p->n > 1 && c[i].field != TAG_GENRE)
             fail(&c[i], "%s has several values in the file; nylm does not change those%s",
                  tags_name[c[i].field], "");
-        else if ((now == NULL) != (c[i].old == NULL) ||
-                 (now != NULL && strcmp(now, c[i].old) != 0))
-            fail(&c[i], "the file changed since this was queued: it now has %.200s%s",
-                 now != NULL ? now : "no value", "");
+        else if (!same_as_queued(c[i].old, p))
+            fail(&c[i], "the file changed since this was queued: it now has %.180s%s",
+                 p != NULL && p->n > 0 ? p->values[0] : "no value",
+                 p != NULL && p->n > 1 ? "; …" : "");
     }
 }
 

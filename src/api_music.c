@@ -41,6 +41,10 @@ static const enum tag_field album_fields[] = {
 static const enum tag_field track_fields[] = {
     TAG_TITLE, TAG_ARTIST, TAG_TRACKNUMBER, TAG_DISCNUMBER,
 };
+/* Tags nylm does not change while a file has several values: all but the
+ * genre, whose values are replaced by the one new string. */
+#define LOCKABLE (~(1u << TAG_GENRE))
+
 #define NALBUM_FIELDS (sizeof album_fields / sizeof album_fields[0])
 #define NTRACK_FIELDS (sizeof track_fields / sizeof track_fields[0])
 
@@ -332,7 +336,7 @@ static int add_pending(cJSON *tracks, long album_id)
 {
     sqlite3_stmt *st = db_prepare(music_db,
         "SELECT c.track_id, c.field, c.new FROM changes c JOIN tracks t ON t.id = c.track_id"
-        " WHERE t.album_id = ? AND c.state = 'pending'");
+        " WHERE t.album_id = ? AND c.state = 'pending' ORDER BY c.id");
     if (st == NULL || sqlite3_bind_int64(st, 1, album_id) != SQLITE_OK) {
         sqlite3_finalize(st);
         return -1;
@@ -385,7 +389,8 @@ void music_album(struct request *req, struct response *res)
         cJSON *t = json_row(st, TRACK_JSON_COLUMNS);
         if (t == NULL || !cJSON_AddItemToArray(tracks, t) ||
             cJSON_AddStringToObject(t, "file", slash != NULL ? slash + 1 : path) == NULL ||
-            add_field_names(t, "locked", (unsigned)sqlite3_column_int(st, 14)) == NULL ||
+            add_field_names(t, "locked", (unsigned)sqlite3_column_int(st, 14) & LOCKABLE) ==
+                NULL ||
             cJSON_AddObjectToObject(t, "pending") == NULL)
             rc = SQLITE_NOMEM;
     }
@@ -434,6 +439,7 @@ struct track {
     const char *path; /* relative to the music folder */
     const char *value[TAG_FIELDS];
     unsigned multi;
+    unsigned pending; /* bit (1u << field): a change is pending */
     int requested;    /* listed in the request */
     const char *set[TAG_FIELDS]; /* NULL: not in the request */
 };
@@ -566,16 +572,62 @@ static const char *read_changes(const cJSON *body, struct track *tracks, int n)
     return err;
 }
 
+/* Marks which fields of the album's tracks have a pending change. 0 or -1
+ * (logged). */
+static int load_pending(long album_id, struct track *tracks, int n)
+{
+    sqlite3_stmt *st = db_prepare(music_db,
+        "SELECT c.track_id, c.field FROM changes c JOIN tracks t ON t.id = c.track_id"
+        " WHERE t.album_id = ? AND c.state = 'pending'");
+    if (st == NULL || sqlite3_bind_int64(st, 1, album_id) != SQLITE_OK) {
+        sqlite3_finalize(st);
+        return -1;
+    }
+    int rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        long id = (long)sqlite3_column_int64(st, 0);
+        int field = tags_field_of((const char *)sqlite3_column_text(st, 1));
+        for (int k = 0; k < n && field >= 0; k++)
+            if (tracks[k].id == id)
+                tracks[k].pending |= 1u << field;
+    }
+    if (rc != SQLITE_DONE)
+        db_log_error(music_db, "album pending fields");
+    sqlite3_finalize(st);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
 /* The first track and field with several values that the request would
  * change (*field set), else NULL. */
 static const struct track *find_locked(const struct track *tracks, int n, int *field)
 {
     for (int k = 0; k < n; k++)
         for (int i = 0; i < TAG_FIELDS; i++)
-            if (tracks[k].set[i] != NULL && (tracks[k].multi & (1u << i))) {
+            if (tracks[k].set[i] != NULL && (tracks[k].multi & LOCKABLE & (1u << i))) {
                 *field = i;
                 return &tracks[k];
             }
+    return NULL;
+}
+
+/*
+ * The first track that would still have no track or disc number (*field
+ * set): its file has none, none is pending and the request sets none.
+ * (A value set is never empty: those can not be removed.)
+ */
+static const struct track *find_missing(const struct track *tracks, int n, int *field)
+{
+    static const enum tag_field required[] = { TAG_TRACKNUMBER, TAG_DISCNUMBER };
+    for (int k = 0; k < n; k++)
+        for (size_t i = 0; i < sizeof required / sizeof required[0]; i++) {
+            const struct track *t = &tracks[k];
+            enum tag_field f = required[i];
+            if ((t->value[f] == NULL || t->value[f][0] == '\0') &&
+                !(t->pending & (1u << f)) && t->set[f] == NULL) {
+                *field = f;
+                return t;
+            }
+        }
     return NULL;
 }
 
@@ -659,7 +711,7 @@ void music_album_save(struct request *req, struct response *res)
     }
     struct track *tracks;
     int n = load_tracks(id, &tracks);
-    if (n < 0) {
+    if (n < 0 || load_pending(id, tracks, n) != 0) {
         json_error(res, 500, "internal error");
         return;
     }
@@ -672,6 +724,13 @@ void music_album_save(struct request *req, struct response *res)
     if (locked != NULL) {
         json_error(res, 409, message("%s: %s has several values; nylm does not change those",
                                      locked->path, tags_name[field]));
+        return;
+    }
+    const struct track *missing = find_missing(tracks, n, &field);
+    if (missing != NULL) {
+        json_error(res, 400, message("%s has no %s: every track needs one before its album's "
+                                     "changes can be queued", missing->path,
+                                     field == TAG_TRACKNUMBER ? "track number" : "disc number"));
         return;
     }
 

@@ -250,18 +250,21 @@ function fieldState(tracks, f) {
 }
 
 /*
- * A text input for a tag. read() gives the new value, or null if it was
- * not changed from what is shown (the file's value or the pending one).
+ * A text input for a tag. read() gives the new value, or null if it is
+ * still what the track has (the file's value or the pending one). fill:
+ * a value shown in place of an empty one, so it is queued like a change.
  */
-function tagInput(label, initial, { locked, placeholder, pending }) {
-  const input = el("input", { maxlength: MAX_VALUE, value: initial, placeholder,
+function tagInput(label, initial, { locked, placeholder, pending, fill }) {
+  const input = el("input", { maxlength: MAX_VALUE, value: fill || initial, placeholder,
                               disabled: Boolean(locked), "aria-label": label,
-                              class: pending ? "pending" : null });
+                              class: pending || fill ? "pending" : null });
   input.read = () => (locked || input.value === initial ? null : input.value.trim());
   return input;
 }
 
 const LOCKED_HINT = "Several values in some files: nylm does not change those yet.";
+const GENRE_HINT = "Lowercase a-z and -, several separated by \"; \" (rock; pop-punk).";
+const DISC_DEFAULT = "1/1";
 
 /* The album-wide inputs. read() gives {field: value} of the changed ones. */
 function albumInputs(tracks) {
@@ -271,15 +274,20 @@ function albumInputs(tracks) {
     const input = tagInput(label, s.same ? s.shared : "", {
       locked: s.locked,
       pending: s.pending,
-      placeholder: s.same ? (f === "date" ? "YYYY or YYYY-MM-DD" : "") : "Leave empty to keep",
+      placeholder: !s.same ? "Leave empty to keep"
+                 : f === "date" ? "YYYY or YYYY-MM-DD"
+                 : f === "genre" ? "rock; pop-punk" : "",
     });
     inputs.push([f, input, s.same]);
-    const hint = s.locked ? LOCKED_HINT
-               : !s.same ? `Differs between tracks: ${s.distinct.slice(0, 4).join(", ")}` +
-                           (s.distinct.length > 4 ? ", …" : "") + ". Leave empty to keep each."
-               : s.pending ? "Includes a pending change."
-               : null;
-    return field(label, input, hint);
+    const hints = [
+      s.locked ? LOCKED_HINT : null,
+      !s.locked && !s.same ? `Differs between tracks: ${s.distinct.slice(0, 4).join(", ")}` +
+                             (s.distinct.length > 4 ? ", …" : "") + ". Leave empty to keep each."
+                           : null,
+      !s.locked && s.same && s.pending ? "Includes a pending change." : null,
+      f === "genre" ? GENRE_HINT : null,
+    ].filter(Boolean);
+    return field(label, input, hints.length ? hints.join(" ") : null);
   });
 
   const comp = fieldState(tracks, "compilation");
@@ -314,12 +322,21 @@ function albumInputs(tracks) {
   };
 }
 
-/* One track's row of inputs. read() gives {field: value} of the changed ones. */
+/*
+ * One track's row of inputs. read() gives {field: value} of the changed
+ * ones; missing() is true while its track or disc number is empty (both
+ * are required). A missing disc number is filled in as 1/1.
+ */
 function trackRow(t) {
+  const filled = (f) => f === "discnumber" && planned(t, f) === "" && !t.locked.includes(f);
   const inputs = TRACK_FIELDS.map(([f, label]) =>
-    [f, tagInput(label, planned(t, f), { locked: t.locked.includes(f), pending: f in t.pending })]);
+    [f, tagInput(label, planned(t, f), { locked: t.locked.includes(f), pending: f in t.pending,
+                                         fill: filled(f) ? DISC_DEFAULT : null })]);
   const hint = (f) => t.locked.includes(f) ? LOCKED_HINT
-                    : f in t.pending ? `Pending (file has ${showValue(f, t[f])})` : null;
+                    : filled(f) ? "Filled in: the file has no disc number."
+                    : f in t.pending ? `Pending (file has ${showValue(f, t[f])})`
+                    : f === "tracknumber" && planned(t, f) === "" ? "Required: the file has none."
+                    : null;
   const row = el("li", { class: "card track" },
     el("header", {},
       el("strong", { class: "path" }, t.file),
@@ -336,6 +353,8 @@ function trackRow(t) {
     }
     return out;
   };
+  row.missing = () => inputs.some(([f, input]) =>
+    (f === "tracknumber" || f === "discnumber") && !input.disabled && input.value.trim() === "");
   return row;
 }
 
@@ -398,6 +417,13 @@ async function albumPage(id) {
           el("button", { class: "btn go", type: "button", onclick: showReview }, "Review changes")));
 
   function showReview() {
+    const missing = a.tracks.filter((t, i) => rows[i].missing()).map((t) => t.file);
+    if (missing.length) {
+      setStatus(`Fill in the track and disc number of ${missing.slice(0, 3).join(", ")}` +
+                (missing.length > 3 ? ` and ${missing.length - 3} more` : "") +
+                ": every track needs both.", true);
+      return;
+    }
     const albumChanges = album.read();
     const trackChanges = new Map(rows.map((r, i) => [a.tracks[i].id, r.read()]));
     const plan = plannedChanges(a.tracks, albumChanges, trackChanges);

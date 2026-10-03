@@ -103,15 +103,24 @@ and refuses to queue or cancel anything while a service runs (409).
 Editing an album queues album-wide changes (album, album artist, genre,
 date, compilation) and per-track ones (title, artist, track and disc
 number): one `changes` row per tag of a file, with the value it had when
-queued. Pending changes can be cancelled. The write service, per file,
-only through TagLib (`src/tags.c`): checks each value again (one line of
-UTF-8, at most 500 bytes, required tags not empty, dates and numbers well
-formed) and that the file still has the queued-against value, sets the
-tags and saves, then reads the file back. Each change ends `done`,
-`failed` (with the cause), or `warning`: written, but TagLib also changed
-other tags, pictures or audio properties, listed in its note. It only
-changes tags, never a file's path. Tags with several values are not
-changed.
+queued. Pending changes can be cancelled. Every track needs a track and a
+disc number: an album's changes are refused while one would have none
+(the editor fills in a missing disc number as `1/1`).
+
+The rules for a value: one line of UTF-8, at most 500 bytes, no leading
+or trailing space; title, artist, album, album artist, track and disc
+number can not be empty; dates `YYYY[-MM[-DD]]`; numbers `N` or `N/M`;
+genres lowercase `a-z` and `-`, several separated by `"; "`
+(`rock; pop-punk`), written as one string.
+
+The write service, per file, only through TagLib (`src/tags.c`): checks
+each value again against those rules and that the file still has the
+queued-against value, sets the tags and saves, then reads the file back.
+Each change ends `done`, `failed` (with the cause), or `warning`:
+written, but TagLib also changed other tags, pictures or audio
+properties, listed in its note. It only changes tags, never a file's
+path. A tag with several values in the file is not changed, except the
+genre: its values are replaced by the one new string.
 
 TagLib writes in place. It saves MP3 tags as ID3v2.4 (upgrading ID3v2.3)
 and adds an ID3v1 tag; both stay as TagLib writes them.
