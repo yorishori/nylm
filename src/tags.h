@@ -19,11 +19,19 @@ enum tag_field {
     TAG_TRACKNUMBER,
     TAG_DISCNUMBER,
     TAG_COMPILATION,
+    TAG_COMPOSER, /* added later: new fields go last, the bits in tracks.multi stay */
     TAG_FIELDS
 };
 
 extern const char *const tags_key[TAG_FIELDS];  /* TagLib property: "TITLE" */
 extern const char *const tags_name[TAG_FIELDS]; /* JSON and column name: "title" */
+
+/*
+ * 1 for the list fields: artist, album artist, genre, composer. Their
+ * value is several values separated by "; ", written as one string; a file
+ * that holds several separate values for one of them may be rewritten.
+ */
+int tags_is_list(enum tag_field field);
 
 #define TAGS_MAX_VALUE 500  /* bytes in one tag value */
 #define TAGS_MAX_PATH  4096
@@ -53,10 +61,11 @@ int tags_read(const char *path, enum tags_format format, struct tags *out, char 
 
 /*
  * Checks a new value for a field. "" means remove the tag; title, artist,
- * album, album artist, track and disc number can not be removed. A genre is
- * words of lowercase a-z and '-' with single spaces, several separated by
- * "; " (written as one string).
- * NULL if valid, else what is wrong.
+ * album, album artist, track and disc number can not be removed. In a list
+ * field each value is non-empty, without ';' and without spaces around it,
+ * the values separated by "; "; a genre's values are also words of
+ * lowercase a-z and '-' with single spaces. NULL if valid, else what is
+ * wrong.
  */
 const char *tags_check_value(enum tag_field field, const char *value);
 
@@ -72,8 +81,8 @@ struct tags_change {
 /*
  * Writes the changes into the file in place, through TagLib. Each change
  * is checked first: a valid value (tags_check_value), and the file still
- * has the old value, with a single value (a genre may have several: they
- * are all replaced by the new string). Failing changes are skipped;
+ * has the old value, with a single value (a list field may have several:
+ * they are all replaced by the new string). Failing changes are skipped;
  * the others are set and the file is saved once. Then it is read back:
  * every change must read as asked; any other tag, picture or audio
  * property that differs from before is listed in each done change's note

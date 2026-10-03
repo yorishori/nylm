@@ -304,15 +304,16 @@ static int scan_prepare(struct scan *s)
     s->seen = db_prepare(music_db, "UPDATE tracks SET scan = ? WHERE path = ?");
     s->upsert = db_prepare(music_db,
         "INSERT INTO tracks (size, mtime, seconds, pictures, multi, title, artist, album,"
-        "  albumartist, genre, date, tracknumber, discnumber, compilation,"
+        "  albumartist, genre, date, tracknumber, discnumber, compilation, composer,"
         "  album_id, path, format, scan)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
         " ON CONFLICT (path) DO UPDATE SET size = excluded.size, mtime = excluded.mtime,"
         "  seconds = excluded.seconds, pictures = excluded.pictures, multi = excluded.multi,"
         "  title = excluded.title, artist = excluded.artist, album = excluded.album,"
         "  albumartist = excluded.albumartist, genre = excluded.genre, date = excluded.date,"
         "  tracknumber = excluded.tracknumber, discnumber = excluded.discnumber,"
-        "  compilation = excluded.compilation, album_id = excluded.album_id,"
+        "  compilation = excluded.compilation, composer = excluded.composer,"
+        "  album_id = excluded.album_id,"
         "  format = excluded.format, scan = excluded.scan");
     s->album_add = db_prepare(music_db, "INSERT INTO albums (dir) VALUES (?)"
                                         " ON CONFLICT (dir) DO NOTHING");
@@ -517,7 +518,7 @@ static int reread(long track_id, const char *path, enum tags_format format)
     sqlite3_stmt *st = db_prepare(music_db,
         "UPDATE tracks SET size = ?, mtime = ?, seconds = ?, pictures = ?, multi = ?,"
         " title = ?, artist = ?, album = ?, albumartist = ?, genre = ?, date = ?,"
-        " tracknumber = ?, discnumber = ?, compilation = ? WHERE id = ?");
+        " tracknumber = ?, discnumber = ?, compilation = ?, composer = ? WHERE id = ?");
     int rc = st != NULL && bind_file(st, &sb, &t) == SQLITE_OK &&
                      sqlite3_bind_int64(st, FILE_COLUMN_COUNT + 1, track_id) == SQLITE_OK &&
                      step_once(st) == 0

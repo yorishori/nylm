@@ -36,14 +36,26 @@
 
 /* Fields set for the whole album, and per track. */
 static const enum tag_field album_fields[] = {
-    TAG_ALBUM, TAG_ALBUMARTIST, TAG_GENRE, TAG_DATE, TAG_COMPILATION,
+    TAG_ALBUM, TAG_ALBUMARTIST, TAG_GENRE, TAG_DATE, TAG_COMPILATION, TAG_COMPOSER,
 };
 static const enum tag_field track_fields[] = {
-    TAG_TITLE, TAG_ARTIST, TAG_TRACKNUMBER, TAG_DISCNUMBER,
+    TAG_TITLE, TAG_ARTIST, TAG_TRACKNUMBER, TAG_DISCNUMBER, TAG_COMPOSER,
 };
-/* Tags nylm does not change while a file has several values: all but the
- * genre, whose values are replaced by the one new string. */
-#define LOCKABLE (~(1u << TAG_GENRE))
+/* A disc number missing on a track is queued as this with its album's
+ * other changes. */
+#define DISC_DEFAULT "1/1"
+
+/* Of the fields in multi (bits of fields with several values in a file),
+ * those nylm does not change: all but the list fields, whose values are
+ * replaced by the one new string. */
+static unsigned locked_bits(unsigned multi)
+{
+    unsigned bits = 0;
+    for (int i = 0; i < TAG_FIELDS; i++)
+        if ((multi & (1u << i)) && !tags_is_list((enum tag_field)i))
+            bits |= 1u << i;
+    return bits;
+}
 
 #define NALBUM_FIELDS (sizeof album_fields / sizeof album_fields[0])
 #define NTRACK_FIELDS (sizeof track_fields / sizeof track_fields[0])
@@ -224,55 +236,6 @@ fail:
     json_error(res, 500, "internal error");
 }
 
-/* The value every track of an album shares for column f, else NULL. */
-#define SHARED(f) \
-    "CASE WHEN min(t." f ") IS max(t." f ") AND count(t." f ") IN (0, count(*))" \
-    " THEN min(t." f ") END"
-#define MIXED(f, bit) \
-    " + (CASE WHEN min(t." f ") IS max(t." f ") AND count(t." f ") IN (0, count(*))" \
-    " THEN 0 ELSE " #bit " END)"
-
-/* GET /api/music/albums: every album with the values its tracks share.
- * A field in "mixed" differs between tracks (or is missing on some);
- * pending counts the album's changes waiting to be written. */
-void music_albums(struct request *req, struct response *res)
-{
-    (void)req;
-    cJSON *list = cJSON_CreateArray();
-    sqlite3_stmt *st = list == NULL ? NULL : db_prepare(music_db,
-        "SELECT a.id, a.dir, count(*) AS tracks, sum(t.pictures > 0) AS with_art,"
-        " " SHARED("album") " AS album, " SHARED("albumartist") " AS albumartist,"
-        " " SHARED("date") " AS date, " SHARED("genre") " AS genre,"
-        " (SELECT count(*) FROM changes c JOIN tracks p ON p.id = c.track_id"
-        "  WHERE p.album_id = a.id AND c.state = 'pending') AS pending,"
-        " 0" MIXED("album", 4) MIXED("albumartist", 8) MIXED("genre", 16) MIXED("date", 32)
-        " AS mixed"
-        " FROM albums a JOIN tracks t ON t.album_id = a.id"
-        " GROUP BY a.id"
-        " ORDER BY min(t.albumartist) COLLATE NOCASE, min(t.album) COLLATE NOCASE, a.dir");
-    if (st == NULL) {
-        json_error(res, 500, "internal error");
-        return;
-    }
-    int rc;
-    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
-        cJSON *obj = json_row(st, 9);
-        if (obj == NULL || !cJSON_AddItemToArray(list, obj) ||
-            add_field_names(obj, "mixed", (unsigned)sqlite3_column_int(st, 9)) == NULL) {
-            rc = SQLITE_NOMEM;
-            break;
-        }
-    }
-    if (rc != SQLITE_DONE)
-        db_log_error(music_db, "albums");
-    sqlite3_finalize(st);
-    if (rc != SQLITE_DONE) {
-        json_error(res, 500, "internal error");
-        return;
-    }
-    json_reply(res, 200, list);
-}
-
 /* Reads a positive id from the query string; replies 400 if invalid. */
 static int query_id(const struct request *req, struct response *res, long *out)
 {
@@ -310,11 +273,211 @@ static const char *album_dir(long id, int *error)
     return dir;
 }
 
-/* The columns a track is read with; json_row() takes the first 13. */
+/* The album-wide fields (shown in an album row, changed from the albums
+ * table), as a list for SQL. */
+#define ALBUM_WIDE "'album', 'albumartist', 'genre', 'date', 'compilation', 'composer'"
+
+/* The album-wide fields in the order the album query returns them. */
+static const enum tag_field row_fields[] = {
+    TAG_ALBUM, TAG_ALBUMARTIST, TAG_GENRE, TAG_COMPOSER, TAG_DATE, TAG_COMPILATION,
+};
+#define NROW_FIELDS 6
+
+/* min, max and count of a column over an album's tracks. */
+#define MMC(c) " min(" c "), max(" c "), count(" c "),"
+
+/*
+ * Every album (or the one with id ?, if not 0): id, dir, tracks, with_art,
+ * album_pending and track_pending (pending changes to album-wide and to
+ * track fields); then min, max and count of each album-wide field as in
+ * the files (row_fields order), and the same as planned (pending changes
+ * applied, "" = removed). The last column, the track count again, ends it.
+ */
+#define ALBUMS_SQL                                                                     \
+    "WITH pc AS (SELECT track_id,"                                                     \
+    "  max(CASE WHEN field = 'album' THEN new END) AS album,"                          \
+    "  max(CASE WHEN field = 'albumartist' THEN new END) AS albumartist,"              \
+    "  max(CASE WHEN field = 'genre' THEN new END) AS genre,"                          \
+    "  max(CASE WHEN field = 'composer' THEN new END) AS composer,"                    \
+    "  max(CASE WHEN field = 'date' THEN new END) AS date,"                            \
+    "  max(CASE WHEN field = 'compilation' THEN new END) AS compilation,"              \
+    "  sum(field IN (" ALBUM_WIDE ")) AS n_album,"                                     \
+    "  sum(field NOT IN (" ALBUM_WIDE ")) AS n_track"                                  \
+    "  FROM changes WHERE state = 'pending' AND track_id IS NOT NULL GROUP BY track_id)," \
+    " pt AS (SELECT t.album_id, t.pictures, pc.n_album, pc.n_track,"                   \
+    "  t.album AS a, t.albumartist AS b, t.genre AS c, t.composer AS d, t.date AS e,"  \
+    "  t.compilation AS f,"                                                            \
+    "  iif(pc.album IS NULL, t.album, nullif(pc.album, '')) AS pa,"                    \
+    "  iif(pc.albumartist IS NULL, t.albumartist, nullif(pc.albumartist, '')) AS pb,"  \
+    "  iif(pc.genre IS NULL, t.genre, nullif(pc.genre, '')) AS pc_,"                   \
+    "  iif(pc.composer IS NULL, t.composer, nullif(pc.composer, '')) AS pd,"           \
+    "  iif(pc.date IS NULL, t.date, nullif(pc.date, '')) AS pe,"                       \
+    "  iif(pc.compilation IS NULL, t.compilation, nullif(pc.compilation, '')) AS pf"   \
+    "  FROM tracks t LEFT JOIN pc ON pc.track_id = t.id)"                              \
+    " SELECT x.id, x.dir, count(*) AS tracks, sum(pt.pictures > 0) AS with_art,"       \
+    "  coalesce(sum(pt.n_album), 0) AS album_pending,"                                 \
+    "  coalesce(sum(pt.n_track), 0) AS track_pending,"                                 \
+    MMC("a") MMC("b") MMC("c") MMC("d") MMC("e") MMC("f")                             \
+    MMC("pa") MMC("pb") MMC("pc_") MMC("pd") MMC("pe") MMC("pf")                      \
+    " count(*)"                                                                        \
+    " FROM albums x JOIN pt ON pt.album_id = x.id"                                     \
+    " WHERE ? = 0 OR x.id = ?"                                                         \
+    " GROUP BY x.id"                                                                   \
+    " ORDER BY min(pt.b) COLLATE NOCASE, min(pt.a) COLLATE NOCASE, x.dir"
+
+/*
+ * Adds key: {field: value or null} and key_mixed: [fields] from the
+ * min/max/count triples at col: a value all tracks share is the value; if
+ * they differ (or some lack it) the field is null and listed as mixed.
+ */
+static int add_values(cJSON *obj, const char *key, const char *mixed_key, sqlite3_stmt *st,
+                      int col, int tracks)
+{
+    cJSON *values = cJSON_AddObjectToObject(obj, key);
+    unsigned mixed = 0;
+    for (int i = 0; values != NULL && i < NROW_FIELDS; i++) {
+        const char *lo = (const char *)sqlite3_column_text(st, col + 3 * i);
+        const char *hi = (const char *)sqlite3_column_text(st, col + 3 * i + 1);
+        int count = sqlite3_column_int(st, col + 3 * i + 2);
+        int shared = (count == 0 || count == tracks) &&
+                     (lo == NULL ? hi == NULL : hi != NULL && strcmp(lo, hi) == 0);
+        const char *name = tags_name[row_fields[i]];
+        if (!shared)
+            mixed |= 1u << row_fields[i];
+        if ((shared && lo != NULL ? cJSON_AddStringToObject(values, name, lo)
+                                  : cJSON_AddNullToObject(values, name)) == NULL)
+            values = NULL;
+    }
+    return values != NULL && add_field_names(obj, mixed_key, mixed) != NULL ? 0 : -1;
+}
+
+/* One album row: see ALBUMS_SQL. NULL when out of memory. */
+static cJSON *album_row(sqlite3_stmt *st)
+{
+    const int now = 6, next = now + 3 * NROW_FIELDS;
+    int tracks = sqlite3_column_int(st, 2);
+    cJSON *obj = json_row(st, now);
+    if (obj == NULL || add_values(obj, "now", "now_mixed", st, now, tracks) != 0 ||
+        add_values(obj, "next", "next_mixed", st, next, tracks) != 0)
+        return NULL;
+    return obj;
+}
+
+/*
+ * GET /api/music/albums[?id=N]: every album (or one) with the album-wide
+ * values its tracks share: "now" as in the files, "next" with the pending
+ * changes applied; a field in now_mixed / next_mixed differs between tracks
+ * (or is missing on some), its value is then null.
+ */
+void music_albums(struct request *req, struct response *res)
+{
+    long id = 0;
+    const char *s = NULL;
+    int found = http_query(req, "id", &s);
+    if (found < 0 || (found == 0 && query_id(req, res, &id) != 0)) {
+        if (found < 0)
+            json_error(res, 400, "query parameter 'id' must be a positive whole number");
+        return;
+    }
+    cJSON *list = cJSON_CreateArray();
+    sqlite3_stmt *st = list == NULL ? NULL : db_prepare(music_db, ALBUMS_SQL);
+    if (st == NULL || sqlite3_bind_int64(st, 1, id) != SQLITE_OK ||
+        sqlite3_bind_int64(st, 2, id) != SQLITE_OK) {
+        sqlite3_finalize(st);
+        json_error(res, 500, "internal error");
+        return;
+    }
+    int rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        cJSON *obj = album_row(st);
+        if (obj == NULL || !cJSON_AddItemToArray(list, obj)) {
+            rc = SQLITE_NOMEM;
+            break;
+        }
+    }
+    if (rc != SQLITE_DONE)
+        db_log_error(music_db, "albums");
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    if (id != 0 && cJSON_GetArraySize(list) == 0) {
+        json_error(res, 404, "album not found");
+        return;
+    }
+    json_reply(res, 200, list);
+}
+
+/*
+ * The values of a list column used anywhere: in the files (cache) or in
+ * pending changes, each list split at "; ". At most 5000, sorted.
+ */
+#define VALUES_SQL(f)                                                             \
+    "WITH RECURSIVE src(v) AS ("                                                  \
+    "  SELECT " f " FROM tracks WHERE " f " IS NOT NULL AND " f " <> ''"          \
+    "  UNION SELECT new FROM changes"                                             \
+    "  WHERE state = 'pending' AND field = '" f "' AND new <> ''),"               \
+    " split(rest, part) AS ("                                                     \
+    "  SELECT v || '; ', NULL FROM src"                                           \
+    "  UNION ALL SELECT substr(rest, instr(rest, '; ') + 2),"                     \
+    "   substr(rest, 1, instr(rest, '; ') - 1) FROM split WHERE rest <> '')"     \
+    " SELECT DISTINCT part FROM split WHERE part IS NOT NULL AND part <> ''"      \
+    " ORDER BY part COLLATE NOCASE LIMIT 5000"
+
+/* GET /api/music/values?field=artist|albumartist|genre|composer: the values
+ * in use, for choosing from. */
+void music_values(struct request *req, struct response *res)
+{
+    static const struct {
+        const char *field;
+        const char *sql;
+    } lists[] = {
+        { "artist", VALUES_SQL("artist") },
+        { "albumartist", VALUES_SQL("albumartist") },
+        { "genre", VALUES_SQL("genre") },
+        { "composer", VALUES_SQL("composer") },
+    };
+    const char *field = NULL;
+    const char *sql = NULL;
+    if (http_query(req, "field", &field) == 0)
+        for (size_t i = 0; i < sizeof lists / sizeof lists[0]; i++)
+            if (strcmp(field, lists[i].field) == 0)
+                sql = lists[i].sql;
+    if (sql == NULL) {
+        json_error(res, 400,
+                   "query parameter 'field' must be artist, albumartist, genre or composer");
+        return;
+    }
+    cJSON *list = cJSON_CreateArray();
+    sqlite3_stmt *st = list != NULL ? db_prepare(music_db, sql) : NULL;
+    if (st == NULL) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    int rc;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
+        cJSON *v = cJSON_CreateString((const char *)sqlite3_column_text(st, 0));
+        if (v == NULL || !cJSON_AddItemToArray(list, v)) {
+            rc = SQLITE_NOMEM;
+            break;
+        }
+    }
+    if (rc != SQLITE_DONE)
+        db_log_error(music_db, "values");
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, list);
+}
+
+/* The columns a track is read with; json_row() takes the first 14. */
 #define TRACK_COLUMNS                                                          \
     "id, format, seconds, pictures, title, artist, album, albumartist, genre," \
-    " date, tracknumber, discnumber, compilation, path, multi"
-#define TRACK_JSON_COLUMNS 13
+    " date, tracknumber, discnumber, compilation, composer, path, multi"
+#define TRACK_JSON_COLUMNS 14
 #define TRACK_ORDER \
     " ORDER BY CAST(discnumber AS INTEGER), CAST(tracknumber AS INTEGER), path"
 
@@ -384,12 +547,12 @@ void music_album(struct request *req, struct response *res)
                  ? SQLITE_ROW
                  : SQLITE_ERROR;
     while (rc == SQLITE_ROW && (rc = sqlite3_step(st)) == SQLITE_ROW) {
-        const char *path = (const char *)sqlite3_column_text(st, 13);
+        const char *path = (const char *)sqlite3_column_text(st, 14);
         const char *slash = strrchr(path, '/');
         cJSON *t = json_row(st, TRACK_JSON_COLUMNS);
         if (t == NULL || !cJSON_AddItemToArray(tracks, t) ||
             cJSON_AddStringToObject(t, "file", slash != NULL ? slash + 1 : path) == NULL ||
-            add_field_names(t, "locked", (unsigned)sqlite3_column_int(st, 14) & LOCKABLE) ==
+            add_field_names(t, "locked", locked_bits((unsigned)sqlite3_column_int(st, 15))) ==
                 NULL ||
             cJSON_AddObjectToObject(t, "pending") == NULL)
             rc = SQLITE_NOMEM;
@@ -470,9 +633,9 @@ static int load_tracks(long album_id, struct track **out)
                 (t->value[i] = arena_strndup(v, (size_t)sqlite3_column_bytes(st, 4 + i))) == NULL)
                 rc = SQLITE_NOMEM;
         }
-        t->path = arena_strndup((const char *)sqlite3_column_text(st, 13),
-                                (size_t)sqlite3_column_bytes(st, 13));
-        t->multi = (unsigned)sqlite3_column_int(st, 14);
+        t->path = arena_strndup((const char *)sqlite3_column_text(st, 14),
+                                (size_t)sqlite3_column_bytes(st, 14));
+        t->multi = (unsigned)sqlite3_column_int(st, 15);
         if (t->path == NULL || rc == SQLITE_NOMEM) {
             rc = SQLITE_NOMEM;
             break;
@@ -603,32 +766,37 @@ static const struct track *find_locked(const struct track *tracks, int n, int *f
 {
     for (int k = 0; k < n; k++)
         for (int i = 0; i < TAG_FIELDS; i++)
-            if (tracks[k].set[i] != NULL && (tracks[k].multi & LOCKABLE & (1u << i))) {
+            if (tracks[k].set[i] != NULL && (locked_bits(tracks[k].multi) & (1u << i))) {
                 *field = i;
                 return &tracks[k];
             }
     return NULL;
 }
 
-/*
- * The first track that would still have no track or disc number (*field
- * set): its file has none, none is pending and the request sets none.
- * (A value set is never empty: those can not be removed.)
- */
-static const struct track *find_missing(const struct track *tracks, int n, int *field)
+/* 1 if the track will have no value for f: the file has none, none is
+ * pending and the request sets none. */
+static int will_lack(const struct track *t, enum tag_field f)
 {
-    static const enum tag_field required[] = { TAG_TRACKNUMBER, TAG_DISCNUMBER };
+    return (t->value[f] == NULL || t->value[f][0] == '\0') && !(t->pending & (1u << f)) &&
+           t->set[f] == NULL;
+}
+
+/* The first track that would still have no track number, or NULL. */
+static const struct track *find_no_track_number(const struct track *tracks, int n)
+{
     for (int k = 0; k < n; k++)
-        for (size_t i = 0; i < sizeof required / sizeof required[0]; i++) {
-            const struct track *t = &tracks[k];
-            enum tag_field f = required[i];
-            if ((t->value[f] == NULL || t->value[f][0] == '\0') &&
-                !(t->pending & (1u << f)) && t->set[f] == NULL) {
-                *field = f;
-                return t;
-            }
-        }
+        if (will_lack(&tracks[k], TAG_TRACKNUMBER))
+            return &tracks[k];
     return NULL;
+}
+
+/* Sets the disc number of every track that would have none to 1/1. */
+static void fill_disc_numbers(struct track *tracks, int n)
+{
+    for (int k = 0; k < n; k++)
+        if (will_lack(&tracks[k], TAG_DISCNUMBER) &&
+            !(locked_bits(tracks[k].multi) & (1u << TAG_DISCNUMBER)))
+            tracks[k].set[TAG_DISCNUMBER] = DISC_DEFAULT;
 }
 
 /*
@@ -686,7 +854,9 @@ static int queue_one(const struct request *req, const struct track *t, int field
  * POST /api/music/album/save {id, album: {fields}, tracks: [{id, fields}]}
  * Queues the changes; nothing is written to the files until the write
  * service runs. Fields absent or null are left alone; a value the file
- * already has drops its pending change. -> 200 {queued, dropped}
+ * already has drops its pending change. Refused while a track would have
+ * no track number; a missing disc number is queued as 1/1.
+ * -> 200 {queued, dropped}
  */
 void music_album_save(struct request *req, struct response *res)
 {
@@ -726,13 +896,13 @@ void music_album_save(struct request *req, struct response *res)
                                      locked->path, tags_name[field]));
         return;
     }
-    const struct track *missing = find_missing(tracks, n, &field);
+    const struct track *missing = find_no_track_number(tracks, n);
     if (missing != NULL) {
-        json_error(res, 400, message("%s has no %s: every track needs one before its album's "
-                                     "changes can be queued", missing->path,
-                                     field == TAG_TRACKNUMBER ? "track number" : "disc number"));
+        json_error(res, 400, message("%s has no track number: every track needs one before "
+                                     "its album's changes can be queued%s", missing->path, ""));
         return;
     }
+    fill_disc_numbers(tracks, n);
 
     int lock = lock_for_write(res);
     if (lock < 0)
@@ -803,6 +973,46 @@ void music_changes_cancel(struct request *req, struct response *res)
         rc = db_exec(music_db, "COMMIT");
     if (rc != 0)
         db_exec(music_db, "ROLLBACK");
+    music_unlock(lock);
+
+    cJSON *out = cJSON_CreateObject();
+    if (rc != 0 || out == NULL || cJSON_AddNumberToObject(out, "cancelled", cancelled) == NULL) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, out);
+}
+
+/* POST /api/music/changes/discard {album_id}: deletes every pending change
+ * of the album's tracks. -> 200 {cancelled} */
+void music_changes_discard(struct request *req, struct response *res)
+{
+    cJSON *body = json_body(req, res);
+    long id;
+    if (body == NULL)
+        return;
+    const char *err = json_get_int(body, "album_id", 1, ID_MAX, &id);
+    if (err != NULL) {
+        json_error(res, 400, err);
+        return;
+    }
+    int error;
+    if (album_dir(id, &error) == NULL) {
+        json_error(res, error ? 500 : 404, error ? "internal error" : "album not found");
+        return;
+    }
+    int lock = lock_for_write(res);
+    if (lock < 0)
+        return;
+    sqlite3_stmt *st = db_prepare(music_db,
+        "DELETE FROM changes WHERE state = 'pending'"
+        " AND track_id IN (SELECT id FROM tracks WHERE album_id = ?)");
+    int rc = -1;
+    if (st != NULL && sqlite3_bind_int64(st, 1, id) == SQLITE_OK)
+        rc = run_once(st); /* finalizes st */
+    else
+        sqlite3_finalize(st);
+    int cancelled = rc == 0 ? sqlite3_changes(music_db) : 0;
     music_unlock(lock);
 
     cJSON *out = cJSON_CreateObject();

@@ -115,6 +115,22 @@ static void test_values(void)
     CHECK(!ok(TAG_GENRE, "rock/pop"));
     CHECK(!ok(TAG_GENRE, "électro"));
 
+    /* lists: artist, album artist, composer (genre: see above) */
+    CHECK(ok(TAG_ARTIST, "Some Artist"));
+    CHECK(ok(TAG_ARTIST, "AC/DC; Sunn O)))"));
+    CHECK(ok(TAG_ALBUMARTIST, "A; B; C"));
+    CHECK(ok(TAG_COMPOSER, ""));             /* removable */
+    CHECK(ok(TAG_COMPOSER, "Bach; Händel"));
+    CHECK(!ok(TAG_ARTIST, ""));
+    CHECK(!ok(TAG_ARTIST, "A;B"));
+    CHECK(!ok(TAG_ARTIST, "A ; B"));
+    CHECK(!ok(TAG_ARTIST, "A;  B"));
+    CHECK(!ok(TAG_ARTIST, "A; ; B"));
+    CHECK(!ok(TAG_ARTIST, "A;"));
+    CHECK(!ok(TAG_ARTIST, "; A"));
+    CHECK(!ok(TAG_COMPOSER, "A; B;"));
+    CHECK(ok(TAG_TITLE, "A;B"));             /* not a list field */
+
     CHECK(ok(TAG_COMPILATION, "1"));
     CHECK(!ok(TAG_COMPILATION, "0"));
     CHECK(!ok(TAG_COMPILATION, "yes"));
@@ -167,7 +183,9 @@ static void test_read(void)
     CHECK(tags_read(path, TAGS_FLAC, &t, err, sizeof err) == 0);
     CHECK_STR(t.value[TAG_GENRE], "Rock; Pop");
     CHECK_STR(t.value[TAG_ARTIST], "Some Artist; Other Artist");
-    CHECK(t.multi == ((1u << TAG_GENRE) | (1u << TAG_ARTIST)));
+    CHECK_STR(t.value[TAG_TITLE], "Song Two; Other Title");
+    CHECK(t.value[TAG_COMPOSER] == NULL);
+    CHECK(t.multi == ((1u << TAG_GENRE) | (1u << TAG_ARTIST) | (1u << TAG_TITLE)));
 
     /* not audio */
     snprintf(path, sizeof path, "%s/text.mp3", dir);
@@ -278,28 +296,32 @@ static void test_refusals(void)
     CHECK(tags_write(path, TAGS_FLAC, &bad, 1) == 0 && bad.failed);
     CHECK(slurp(path, b, sizeof b) == len && memcmp(a, b, (size_t)len) == 0);
 
-    /* several values: other tags are refused, a genre is replaced by the
-     * one new string (once the file still has the queued-against values) */
+    /* several values: a list field (artist, album artist, genre, composer)
+     * is replaced by the one new string once the file still has the
+     * queued-against values; other tags are refused */
     copy_fixture("multi.flac", "locked.flac", path, sizeof path);
     len = slurp(path, a, sizeof a);
-    struct tags_change m = change(TAG_ARTIST, "Some Artist; Other Artist", "Me");
+    struct tags_change m = change(TAG_TITLE, "Song Two; Other Title", "Me");
     CHECK(tags_write(path, TAGS_FLAC, &m, 1) == 0);
-    CHECK(m.failed && strstr(m.note, "several values") != NULL);
+    CHECK(m.failed && strstr(m.note, "title has several values") != NULL);
     m = change(TAG_GENRE, "Rock", "rock");
     CHECK(tags_write(path, TAGS_FLAC, &m, 1) == 0);
     CHECK(m.failed && strstr(m.note, "it now has Rock; …") != NULL);
     CHECK(slurp(path, b, sizeof b) == len && memcmp(a, b, (size_t)len) == 0);
     struct tags_change r[] = {
         change(TAG_GENRE, "Rock; Pop", "rock; pop"),
-        change(TAG_TITLE, "Song Two", "Renamed"),
+        change(TAG_ARTIST, "Some Artist; Other Artist", "Some Artist; Another"),
+        change(TAG_COMPOSER, NULL, "Composer A; Composer B"),
     };
-    CHECK(tags_write(path, TAGS_FLAC, r, 2) == 1 && !r[0].failed && !r[1].failed);
+    CHECK(tags_write(path, TAGS_FLAC, r, 3) == 1);
+    CHECK(!r[0].failed && !r[1].failed && !r[2].failed);
     CHECK(r[0].note[0] == '\0');
     CHECK(tags_read(path, TAGS_FLAC, &t, err, sizeof err) == 0);
     CHECK_STR(t.value[TAG_GENRE], "rock; pop");
-    CHECK_STR(t.value[TAG_TITLE], "Renamed");
-    CHECK_STR(t.value[TAG_ARTIST], "Some Artist; Other Artist");
-    CHECK(t.multi == 1u << TAG_ARTIST); /* the genre is one value now */
+    CHECK_STR(t.value[TAG_ARTIST], "Some Artist; Another");
+    CHECK_STR(t.value[TAG_COMPOSER], "Composer A; Composer B");
+    CHECK_STR(t.value[TAG_TITLE], "Song Two; Other Title");
+    CHECK(t.multi == 1u << TAG_TITLE); /* the list fields are one value now */
 
     /* not audio, missing, a symlink, a folder */
     struct tags_change g = change(TAG_GENRE, NULL, "pop");

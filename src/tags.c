@@ -28,13 +28,19 @@
 
 const char *const tags_key[TAG_FIELDS] = {
     "TITLE", "ARTIST", "ALBUM", "ALBUMARTIST", "GENRE", "DATE", "TRACKNUMBER", "DISCNUMBER",
-    "COMPILATION",
+    "COMPILATION", "COMPOSER",
 };
 
 const char *const tags_name[TAG_FIELDS] = {
     "title", "artist", "album", "albumartist", "genre", "date", "tracknumber", "discnumber",
-    "compilation",
+    "compilation", "composer",
 };
+
+int tags_is_list(enum tag_field field)
+{
+    return field == TAG_ARTIST || field == TAG_ALBUMARTIST || field == TAG_GENRE ||
+           field == TAG_COMPOSER;
+}
 
 #define MAX_KEYS     1000 /* properties in one file */
 #define MAX_PICTURES 32
@@ -266,6 +272,25 @@ static int genre_valid(const char *s)
     }
 }
 
+/*
+ * A list: values separated by "; ", each non-empty, without ';' and
+ * without a space at either end ("Some Artist; Other").
+ */
+static int list_valid(const char *s)
+{
+    for (;;) {
+        size_t n = strcspn(s, ";");
+        if (n == 0 || s[0] == ' ' || s[n - 1] == ' ')
+            return 0;
+        s += n;
+        if (*s == '\0')
+            return 1;
+        if (s[1] != ' ')
+            return 0;
+        s += 2;
+    }
+}
+
 const char *tags_check_value(enum tag_field field, const char *value)
 {
     size_t len = strlen(value);
@@ -281,6 +306,8 @@ const char *tags_check_value(enum tag_field field, const char *value)
     }
     if (value[0] == ' ' || value[len - 1] == ' ')
         return "must not start or end with a space";
+    if (tags_is_list(field) && !list_valid(value))
+        return "must be values separated by \"; \" (none empty, no ';' inside)";
     switch (field) {
     case TAG_DATE:
         return date_valid(value) ? NULL : "must be a date: YYYY, YYYY-MM or YYYY-MM-DD";
@@ -470,7 +497,7 @@ static int same_as_queued(const char *old, const struct prop *p)
 
 /*
  * Fails the changes whose tag no longer has the value it was queued
- * against, or has several values (a genre may: its values are replaced by
+ * against, or has several values (a list field may: its values are replaced by
  * the one new string).
  */
 static void check_old_values(struct tags_change *c, int n, const struct propmap *before)
@@ -479,7 +506,7 @@ static void check_old_values(struct tags_change *c, int n, const struct propmap 
         if (c[i].failed)
             continue;
         const struct prop *p = find(before, tags_key[c[i].field]);
-        if (p != NULL && p->n > 1 && c[i].field != TAG_GENRE)
+        if (p != NULL && p->n > 1 && !tags_is_list(c[i].field))
             fail(&c[i], "%s has several values in the file; nylm does not change those%s",
                  tags_name[c[i].field], "");
         else if (!same_as_queued(c[i].old, p))

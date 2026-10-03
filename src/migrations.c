@@ -173,6 +173,38 @@ const char *const music_migrations[] = {
     "CREATE UNIQUE INDEX changes_one_pending ON changes (track_id, field)"
     "    WHERE state = 'pending';"
     "CREATE INDEX changes_by_state ON changes (state, track_id);",
+
+    /* 3: the composer tag. A column for it in tracks, and 'composer' among
+     * the fields of changes (SQLite can not change a CHECK: the table is
+     * rebuilt with the same rows). mtime = 0 makes the next scan read
+     * every file again, to fill in the composers. */
+    "ALTER TABLE tracks ADD COLUMN composer TEXT;"
+    "UPDATE tracks SET mtime = 0;"
+    "CREATE TABLE changes_new ("
+    "    id       INTEGER PRIMARY KEY,"
+    "    track_id INTEGER REFERENCES tracks(id) ON DELETE SET NULL,"
+    "    path     TEXT    NOT NULL,"
+    "    field    TEXT    NOT NULL CHECK (field IN ('title', 'artist', 'album',"
+    "                     'albumartist', 'genre', 'date', 'tracknumber', 'discnumber',"
+    "                     'compilation', 'composer')),"
+    "    old      TEXT,"
+    "    new      TEXT    NOT NULL,"
+    "    client   TEXT    NOT NULL,"
+    "    queued   INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "    state    TEXT    NOT NULL DEFAULT 'pending'"
+    "                     CHECK (state IN ('pending', 'done', 'warning', 'failed')),"
+    "    finished INTEGER,"
+    "    note     TEXT    NOT NULL DEFAULT ''"
+    ") STRICT;"
+    "INSERT INTO changes_new (id, track_id, path, field, old, new, client, queued, state,"
+    "                         finished, note)"
+    "    SELECT id, track_id, path, field, old, new, client, queued, state, finished, note"
+    "    FROM changes;"
+    "DROP TABLE changes;"
+    "ALTER TABLE changes_new RENAME TO changes;"
+    "CREATE UNIQUE INDEX changes_one_pending ON changes (track_id, field)"
+    "    WHERE state = 'pending';"
+    "CREATE INDEX changes_by_state ON changes (state, track_id);",
 };
 
 const int music_migration_count = sizeof music_migrations / sizeof music_migrations[0];

@@ -419,8 +419,9 @@ else PASSED=$((PASSED + 1)); fi
 # ---- music -------------------------------------------------------------------
 
 for route in "GET /api/music" "GET /api/music/albums" "GET /api/music/album?id=1" \
-             "GET /api/music/changes" "POST /api/music/album/save" \
-             "POST /api/music/changes/cancel" "POST /api/music/scan" "POST /api/music/write"; do
+             "GET /api/music/changes" "GET /api/music/values?field=artist" \
+             "POST /api/music/album/save" "POST /api/music/changes/cancel" \
+             "POST /api/music/changes/discard" "POST /api/music/scan" "POST /api/music/write"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
@@ -436,20 +437,33 @@ expect_body '"configured":true,"available":true,"albums":2,"tracks":3,"pending":
 expect_body '"files":4,"parsed":0,"failed":1,"ok":1},"scan_state":"done"' "music last scan"
 
 expect 200 "music albums"      -b "$JAR" "$B/api/music/albums"
-expect_body '"dir":"Artist/Album","tracks":2,"with_art":0,"album":"Some Album","albumartist":"Some Artist","date":"2001","genre":"Rock","pending":0,"mixed":[]' "albums list values"
+expect_body '"dir":"Artist/Album","tracks":2,"with_art":0,"album_pending":0,"track_pending":0,"now":{"album":"Some Album","albumartist":"Some Artist","genre":"Rock","composer":null,"date":"2001","compilation":null},"now_mixed":[],"next":{"album":"Some Album","albumartist":"Some Artist","genre":"Rock","composer":null,"date":"2001","compilation":null},"next_mixed":[]' "albums list values"
 expect_body '"dir":"Artist/Multi"' "albums list second album"
 A=$(grep -o '"id":[0-9]*,"dir":"Artist/Album"' "$TMP/body" | grep -o '[0-9]*' | head -1)
 MA=$(grep -o '"id":[0-9]*,"dir":"Artist/Multi"' "$TMP/body" | grep -o '[0-9]*' | head -1)
 
 expect 200 "music album"       -b "$JAR" "$B/api/music/album?id=$MA"
 expect_body '"genre":"Rock; Pop"' "album shows several values joined"
-expect_body '"file":"01.flac","locked":["artist"],"pending":{}' "album marks the locked field (not the genre)"
+expect_body '"compilation":null,"composer":null,"file":"01.flac","locked":["title"],"pending":{}' "album marks the locked field (not the list fields)"
 MT=$(grep -o '"tracks":\[{"id":[0-9]*' "$TMP/body" | grep -o '[0-9]*$')
 expect 200 "music album (2)"   -b "$JAR" "$B/api/music/album?id=$A"
 expect_body '"title":"Song One"' "album track tags"
 T1=$(grep -o '"tracks":\[{"id":[0-9]*' "$TMP/body" | grep -o '[0-9]*$')
 T2=$(grep -o '"id":[0-9]*,"format"' "$TMP/body" | sed -n 2p | grep -o '[0-9]*')
 DISCS="{\"id\":$T1,\"discnumber\":\"1/1\"},{\"id\":$T2,\"discnumber\":\"1/1\"}"
+expect 200 "one album row"     -b "$JAR" "$B/api/music/albums?id=$A"
+expect_body '[{"id":'"$A"',"dir":"Artist/Album"' "albums?id= gives that album"
+if grep -q 'Artist/Multi' "$TMP/body"; then FAILED=$((FAILED + 1)); echo "FAIL: albums?id= gives more"; else PASSED=$((PASSED + 1)); fi
+expect 404 "one album, missing" -b "$JAR" "$B/api/music/albums?id=999"
+expect 400 "one album, bad id"  -b "$JAR" "$B/api/music/albums?id=x"
+expect 200 "artist values"     -b "$JAR" "$B/api/music/values?field=artist"
+expect_body '["Other Artist","Some Artist"]' "artist values split at \"; \""
+expect 200 "genre values"      -b "$JAR" "$B/api/music/values?field=genre"
+expect_body '["Pop","Rock"]' "genre values"
+expect 200 "composer values"   -b "$JAR" "$B/api/music/values?field=composer"
+expect_body '[]' "no composers yet"
+expect 400 "values, bad field" -b "$JAR" "$B/api/music/values?field=title"
+expect 400 "values, no field"  -b "$JAR" "$B/api/music/values"
 expect 400 "album no id"       -b "$JAR" "$B/api/music/album"
 expect 400 "album id 0"        -b "$JAR" "$B/api/music/album?id=0"
 expect 400 "album id text"     -b "$JAR" "$B/api/music/album?id=x"
@@ -458,13 +472,14 @@ expect 404 "album missing"     -b "$JAR" "$B/api/music/album?id=999"
 # Queueing changes writes no file.
 S=/api/music/album/save
 cp "$M/Artist/Album/01.mp3" "$TMP/before.mp3"
-post "queue without disc numbers" 400 $S "{\"id\":$A,\"album\":{\"genre\":\"jazz\"},\"tracks\":[]}"
-expect_body "Artist/Album/01.mp3 has no disc number" "missing disc number message"
-post "queue genre and discs"   200 $S "{\"id\":$A,\"album\":{\"genre\":\"jazz\"},\"tracks\":[$DISCS]}"
-expect_body '{"queued":4,"dropped":0}' "queue counts"
+post "queue genre"             200 $S "{\"id\":$A,\"album\":{\"genre\":\"jazz\"},\"tracks\":[]}"
+expect_body '{"queued":4,"dropped":0}' "queue counts: the genre, and 1/1 for the missing disc numbers"
+expect 200 "album row planned" -b "$JAR" "$B/api/music/albums?id=$A"
+expect_body '"album_pending":2,"track_pending":2,"now":{"album":"Some Album","albumartist":"Some Artist","genre":"Rock"' "row keeps the files' values"
+expect_body '"next":{"album":"Some Album","albumartist":"Some Artist","genre":"jazz"' "row shows the planned values"
 same_file "queueing leaves the file alone" "$TMP/before.mp3" "$M/Artist/Album/01.mp3"
 expect 200 "album with pending" -b "$JAR" "$B/api/music/album?id=$A"
-expect_body '"genre":"Rock","date":"2001","tracknumber":"1/2","discnumber":null,"compilation":null,"file":"01.mp3","locked":[],"pending":{"genre":"jazz","discnumber":"1/1"}' "album shows the file value and the pending one"
+expect_body '"genre":"Rock","date":"2001","tracknumber":"1/2","discnumber":null,"compilation":null,"composer":null,"file":"01.mp3","locked":[],"pending":{"genre":"jazz","discnumber":"1/1"}' "album shows the file value and the pending one"
 post "queue the same again"    200 $S "{\"id\":$A,\"album\":{\"genre\":\"jazz\"},\"tracks\":[]}"
 expect_body '{"queued":0,"dropped":0}' "same pending value is not queued again (pending discs count)"
 post "queue track title"       200 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1,\"title\":\"New Title\",\"artist\":null}]}"
@@ -472,10 +487,12 @@ expect_body '{"queued":1,"dropped":0}' "queue one track field"
 post "queue back to the file value" 200 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1,\"title\":\"Song One\"}]}"
 expect_body '{"queued":0,"dropped":1}' "the file's own value drops the pending change"
 post "queue track title again" 200 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1,\"title\":\"New Title\"}]}"
-post "queue several"           200 $S "{\"id\":$A,\"album\":{\"date\":\"\",\"compilation\":true},\"tracks\":[]}"
-expect_body '{"queued":4,"dropped":0}' "queue album fields"
+post "queue several"           200 $S "{\"id\":$A,\"album\":{\"date\":\"\",\"compilation\":true,\"composer\":\"Bach; Händel\"},\"tracks\":[]}"
+expect_body '{"queued":6,"dropped":0}' "queue album fields"
+expect 200 "composer values, pending" -b "$JAR" "$B/api/music/values?field=composer"
+expect_body '["Bach","Händel"]' "values include pending ones"
 expect 200 "overview pending"  -b "$JAR" "$B/api/music"
-expect_body '"pending":9,"busy":null' "overview counts pending changes"
+expect_body '"pending":11,"busy":null' "overview counts pending changes"
 
 expect 415 "save needs json"   -b "$JAR" -d "{\"id\":$A}" "$B$S"
 post "save no id"              400 $S '{"album":{},"tracks":[]}'
@@ -496,6 +513,8 @@ post "save genre capitals"     400 $S "{\"id\":$A,\"album\":{\"genre\":\"Jazz\"}
 expect_body "'genre' must be words of lowercase a-z and -" "genre rule message"
 post "save genre no space"     400 $S "{\"id\":$A,\"album\":{\"genre\":\"rock;pop\"},\"tracks\":[]}"
 post "save genre double space" 400 $S "{\"id\":$A,\"album\":{\"genre\":\"hip  hop\"},\"tracks\":[]}"
+post "save artist list bad"    400 $S "{\"id\":$A,\"album\":{\"albumartist\":\"A;B\"},\"tracks\":[]}"
+expect_body "'albumartist' must be values separated by" "list rule message"
 post "save empty disc number"  400 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1,\"discnumber\":\"\"}]}"
 expect_body "'discnumber' can not be empty" "disc number required message"
 post "save empty track number" 400 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1,\"tracknumber\":\"\"}]}"
@@ -506,8 +525,8 @@ post "save track elsewhere"    400 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id
 post "save track twice"        400 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1},{\"id\":$T1}]}"
 post "save track album field"  400 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1,\"genre\":\"x\"}]}"
 post "save album missing"      404 $S '{"id":999,"album":{},"tracks":[]}'
-post "save locked field"       409 $S "{\"id\":$MA,\"album\":{},\"tracks\":[{\"id\":$MT,\"artist\":\"x\",\"discnumber\":\"1/1\"}]}"
-expect_body "artist has several values" "locked field message"
+post "save locked field"       409 $S "{\"id\":$MA,\"album\":{},\"tracks\":[{\"id\":$MT,\"title\":\"x\"}]}"
+expect_body "title has several values" "locked field message"
 
 # A track without a track number blocks its album until it is filled in.
 sqlite3 "$TMP/data/music/music.db" "UPDATE tracks SET tracknumber = NULL WHERE id = $T1"
@@ -566,12 +585,12 @@ sleep 0.2
 
 # The write service writes the pending changes.
 service 0 "music-write"        music-write
-logged "2 files written; 7 changes done, 0 with warnings, 0 failed" "write counts"
+logged "2 files written; 9 changes done, 0 with warnings, 0 failed" "write counts"
 wait "$LOCKER"
 if tail -c 128 "$M/Artist/Album/01.mp3" | head -c 3 | grep -q TAG; then
     PASSED=$((PASSED + 1)); else FAILED=$((FAILED + 1)); echo "FAIL: TagLib's ID3v1 tag removed"; fi
 expect 200 "album after write" -b "$JAR" "$B/api/music/album?id=$A"
-expect_body '"title":"New Title","artist":"Some Artist","album":"Some Album","albumartist":"Some Artist","genre":"jazz","date":null,"tracknumber":"1/2","discnumber":"1/1","compilation":null,"file":"01.mp3","locked":[],"pending":{}' "written tags read back"
+expect_body '"title":"New Title","artist":"Some Artist","album":"Some Album","albumartist":"Some Artist","genre":"jazz","date":null,"tracknumber":"1/2","discnumber":"1/1","compilation":null,"composer":"Bach; Händel","file":"01.mp3","locked":[],"pending":{}' "written tags read back"
 expect 200 "changes after write" -b "$JAR" "$B/api/music/changes"
 expect_body '"pending":[],' "nothing pending after the write"
 expect_body '"field":"title","old":"Song One","new":"New Title","state":"done","note":""' "history keeps the change"
@@ -620,6 +639,16 @@ service 1 "music-write, folder missing" music-write
 expect 200 "overview, folder missing" -b "$JAR" "$B/api/music"
 expect_body '"configured":true,"available":false,"albums":2,"tracks":3,"pending":3' "pending changes kept while the folder is missing"
 mv "$TMP/music.away" "$M"
+
+D=/api/music/changes/discard
+post "discard album"           200 $D "{\"album_id\":$A}"
+expect_body '{"cancelled":3}' "discard cancels all the album's pending changes"
+post "discard again"           200 $D "{\"album_id\":$A}"
+expect_body '{"cancelled":0}' "nothing left to discard"
+post "discard no album_id"     400 $D '{}'
+post "discard bad album_id"    400 $D '{"album_id":"x"}'
+post "discard album missing"   404 $D '{"album_id":999}'
+expect 415 "discard needs json" -b "$JAR" -d "{\"album_id\":$A}" "$B$D"
 
 post "scan no password"        400 /api/music/scan '{}'
 post "scan wrong password"     403 /api/music/scan '{"password":"nope"}'

@@ -2,32 +2,44 @@
 
 /*
  * Music app (/music/). Sections by URL hash:
- *   #/albums      every album (a folder of the library), and the library scan
- *   #/album/ID    one album: change its tags; the changes are queued
- *   #/changes     queued changes (cancel, or write them), and the history
+ *   #/albums      every album in an editable table, and the library scan
+ *   #/album/ID    one album: its album-wide tags and each track's
+ *   #/changes     the albums with queued changes (current and new values),
+ *                 discard, write them; and the history
  *
  * The server never touches the files: it keeps a cache of their tags and a
- * queue of changes. Two services do the work, one at a time: the scan
- * (files -> cache) and the write (queue -> files). Both are started here,
+ * queue of changes. Every edit here is queued as soon as a cell is left
+ * (no save button); the write service puts the queue into the files, the
+ * scan reads the files into the cache. Both are started from this page,
  * with the password again. While one runs, nothing can be queued.
+ *
+ * A cell shows a tag and is pressed to edit it: text in place, a list
+ * (artist, album artist, genre, composer) in a popup of chips with
+ * suggestions, compilation as yes / no.
  */
 
-const ALBUM_FIELDS = [
-  ["album", "Album"],
-  ["albumartist", "Album artist"],
-  ["genre", "Genre"],
-  ["date", "Date"],
-];
-const TRACK_FIELDS = [
-  ["discnumber", "Disc"],
-  ["tracknumber", "No."],
-  ["title", "Title"],
-  ["artist", "Artist"],
-];
-const LABELS = Object.fromEntries([...ALBUM_FIELDS, ...TRACK_FIELDS,
-                                   ["compilation", "Compilation"]]);
+/* Every tag the page edits: label, kind of editor, whether it may be empty. */
+const FIELDS = {
+  album: { label: "Album", kind: "text", required: true },
+  albumartist: { label: "Album artist", kind: "list", required: true },
+  genre: { label: "Genre", kind: "list" },
+  composer: { label: "Composer", kind: "list" },
+  date: { label: "Date", kind: "text", placeholder: "YYYY or YYYY-MM-DD" },
+  compilation: { label: "Compilation", kind: "bool" },
+  discnumber: { label: "Disc", kind: "text", required: true, placeholder: "1/1" },
+  tracknumber: { label: "No.", kind: "text", required: true, placeholder: "3 or 3/12" },
+  title: { label: "Title", kind: "text", required: true },
+  artist: { label: "Artist", kind: "list", required: true },
+};
+/* The album-wide tags: the albums table's columns. */
+const ALBUM_COLUMNS = ["album", "albumartist", "genre", "composer", "date", "compilation"];
+/* The track tags: the album page's columns. */
+const TRACK_COLUMNS = ["discnumber", "tracknumber", "title", "artist", "composer"];
+
 const MAX_VALUE = 500; /* bytes; the server checks the exact limit */
+const MAX_SUGGESTIONS = 50;
 const POLL_MS = 3000;
+const GENRE_RE = /^[a-z-]+( [a-z-]+)*$/;
 
 /* "3:05" or "1:02:03". */
 function duration(seconds) {
@@ -46,24 +58,45 @@ function showTime(ts) {
 
 /* A tag value for people: compilation "1" is "yes", nothing is "(none)". */
 function showValue(field, v) {
-  if (v == null || v === "") return "(none)";
+  if (v == null || v === "") return field === "compilation" ? "no" : "(none)";
   if (field === "compilation") return v === "1" ? "yes" : v;
   return v;
 }
 
+/* A list value split into its values ("A; B" -> ["A", "B"]). */
+function splitList(v) {
+  return v ? v.split("; ").filter(Boolean) : [];
+}
+
+/* ---- shell -------------------------------------------------------------- */
+
+const tabLabels = {};
+
+function changesLabel(pending) {
+  return pending ? `Changes (${pending})` : "Changes";
+}
+
 function shell(active, overview, ...content) {
-  const tabs = [
-    ["albums", "Albums"],
-    ["changes", overview.pending ? `Changes (${overview.pending})` : "Changes"],
-  ];
+  const tabs = [["albums", "Albums"], ["changes", changesLabel(overview.pending)]];
   return el("section", {},
     el("header", { class: "app-head" },
       el("h1", {}, "Music"),
       el("nav", { class: "tabs", "aria-label": "Music sections" },
-        tabs.map(([key, label]) =>
-          el("a", { href: `#/${key}`, "aria-current": key === active ? "page" : null },
-             label)))),
+        tabs.map(([key, label]) => {
+          const a = el("a", { href: `#/${key}`, "aria-current": key === active ? "page" : null },
+                       label);
+          tabLabels[key] = a;
+          return a;
+        }))),
     ...content);
+}
+
+/* Updates the Changes tab's count after a change was queued. */
+async function updatePendingCount() {
+  const o = await api("GET", "/api/music");
+  if (tabLabels.changes && tabLabels.changes.isConnected) {
+    tabLabels.changes.textContent = changesLabel(o.pending);
+  }
 }
 
 /* ---- services ----------------------------------------------------------- */
@@ -94,7 +127,7 @@ function watchBusy(o, node, text) {
         text.textContent = busyText(now);
         setTimeout(poll, POLL_MS);
       } else {
-        setStatus(o.busy === "write" ? "Writing finished: see the results below"
+        setStatus(o.busy === "write" ? "Writing finished: see the results in Changes"
                                      : "Scan finished");
         refresh();
       }
@@ -172,28 +205,372 @@ function libraryCard(o) {
   return card;
 }
 
-/* ---- albums ------------------------------------------------------------- */
+/* ---- cells and their editors -------------------------------------------- */
 
-function albumCard(a) {
-  const title = a.album != null ? a.album
-              : a.mixed.includes("album") ? "Several album names" : "No album name";
-  const artist = a.albumartist != null ? a.albumartist
-               : a.mixed.includes("albumartist") ? "Several album artists" : "No album artist";
-  return el("li", { class: "card album-card" },
-    el("h3", {}, title),
-    el("p", {}, artist),
-    el("p", { class: "muted" },
-       [a.date, plural(a.tracks, "track", "tracks"),
-        a.with_art < a.tracks ? `cover in ${a.with_art} of ${a.tracks}` : "cover in all"]
-         .filter(Boolean).join(" · ")),
-    el("p", { class: "muted path" }, a.dir || "(the top folder)"),
-    a.mixed.length
-      ? el("p", { class: "hint" },
-           `Differs between tracks: ${a.mixed.map((f) => LABELS[f].toLowerCase()).join(", ")}`)
-      : null,
-    a.pending ? el("p", { class: "pending-note" }, `${plural(a.pending, "change", "changes")} pending`)
-              : null,
-    el("div", { class: "actions" }, navButton("Open", `#/album/${a.id}`)));
+/* The values in use for a list field, fetched once per page load. */
+const valueCache = new Map();
+function knownValues(field) {
+  if (!valueCache.has(field)) {
+    valueCache.set(field, api("GET", `/api/music/values?field=${field}`).catch((err) => {
+      valueCache.delete(field);
+      throw err;
+    }));
+  }
+  return valueCache.get(field);
+}
+
+/* What is wrong with one value of a list field, or null. */
+function listValueProblem(field, v) {
+  if (v === "") return "Type a value first.";
+  if (v.includes(";")) return "A value can not contain ';'.";
+  if (field === "genre" && !GENRE_RE.test(v)) {
+    return "A genre is lowercase a-z and -, words separated by single spaces.";
+  }
+  return null;
+}
+
+/*
+ * A popup that sits under anchor (fixed, so a scrolling table does not cut
+ * it off) and closes on Escape or a press outside. close(refocus) is
+ * called once. Returns {pop, close}.
+ */
+function floatingPopup(anchor, label, onClose) {
+  const pop = el("div", { class: "popover floating", role: "dialog", "aria-label": label });
+  const owner = { contains: (n) => pop.contains(n) || anchor.contains(n) };
+  let closed = false;
+  const close = (refocus) => {
+    if (closed) return;
+    closed = true;
+    pop.remove();
+    popoverClosed(owner);
+    onClose(refocus);
+  };
+  document.body.append(pop);
+  if (!window.matchMedia("(max-width: 21rem)").matches) {
+    /* Positioned with the CSS object model: not an inline style attribute. */
+    const r = anchor.getBoundingClientRect();
+    pop.style.top = `${Math.round(r.bottom + 6)}px`;
+    pop.style.left = `${Math.round(Math.max(8, Math.min(r.left,
+                                                        window.innerWidth - 8 - pop.offsetWidth)))}px`;
+  }
+  popoverOpened(owner, pop, close);
+  return { pop, close };
+}
+
+/*
+ * The chip editor for a list field. initial: its values; mixed: tracks
+ * differ (nothing is changed unless values are chosen). onSave(value) gets
+ * the "; "-joined string. Returns the popup's close().
+ */
+function listEditor(anchor, { field, initial, mixed, onSave, onDone }) {
+  const spec = FIELDS[field];
+  let chosen = [...initial];
+  let touched = false;
+  let active = -1;
+  let shown = [];
+
+  const { pop, close } = floatingPopup(anchor, spec.label, (refocus) => onDone(refocus));
+  const chips = el("ul", { class: "chips", "aria-label": `${spec.label} values` });
+  const input = el("input", { maxlength: MAX_VALUE, placeholder: "Add a value…",
+                              "aria-label": `Add ${spec.label.toLowerCase()}`,
+                              role: "combobox", "aria-autocomplete": "list",
+                              "aria-expanded": "false" });
+  const listId = uniqueId("suggest");
+  const list = el("ul", { class: "listbox suggestions", role: "listbox", id: listId,
+                          "aria-label": "Suggestions" });
+  input.setAttribute("aria-controls", listId);
+  const error = el("p", { class: "form-error", role: "alert" });
+  let known = [];
+
+  function renderChips() {
+    chips.replaceChildren(...chosen.map((v, i) => el("li", { class: "chip value" },
+      el("span", {}, v),
+      el("button", { type: "button", class: "chip-x", "aria-label": `Remove ${v}`,
+                     onclick: () => { chosen.splice(i, 1); touched = true; renderChips(); input.focus(); } },
+         "×"))));
+    if (!chosen.length) {
+      chips.append(el("li", { class: "muted" }, mixed && !touched ? "Differs between tracks" : "No values"));
+    }
+  }
+  function renderSuggestions() {
+    const q = input.value.trim().toLowerCase();
+    shown = known.filter((v) => !chosen.includes(v) && (!q || v.toLowerCase().includes(q)))
+                 .slice(0, MAX_SUGGESTIONS);
+    active = Math.min(active, shown.length - 1);
+    list.replaceChildren(...shown.map((v, i) => el("li", {
+      role: "option", id: `${listId}-${i}`, class: i === active ? "option active" : "option",
+      "aria-selected": String(i === active),
+      onpointerdown: (e) => e.preventDefault(), /* keep the focus in the input */
+      onclick: () => add(v),
+    }, v)));
+    input.setAttribute("aria-expanded", String(shown.length > 0));
+    if (active >= 0) input.setAttribute("aria-activedescendant", `${listId}-${active}`);
+    else input.removeAttribute("aria-activedescendant");
+  }
+  function add(v) {
+    const value = v.trim();
+    const problem = listValueProblem(field, value);
+    if (problem) {
+      error.textContent = problem;
+      return;
+    }
+    error.textContent = "";
+    if (!chosen.includes(value)) chosen.push(value);
+    touched = true;
+    input.value = "";
+    active = -1;
+    renderChips();
+    renderSuggestions();
+    input.focus();
+  }
+  async function save() {
+    if (!touched) {
+      close(true);
+      return;
+    }
+    if (!chosen.length && mixed) {
+      close(true); /* nothing chosen for differing tracks: keep each */
+      return;
+    }
+    if (!chosen.length && spec.required) {
+      error.textContent = `${spec.label} needs at least one value.`;
+      return;
+    }
+    const ok = await onSave(chosen.join("; "));
+    if (ok) close(true);
+  }
+
+  input.addEventListener("input", () => { active = -1; error.textContent = ""; renderSuggestions(); });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown" && shown.length) active = Math.min(active + 1, shown.length - 1);
+    else if (e.key === "ArrowUp" && shown.length) active = Math.max(active - 1, -1);
+    else if (e.key === "Enter") {
+      if (active >= 0) add(shown[active]);
+      else if (input.value.trim()) add(input.value);
+      else save();
+    } else if (e.key === "Backspace" && input.value === "" && chosen.length) {
+      chosen.pop();
+      touched = true;
+      renderChips();
+    } else return;
+    e.preventDefault();
+    renderSuggestions();
+  });
+
+  pop.append(
+    el("strong", {}, spec.label),
+    chips,
+    input,
+    list,
+    field === "genre" ? el("p", { class: "hint" }, "Lowercase a-z and -, words separated by single spaces.") : null,
+    mixed ? el("p", { class: "hint" }, "Tracks differ. Values chosen here replace them on every track.") : null,
+    error,
+    el("div", { class: "actions" },
+      el("button", { class: "btn go", type: "button", onclick: save }, "Save"),
+      el("button", { class: "btn", type: "button", onclick: () => close(true) }, "Cancel")));
+  renderChips();
+  input.focus();
+  knownValues(field).then((values) => {
+    known = values;
+    renderSuggestions();
+  }).catch(handleError);
+  return close;
+}
+
+/* Yes / no for compilation. onSave(true|false). */
+function boolEditor(anchor, { current, onSave, onDone }) {
+  const { pop, close } = floatingPopup(anchor, "Compilation", (refocus) => onDone(refocus));
+  const choose = async (v) => {
+    if (await onSave(v)) close(true);
+  };
+  const yes = el("button", { class: current === "1" ? "btn go" : "btn", type: "button",
+                             onclick: () => choose(true) }, "Yes (various artists)");
+  const no = el("button", { class: current === "1" ? "btn" : "btn go", type: "button",
+                            onclick: () => choose(false) }, "No");
+  pop.append(el("strong", {}, "Compilation"),
+             el("div", { class: "actions" }, yes, no,
+                el("button", { class: "btn", type: "button", onclick: () => close(true) }, "Cancel")));
+  (current === "1" ? yes : no).focus();
+  return close;
+}
+
+/*
+ * A table cell for one tag. shown: the value (null if mixed), mixed: tracks
+ * differ, edited: a change is pending, locked: why it can not be edited
+ * (or nothing). save(value) queues it (string, or true/false for
+ * compilation) and resolves true when done; errors are shown. key: to
+ * find the cell again after the row is drawn anew.
+ */
+function tagCell({ field, shown, mixed, edited, locked, missing, key, save }) {
+  const spec = FIELDS[field];
+  const td = el("td", { class: [`col-${field}`, edited ? "edited" : "", missing ? "missing" : ""]
+                                .filter(Boolean).join(" ") });
+  const text = mixed ? "mixed" : missing ? "missing" : showValue(field, shown);
+  const button = el("button", {
+    type: "button", class: mixed || (!shown && !missing) ? "cell empty" : "cell",
+    "data-key": key, disabled: Boolean(locked), title: locked || null,
+    "aria-label": `${spec.label}: ${text}${edited ? " (changed, pending)" : ""}`,
+  }, text);
+  td.append(button);
+
+  const run = async (value) => {
+    try {
+      await save(value);
+      return true;
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 401 && handleError(err))) {
+        setStatus(`${spec.label}: ${err.message}`, true);
+      }
+      return false;
+    }
+  };
+
+  function editText() {
+    const initial = mixed ? "" : shown ?? "";
+    const input = el("input", { class: "cell-input", maxlength: MAX_VALUE, value: initial,
+                                placeholder: mixed ? "Differs: leave empty to keep" : spec.placeholder || "",
+                                "aria-label": spec.label });
+    let done = false;
+    const finish = async (keep) => {
+      if (done) return;
+      done = true;
+      const v = input.value.trim();
+      if (keep && v !== initial && !(mixed && v === "")) {
+        input.disabled = true;
+        if (!(await run(v))) {
+          done = false;
+          input.disabled = false;
+          input.focus();
+          return;
+        }
+      } else {
+        input.replaceWith(button);
+        editing = false;
+        button.focus();
+      }
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); finish(true); }
+      else if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); finish(false); }
+    });
+    input.addEventListener("blur", () => finish(true));
+    button.replaceWith(input);
+    input.focus();
+    input.select();
+  }
+
+  let editing = false;
+  button.addEventListener("click", () => {
+    if (editing) return;
+    editing = true;
+    const back = (refocus) => {
+      editing = false;
+      if (refocus && button.isConnected) button.focus();
+    };
+    if (spec.kind === "list") {
+      listEditor(button, { field, initial: mixed ? [] : splitList(shown), mixed,
+                           onSave: run, onDone: back });
+    } else if (spec.kind === "bool") {
+      boolEditor(button, { current: mixed ? null : shown, onSave: run, onDone: back });
+    } else {
+      editText();
+    }
+  });
+  return td;
+}
+
+const BUSY_LOCK = "A scan or write is running: editing is possible again when it is done.";
+const MULTI_LOCK = "Several values in a file: nylm does not change those yet.";
+
+/* Focuses the cell with this key again after its row was drawn anew,
+ * unless the focus has moved on to something else meanwhile. */
+function refocusCell(container, key) {
+  const now = document.activeElement;
+  if (now && now !== document.body && !container.contains(now)) return;
+  const b = container.querySelector(`[data-key="${CSS.escape(key)}"]`);
+  if (b) b.focus();
+}
+
+/* ---- albums table ------------------------------------------------------- */
+
+/* Queues an album-wide change and returns the album's row as it is now. */
+async function saveAlbumField(albumId, field, value) {
+  const result = await api("POST", "/api/music/album/save",
+                           { id: albumId, album: { [field]: value }, tracks: [] });
+  if (field in FIELDS && FIELDS[field].kind === "list") valueCache.delete(field);
+  const [row] = await api("GET", `/api/music/albums?id=${albumId}`);
+  updatePendingCount().catch(handleError);
+  if (result.queued || result.dropped) {
+    setStatus(result.queued ? `Queued: ${FIELDS[field].label.toLowerCase()} for ` +
+                              `${row.next.album || row.dir}` : "Back to the files' value");
+  }
+  return row;
+}
+
+/* Whether field's value in the album row will change. */
+function albumFieldEdited(a, f) {
+  return a.now[f] !== a.next[f] || a.now_mixed.includes(f) !== a.next_mixed.includes(f);
+}
+
+/*
+ * One album as a table row (planned values, editable). options.readOnly:
+ * nothing can be edited; compact: only the tag cells; onSaved(key): after
+ * a change was queued (else the row is drawn anew).
+ */
+function albumRow(a, options) {
+  const tr = el("tr", { class: albumRowClass(a) });
+  const render = () => {
+    tr.className = albumRowClass(a);
+    tr.replaceChildren(
+      ...ALBUM_COLUMNS.map((f) => tagCell({
+        field: f,
+        shown: a.next[f],
+        mixed: a.next_mixed.includes(f),
+        edited: albumFieldEdited(a, f),
+        locked: options.readOnly ? BUSY_LOCK : null,
+        key: `${a.id}:${f}`,
+        save: async (value) => {
+          a = await saveAlbumField(a.id, f, value);
+          if (options.onSaved) {
+            await options.onSaved(`${a.id}:${f}`);
+            return;
+          }
+          render();
+          refocusCell(tr, `${a.id}:${f}`);
+        },
+      })),
+      options.compact ? null : el("td", { class: "col-tracks num" }, String(a.tracks)),
+      options.compact ? null : el("td", { class: "col-dir path muted" }, a.dir || "(top folder)"),
+      options.compact ? null : el("td", { class: "col-open" }, navButton("Open", `#/album/${a.id}`)));
+  };
+  render();
+  return tr;
+}
+
+function albumRowClass(a) {
+  return [a.album_pending ? "album-edits" : "", a.track_pending ? "track-edits" : ""]
+    .filter(Boolean).join(" ");
+}
+
+function albumHead(...extra) {
+  return el("thead", {}, el("tr", {},
+    ...extra.slice(0, 1),
+    ...ALBUM_COLUMNS.map((f) => el("th", { scope: "col", class: `col-${f}` }, FIELDS[f].label)),
+    ...extra.slice(1)));
+}
+
+/* Words to search for in an album: its tags (now and planned) and folder. */
+function albumText(a) {
+  return [a.dir, ...ALBUM_COLUMNS.flatMap((f) => [a.now[f], a.next[f]])]
+    .filter(Boolean).join(" ").toLowerCase();
+}
+
+function legend() {
+  return el("p", { class: "legend hint" },
+    el("span", { class: "mark album-edits" }, "Album changed"),
+    el("span", { class: "mark track-edits" }, "Tracks changed"),
+    el("span", { class: "mark edited-cell" }, "Changed value"),
+    " Changes are queued as you edit; write them from Changes.");
 }
 
 async function albumsPage() {
@@ -207,15 +584,16 @@ async function albumsPage() {
   }
   const albums = await api("GET", "/api/music/albums");
   const filter = el("input", { type: "search", "aria-label": "Filter albums",
-                               placeholder: "Filter by album, artist or folder" });
-  const list = el("ul", { class: "list cols" });
+                               placeholder: "Search album, artist, genre, composer or folder" });
+  const body = el("tbody");
   const count = el("span", { class: "count" });
+  const readOnly = Boolean(o.busy);
+  const rows = new Map(albums.map((a) => [a.id, albumRow(a, { readOnly })]));
   const show = () => {
     const q = filter.value.trim().toLowerCase();
-    const shown = albums.filter((a) => !q ||
-      [a.album, a.albumartist, a.dir].some((v) => v && v.toLowerCase().includes(q)));
+    const shown = albums.filter((a) => !q || albumText(a).includes(q));
     count.textContent = shown.length;
-    list.replaceChildren(...shown.map(albumCard));
+    body.replaceChildren(...shown.map((a) => rows.get(a.id)));
   };
   filter.addEventListener("input", show);
   show();
@@ -223,8 +601,18 @@ async function albumsPage() {
     libraryCard(o),
     el("section", { class: "section" },
       el("header", {}, el("h2", {}, "Albums ", count)),
-      albums.length ? [filter, list]
-                    : el("p", { class: "empty" }, "No albums yet. Scan the library.")));
+      albums.length
+        ? [filter,
+           readOnly ? el("p", { class: "warn" }, "A scan or write is running: editing is " +
+                                                 "possible again when it is done.") : null,
+           legend(),
+           el("div", { class: "grid-wrap" },
+             el("table", { class: "grid" },
+               albumHead(null, el("th", { scope: "col" }, "Tracks"),
+                         el("th", { scope: "col" }, "Folder"),
+                         el("th", { scope: "col" }, el("span", { class: "visually-hidden" }, "Open"))),
+               body))]
+        : el("p", { class: "empty" }, "No albums yet. Scan the library.")));
 }
 
 /* ---- one album ---------------------------------------------------------- */
@@ -235,290 +623,148 @@ function planned(t, f) {
   return f in t.pending ? t.pending[f] : t[f] ?? "";
 }
 
-/* What the album's tracks will have for field f: shared or not, locked,
- * whether a change is pending. */
-function fieldState(tracks, f) {
-  const values = tracks.map((t) => planned(t, f));
-  const same = values.every((v) => v === values[0]);
-  return {
-    same,
-    shared: same ? values[0] : null,
-    distinct: [...new Set(values.map((v) => showValue(f, v)))],
-    locked: tracks.some((t) => t.locked.includes(f)),
-    pending: tracks.some((t) => f in t.pending),
-  };
-}
-
-/*
- * A text input for a tag. read() gives the new value, or null if it is
- * still what the track has (the file's value or the pending one). fill:
- * a value shown in place of an empty one, so it is queued like a change.
- */
-function tagInput(label, initial, { locked, placeholder, pending, fill }) {
-  const input = el("input", { maxlength: MAX_VALUE, value: fill || initial, placeholder,
-                              disabled: Boolean(locked), "aria-label": label,
-                              class: pending || fill ? "pending" : null });
-  input.read = () => (locked || input.value === initial ? null : input.value.trim());
-  return input;
-}
-
-const LOCKED_HINT = "Several values in some files: nylm does not change those yet.";
-const GENRE_HINT = "Lowercase a-z, - and single spaces; several separated by \"; \" " +
-                   "(hip hop; pop-punk).";
-const DISC_DEFAULT = "1/1";
-
-/* The album-wide inputs. read() gives {field: value} of the changed ones. */
-function albumInputs(tracks) {
-  const inputs = [];
-  const fields = ALBUM_FIELDS.map(([f, label]) => {
-    const s = fieldState(tracks, f);
-    const input = tagInput(label, s.same ? s.shared : "", {
-      locked: s.locked,
-      pending: s.pending,
-      placeholder: !s.same ? "Leave empty to keep"
-                 : f === "date" ? "YYYY or YYYY-MM-DD"
-                 : f === "genre" ? "hip hop; pop-punk" : "",
-    });
-    inputs.push([f, input, s.same]);
-    const hints = [
-      s.locked ? LOCKED_HINT : null,
-      !s.locked && !s.same ? `Differs between tracks: ${s.distinct.slice(0, 4).join(", ")}` +
-                             (s.distinct.length > 4 ? ", …" : "") + ". Leave empty to keep each."
-                           : null,
-      !s.locked && s.same && s.pending ? "Includes a pending change." : null,
-      f === "genre" ? GENRE_HINT : null,
-    ].filter(Boolean);
-    return field(label, input, hints.length ? hints.join(" ") : null);
-  });
-
-  const comp = fieldState(tracks, "compilation");
-  const compInitial = comp.same ? (comp.shared === "1" ? "yes" : "no") : "keep";
-  const compChoice = comp.locked ? null : dropdown({
-    label: "Compilation",
-    value: compInitial,
-    options: [
-      ...(comp.same ? [] : [{ value: "keep", label: "Differs between tracks: keep" }]),
-      { value: "no", label: "No" },
-      { value: "yes", label: "Yes (various artists)" },
-    ],
-  });
-  fields.push(comp.locked ? field("Compilation", el("p", { class: "muted" }, LOCKED_HINT))
-                          : field("Compilation", compChoice,
-                                  comp.pending ? "Includes a pending change." : null));
-
-  return {
-    fields,
-    read() {
-      const out = {};
-      for (const [f, input, same] of inputs) {
-        const v = input.read();
-        /* A differing field left empty is kept, not removed. */
-        if (v !== null && (same || v !== "")) out[f] = v;
-      }
-      if (compChoice && compChoice.value !== compInitial) {
-        out.compilation = compChoice.value === "yes";
-      }
-      return out;
-    },
-  };
-}
-
-/*
- * One track's row of inputs. read() gives {field: value} of the changed
- * ones; missing() is true while its track or disc number is empty (both
- * are required). A missing disc number is filled in as 1/1.
- */
-function trackRow(t) {
-  const filled = (f) => f === "discnumber" && planned(t, f) === "" && !t.locked.includes(f);
-  const inputs = TRACK_FIELDS.map(([f, label]) =>
-    [f, tagInput(label, planned(t, f), { locked: t.locked.includes(f), pending: f in t.pending,
-                                         fill: filled(f) ? DISC_DEFAULT : null })]);
-  const hint = (f) => t.locked.includes(f) ? LOCKED_HINT
-                    : filled(f) ? "Filled in: the file has no disc number."
-                    : f in t.pending ? `Pending (file has ${showValue(f, t[f])})`
-                    : f === "tracknumber" && planned(t, f) === "" ? "Required: the file has none."
-                    : null;
-  const row = el("li", { class: "card track" },
-    el("header", {},
-      el("strong", { class: "path" }, t.file),
-      el("span", { class: "muted" },
-         [t.format.toUpperCase(), duration(t.seconds), t.pictures ? "cover" : "no cover"]
-           .join(" · "))),
-    el("div", { class: "track-fields" },
-      inputs.map(([f, input]) => field(LABELS[f], input, hint(f)))));
-  row.read = () => {
-    const out = {};
-    for (const [f, input] of inputs) {
-      const v = input.read();
-      if (v !== null) out[f] = v;
-    }
-    return out;
-  };
-  row.missing = () => inputs.some(([f, input]) =>
-    (f === "tracknumber" || f === "discnumber") && !input.disabled && input.value.trim() === "");
-  return row;
-}
-
-/*
- * What the request will do per track, as the server sees it:
- * [{track, changes: [[field, file value, new value, cancels]]}], where
- * cancels means the new value is the file's own (the pending change goes).
- */
-function plannedChanges(tracks, albumChanges, trackChanges) {
-  const plan = [];
-  for (const t of tracks) {
-    const changes = [];
-    const wanted = { ...albumChanges, ...(trackChanges.get(t.id) || {}) };
-    for (const [f, value] of Object.entries(wanted)) {
-      const v = f === "compilation" ? (value ? "1" : "") : value;
-      if (planned(t, f) === v) continue;
-      changes.push([f, t[f], v, (t[f] ?? "") === v]);
-    }
-    if (changes.length) plan.push({ track: t, changes });
-  }
-  return plan;
-}
-
-function changeLine(field, before, after, cancels) {
-  return el("li", {},
-    el("span", { class: "muted" }, `${LABELS[field]}: `),
-    el("span", { class: "old" }, showValue(field, before)),
-    " → ",
-    el("strong", {}, after === "" ? "(removed)" : showValue(field, after)),
-    cancels ? el("span", { class: "muted" }, " (the file's own value: cancels the pending change)")
-            : null);
-}
-
 async function albumPage(id) {
-  const [o, a] = await Promise.all([api("GET", "/api/music"),
-                                    api("GET", `/api/music/album?id=${id}`)]);
-  const album = albumInputs(a.tracks);
-  const rows = a.tracks.map(trackRow);
+  const [o, rowList, a] = await Promise.all([
+    api("GET", "/api/music"),
+    api("GET", `/api/music/albums?id=${id}`),
+    api("GET", `/api/music/album?id=${id}`),
+  ]);
+  const row = rowList[0];
+  const readOnly = Boolean(o.busy);
   const seconds = a.tracks.reduce((sum, t) => sum + t.seconds, 0);
   const covers = a.tracks.filter((t) => t.pictures > 0).length;
-  const pending = a.tracks.reduce((sum, t) => sum + Object.keys(t.pending).length, 0);
-  const title = fieldState(a.tracks, "album");
+  const missing = a.tracks.filter((t) => planned(t, "tracknumber") === "").length;
 
-  const review = el("div", { hidden: true });
-  const editor = el("div", { class: "stack" },
-    pending ? el("p", { class: "pending-note" },
-                 `${plural(pending, "change", "changes")} pending for this album: shown in ` +
-                 "the fields below, written when you write the changes.") : null,
-    el("section", { class: "raised stack" },
-      el("h2", {}, "Whole album"),
-      el("p", { class: "hint" }, "Set here, a tag is changed on every track of the album."),
-      el("div", { class: "album-fields" }, album.fields)),
-    el("section", { class: "section" },
-      el("header", {}, el("h2", {}, "Tracks ", el("span", { class: "count" }, a.tracks.length))),
-      el("ol", { class: "list" }, rows)),
-    o.busy
-      ? el("p", { class: "warn" }, "A scan or write is running; changes can be queued when " +
-                                   "it is done.")
-      : el("div", { class: "actions" },
-          el("button", { class: "btn go", type: "button", onclick: showReview }, "Review changes")));
+  /* After any change the page is drawn again (an album-wide composer also
+   * shows on the tracks), back on the same cell. */
+  const redraw = async (key) => {
+    await refresh();
+    refocusCell(app, key);
+  };
+  const albumTable = el("table", { class: "grid one" },
+    albumHead(), el("tbody", {}, albumRow(row, { readOnly, compact: true, onSaved: redraw })));
 
-  function showReview() {
-    const missing = a.tracks.filter((t, i) => rows[i].missing()).map((t) => t.file);
-    if (missing.length) {
-      setStatus(`Fill in the track and disc number of ${missing.slice(0, 3).join(", ")}` +
-                (missing.length > 3 ? ` and ${missing.length - 3} more` : "") +
-                ": every track needs both.", true);
-      return;
-    }
-    const albumChanges = album.read();
-    const trackChanges = new Map(rows.map((r, i) => [a.tracks[i].id, r.read()]));
-    const plan = plannedChanges(a.tracks, albumChanges, trackChanges);
-    if (plan.length === 0) {
-      setStatus("Nothing to change");
-      return;
-    }
-    const count = plan.reduce((sum, p) => sum + p.changes.length, 0);
-    const body = {
-      id: a.id,
-      album: albumChanges,
-      tracks: [...trackChanges].filter(([, c]) => Object.keys(c).length)
-                               .map(([trackId, c]) => ({ id: trackId, ...c })),
-    };
-    const back = () => {
-      review.hidden = true;
-      editor.hidden = false;
-    };
-    review.replaceChildren(form({ class: "raised stack" }, async () => {
-      const result = await api("POST", "/api/music/album/save", body);
-      const parts = [];
-      if (result.queued) parts.push(`queued ${plural(result.queued, "change", "changes")}`);
-      if (result.dropped) parts.push(`cancelled ${plural(result.dropped, "pending change", "pending changes")}`);
-      const text = parts.join(", ") || "nothing changed";
-      setStatus(text[0].toUpperCase() + text.slice(1) +
-                (result.queued ? ". Write them from Changes." : ""));
-      refresh();
-    },
-      el("h2", {}, `Review: ${plural(count, "change", "changes")} in ` +
-                   plural(plan.length, "file", "files")),
-      el("p", { class: "hint" },
-         "These changes are queued, not written yet. Write them from Changes; the files are " +
-         "checked before and after each change."),
-      el("ul", { class: "list" }, plan.map(({ track, changes }) =>
-        el("li", { class: "card" },
-          el("strong", { class: "path" }, track.file),
-          el("ul", { class: "changes" }, changes.map((c) => changeLine(...c)))))),
-      el("div", { class: "actions" },
-        el("button", { class: "btn go", type: "submit" },
-           `Queue ${plural(count, "change", "changes")}`),
-        el("button", { class: "btn", type: "button", onclick: back }, "Back to editing"))));
-    editor.hidden = true;
-    review.hidden = false;
-    review.querySelector("h2").scrollIntoView({ block: "start" });
-  }
+  const saveTrack = async (t, f, value) => {
+    const result = await api("POST", "/api/music/album/save",
+                             { id: a.id, album: {}, tracks: [{ id: t.id, [f]: value }] });
+    if (FIELDS[f].kind === "list") valueCache.delete(f);
+    setStatus(result.queued ? `Queued: ${FIELDS[f].label.toLowerCase()} of ${t.file}`
+                            : result.dropped ? "Back to the file's value" : "");
+    updatePendingCount().catch(handleError);
+    await redraw(`${t.id}:${f}`);
+  };
+
+  const trackRows = a.tracks.map((t) => el("tr",
+    { class: Object.keys(t.pending).length ? "track-edits" : "" },
+    ...TRACK_COLUMNS.map((f) => {
+      const value = planned(t, f);
+      return tagCell({
+        field: f,
+        shown: value === "" ? null : value,
+        mixed: false,
+        edited: f in t.pending,
+        locked: readOnly ? BUSY_LOCK : t.locked.includes(f) ? MULTI_LOCK : null,
+        missing: f === "tracknumber" && value === "",
+        key: `${t.id}:${f}`,
+        save: (v) => saveTrack(t, f, v),
+      });
+    }),
+    el("td", { class: "path muted" }, t.file),
+    el("td", { class: "num muted" }, duration(t.seconds))));
 
   return shell("albums", o,
     el("div", { class: "actions" }, navButton("All albums", "#/albums")),
     el("header", { class: "section album-head" },
-      el("h2", {}, title.same ? title.shared || "No album name" : "Several album names"),
+      el("h2", {}, row.next_mixed.includes("album") ? "Several album names"
+                                                     : row.next.album ?? "No album name"),
       el("p", { class: "muted path" }, a.dir || "(the top folder)"),
       el("p", { class: "muted" },
          `${plural(a.tracks.length, "track", "tracks")} · ${duration(seconds)} · ` +
          `cover in ${covers} of ${a.tracks.length}`)),
-    editor,
-    review);
+    readOnly ? el("p", { class: "warn" }, "A scan or write is running: editing is possible " +
+                                          "again when it is done.") : null,
+    legend(),
+    el("section", { class: "section" },
+      el("h2", {}, "Whole album"),
+      el("p", { class: "hint" }, "A value set here is queued for every track of the album."),
+      el("div", { class: "grid-wrap" }, albumTable)),
+    el("section", { class: "section" },
+      el("header", {}, el("h2", {}, "Tracks ", el("span", { class: "count" }, a.tracks.length))),
+      missing ? el("p", { class: "warn" },
+                   `${plural(missing, "track has", "tracks have")} no track number: fill ` +
+                   "them in before other changes to this album can be queued.") : null,
+      el("p", { class: "hint" }, "A missing disc number is queued as 1/1 with the album's " +
+                                 "next change."),
+      el("div", { class: "grid-wrap" },
+        el("table", { class: "grid tracks" },
+          el("thead", {}, el("tr", {},
+            ...TRACK_COLUMNS.map((f) => el("th", { scope: "col", class: `col-${f}` }, FIELDS[f].label)),
+            el("th", { scope: "col" }, "File"),
+            el("th", { scope: "col" }, "Length"))),
+          el("tbody", {}, trackRows)))));
 }
 
 /* ---- changes ------------------------------------------------------------ */
 
-async function cancelChanges(ids, what) {
-  const result = await api("POST", "/api/music/changes/cancel", { ids });
-  setStatus(`Cancelled ${plural(result.cancelled, "change", "changes")}${what}`);
-  refresh();
+/* A row of an album's values, not editable: now (files) or next (planned). */
+function valuesRow(a, which, extra) {
+  const values = a[which];
+  const mixed = a[`${which}_mixed`];
+  return el("tr", { class: which === "next" ? "new-values" : "old-values" },
+    el("th", { scope: "row", class: "which" }, which === "next" ? "New" : "Now"),
+    ...ALBUM_COLUMNS.map((f) => {
+      const changed = albumFieldEdited(a, f);
+      return el("td", { class: [`col-${f}`, changed && which === "next" ? "edited" : "",
+                                changed && which === "now" ? "replaced" : ""].filter(Boolean).join(" ") },
+        el("span", { class: mixed.includes(f) ? "cell-text empty" : "cell-text" },
+           mixed.includes(f) ? "mixed" : showValue(f, values[f])));
+    }),
+    ...extra);
 }
 
-/* A button that cancels the given pending changes (asks first if many). */
-function cancelButton(label, ids, what) {
-  const button = el("button", { class: "btn", type: "button", onclick: async () => {
-    if (ids.length > 1 && !sure(`Cancel ${plural(ids.length, "pending change", "pending changes")}${what}?`)) {
-      return;
-    }
-    button.disabled = true;
+/* One album with pending changes: two rows (now, new), a Tracks cell that
+ * can show the track changes underneath, and Discard. */
+function changedAlbum(a, trackChanges) {
+  const detail = el("tr", { class: "track-detail", hidden: true },
+    el("td", { colspan: String(ALBUM_COLUMNS.length + 3) },
+      el("ul", { class: "changes" }, trackChanges.map((c) =>
+        el("li", {},
+          el("span", { class: "path muted" }, `${c.path.split("/").pop()} · `),
+          el("span", { class: "muted" }, `${FIELDS[c.field].label}: `),
+          el("span", { class: "old" }, showValue(c.field, c.old)),
+          " → ",
+          el("strong", {}, c.new === "" ? "(removed)" : showValue(c.field, c.new)))))));
+  const toggle = trackChanges.length
+    ? el("button", { class: "btn", type: "button", "aria-expanded": "false", onclick: () => {
+        detail.hidden = !detail.hidden;
+        toggle.setAttribute("aria-expanded", String(!detail.hidden));
+        toggle.textContent = detail.hidden ? "Show" : "Hide";
+      } }, "Show")
+    : null;
+  const discard = el("button", { class: "btn danger", type: "button", onclick: async () => {
+    if (!sure(`Discard every pending change of ${a.next.album || a.dir}?`)) return;
+    discard.disabled = true;
     try {
-      await cancelChanges(ids, what);
+      const r = await api("POST", "/api/music/changes/discard", { album_id: a.id });
+      setStatus(`Discarded ${plural(r.cancelled, "change", "changes")}`);
+      refresh();
     } catch (err) {
       handleError(err);
-      button.disabled = false;
+      discard.disabled = false;
     }
-  } }, label);
-  return button;
-}
-
-/* The pending changes of one file. */
-function pendingCard(path, rows) {
-  const albumId = rows[0].album_id;
-  return el("li", { class: "card stack" },
-    el("strong", { class: "path" }, path),
-    el("ul", { class: "changes" },
-       rows.map((c) => changeLine(c.field, c.old, c.new, false))),
-    el("div", { class: "actions" },
-      albumId != null ? navButton("Open album", `#/album/${albumId}`) : null,
-      cancelButton(rows.length > 1 ? "Cancel these" : "Cancel", rows.map((c) => c.id),
-                   ` for ${path.split("/").pop()}`)));
+  } }, "Discard");
+  const tracksCell = el("td", { class: "col-tracks", rowspan: "2" },
+    trackChanges.length ? el("div", { class: "stack-tight" },
+                             el("span", { class: "track-count" },
+                                plural(trackChanges.length, "track change", "track changes")),
+                             toggle)
+                        : el("span", { class: "muted" }, "—"));
+  const actions = el("td", { class: "col-open", rowspan: "2" },
+    el("div", { class: "stack-tight" }, navButton("Open", `#/album/${a.id}`), discard));
+  return el("tbody", { class: albumRowClass(a) },
+    valuesRow(a, "now", [tracksCell, actions]),
+    valuesRow(a, "next", []),
+    detail);
 }
 
 const STATE_TEXT = { done: "Done", warning: "Done, with a warning", failed: "Failed" };
@@ -532,23 +778,28 @@ function historyItem(c) {
       el("span", { class: tone ? `due ${tone}` : "muted" }, STATE_TEXT[c.state]),
       el("span", { class: "muted" }, c.finished ? showTime(c.finished) : "")),
     el("strong", { class: "path" }, c.path),
-    el("ul", { class: "changes" }, changeLine(c.field, c.old, c.new, false)),
-    c.note ? el("p", { class: c.state === "failed" ? "note failed" : "note" }, c.note) : null);
+    el("ul", { class: "changes" },
+      el("li", {},
+        el("span", { class: "muted" }, `${FIELDS[c.field].label}: `),
+        el("span", { class: "old" }, showValue(c.field, c.old)),
+        " → ",
+        el("strong", {}, c.new === "" ? "(removed)" : showValue(c.field, c.new)))),
+    c.note ? el("p", { class: "note" }, c.note) : null);
 }
 
 async function changesPage() {
-  const [o, ch] = await Promise.all([api("GET", "/api/music"),
-                                     api("GET", "/api/music/changes")]);
-  const byFile = new Map();
-  for (const c of ch.pending) {
-    if (!byFile.has(c.path)) byFile.set(c.path, []);
-    byFile.get(c.path).push(c);
-  }
+  const [o, ch, albums] = await Promise.all([api("GET", "/api/music"),
+                                             api("GET", "/api/music/changes"),
+                                             api("GET", "/api/music/albums")]);
+  const changed = albums.filter((a) => a.album_pending || a.track_pending);
+  const trackChanges = (albumId) => ch.pending.filter((c) =>
+    c.album_id === albumId && !ALBUM_COLUMNS.includes(c.field));
+  const files = new Set(ch.pending.map((c) => c.path)).size;
   const write = serviceForm("/api/music/write",
     `Writes ${plural(ch.pending.length, "change", "changes")} into ` +
-    `${plural(byFile.size, "file", "files")}. Each file is checked first (the value it was ` +
+    `${plural(files, "file", "files")}. Each file is checked first (the value it was ` +
     "queued against, a valid new value) and read back after; the result of each change is " +
-    "listed below.",
+    "listed in the history.",
     "Write changes", "Writing started");
   const text = el("p", {}, busyText(o));
   const panel = el("section", { class: "card stack" },
@@ -558,21 +809,25 @@ async function changesPage() {
                       "The music folder is not available (is the drive mounted?): nothing can " +
                       "be written now.") : null,
     ch.pending.length === 0
-      ? el("p", { class: "muted" }, "Nothing is queued. Change tags on an album to queue changes.")
+      ? el("p", { class: "muted" }, "Nothing is queued. Edit albums to queue changes.")
       : o.busy || !o.available ? null
       : el("div", { class: "actions" },
           el("button", { class: "btn go", type: "button", onclick: () => write.open() },
-             "Write changes…"),
-          cancelButton("Cancel all", ch.pending.map((c) => c.id), "")),
+             "Write changes…")),
     write);
   watchBusy(o, panel, text);
 
   return shell("changes", o,
     panel,
-    byFile.size
+    changed.length
       ? el("section", { class: "section" },
-          el("ul", { class: "list cols" },
-             [...byFile].map(([path, rows]) => pendingCard(path, rows))))
+          legend(),
+          el("div", { class: "grid-wrap" },
+            el("table", { class: "grid changes-grid" },
+              albumHead(el("th", { scope: "col" }, el("span", { class: "visually-hidden" }, "Values")),
+                        el("th", { scope: "col" }, "Tracks"),
+                        el("th", { scope: "col" }, el("span", { class: "visually-hidden" }, "Actions"))),
+              changed.map((a) => changedAlbum(a, trackChanges(a.id))))))
       : null,
     el("section", { class: "section" },
       el("header", {}, el("h2", {}, "History ", el("span", { class: "count" }, ch.history.length))),

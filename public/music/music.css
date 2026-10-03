@@ -1,53 +1,158 @@
-/* Music app. Shared look and parts: /style.css. */
+/* Music app. Shared look and parts: /style.css.
+ *
+ * Colour in the tables, all of it "queued, not written yet":
+ *   lavender stripe  = the album has album-wide changes
+ *   sky stripe       = some of its tracks have changes
+ *   lavender ring    = this value will change
+ * Rose and peach keep their meaning: failed and warning in the history,
+ * a missing track number. */
 
 /* Folder and file names: long, without spaces to break at. */
 .path { overflow-wrap: anywhere; }
 .warn { color: var(--peach); }
-
-.album-card { display: grid; gap: 0.35rem; align-content: start; }
-.album-card .actions { margin-top: 0.4rem; }
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.stack-tight { display: grid; gap: 0.4rem; justify-items: start; }
 
 .album-head { gap: 0.3rem; }
 .album-head > h2 { font-size: 1.5rem; }
 
-/* Album-wide fields: two per row when there is room. */
-.album-fields {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 1fr));
-  gap: var(--gap);
+/* ---- tables ------------------------------------------------------------- */
+
+/* Wide tables scroll sideways inside the page, never the page itself. */
+.grid-wrap {
+  overflow-x: auto;
+  border-radius: 14px;
+  border: 1px solid var(--edge);
+  background: var(--panel);
+}
+.grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.grid th, .grid td {
+  padding: 0.3rem 0.4rem;
+  text-align: left;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--edge);
+}
+.grid thead th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  color: var(--muted);
+  font-weight: 400;
+  white-space: nowrap;
+}
+.grid .num { text-align: right; white-space: nowrap; }
+.grid .col-dir { min-width: 12rem; font-size: 0.8rem; }
+.grid .col-album, .grid .col-title { min-width: 12rem; }
+.grid .col-albumartist, .grid .col-artist, .grid .col-genre, .grid .col-composer { min-width: 10rem; }
+.grid .col-date, .grid .col-compilation { min-width: 6rem; }
+.grid .col-discnumber, .grid .col-tracknumber { min-width: 4.5rem; }
+
+/* A row's stripe on its first cell: album-wide changes, track changes. */
+.grid tr.album-edits > :first-child, .grid tbody.album-edits > tr > :first-child {
+  box-shadow: inset 5px 0 0 var(--lavender);
+}
+.grid tr.track-edits > :first-child, .grid tbody.track-edits > tr > :first-child {
+  box-shadow: inset 5px 0 0 var(--sky);
+}
+.grid tr.album-edits.track-edits > :first-child,
+.grid tbody.album-edits.track-edits > tr > :first-child {
+  box-shadow: inset 5px 0 0 var(--lavender), inset 10px 0 0 var(--sky);
 }
 
-.track { display: grid; gap: 0.7rem; }
-.track > header {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 0.25rem 1rem;
+/* A cell: pressed into the surface, like an input; pressing it edits. */
+.cell {
+  display: block;
+  width: 100%;
+  min-height: 2rem;
+  padding: 0.35rem 0.6rem;
+  border: 0;
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: inset 2px 2px 5px var(--shade), inset -2px -2px 5px var(--light);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
 }
-/* Disc and number narrow, title and artist wide. */
-.track-fields {
+.cell:disabled { cursor: default; opacity: 0.75; }
+.cell.empty { color: var(--muted); font-style: italic; }
+.cell-input { min-height: 2rem; padding: 0.35rem 0.6rem; border-radius: 10px; }
+td.edited .cell, td.edited .cell-text, .mark.edited-cell {
+  box-shadow: inset 0 0 0 2px var(--lavender);
+}
+td.missing .cell { color: var(--rose); font-style: italic; }
+
+/* The changes table: the files' values, then the new ones underneath. */
+.changes-grid .which { color: var(--muted); font-weight: 400; width: 3rem; }
+.changes-grid .old-values td { border-bottom: 0; }
+.changes-grid tbody { border-bottom: 2px solid var(--edge); }
+.cell-text {
+  display: block;
+  padding: 0.35rem 0.6rem;
+  border-radius: 10px;
+  overflow-wrap: anywhere;
+}
+.cell-text.empty { color: var(--muted); font-style: italic; }
+.changes-grid td.replaced .cell-text { color: var(--muted); text-decoration: line-through; }
+.track-count { color: var(--sky); }
+.track-detail td { background: var(--surface); }
+
+/* What the colours mean. */
+.legend { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center; }
+.mark { padding: 0.1rem 0.6rem; border-radius: 8px; }
+.mark.album-edits { box-shadow: inset 5px 0 0 var(--lavender); padding-left: 0.9rem; }
+.mark.track-edits { box-shadow: inset 5px 0 0 var(--sky); padding-left: 0.9rem; }
+
+/* ---- the list popup ------------------------------------------------------ */
+
+.popover.floating {
+  position: fixed;
+  top: auto;
+  left: auto;
+  min-width: min(20rem, calc(100vw - 1rem));
+  max-width: min(24rem, calc(100vw - 1rem));
   display: grid;
-  grid-template-columns: 5rem 5rem minmax(0, 1fr) minmax(0, 1fr);
-  gap: 0.75rem;
-  align-items: start;
+  gap: 0.6rem;
 }
+.chips { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.chip.value {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  background: var(--lavender);
+  color: var(--ink);
+  padding: 0.15rem 0.2rem 0.15rem 0.7rem;
+}
+.chip-x {
+  border: 0;
+  border-radius: 999px;
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 700;
+  padding: 0 0.45rem;
+  cursor: pointer;
+}
+.chip-x:focus-visible { outline: 2px solid var(--ink); }
+.suggestions { max-height: 12rem; }
+.suggestions:empty { display: none; }
+
+/* ---- history ------------------------------------------------------------- */
 
 .changes { margin: 0.5rem 0 0; padding-left: 1.2rem; display: grid; gap: 0.2rem; }
 .changes .old { text-decoration: line-through; color: var(--muted); }
-
-@media (max-width: 40rem) {
-  .track-fields { grid-template-columns: 5rem 5rem; }
-  .track-fields > .field:nth-child(n + 3) { grid-column: 1 / -1; }
-}
-
-@media (max-width: 21rem) {
-  .track-fields { grid-template-columns: 1fr 1fr; }
-}
-
-/* Queued, not yet written: a lavender line on the field and a lavender note. */
-input.pending { box-shadow: var(--pressed), inset 0 0 0 1px var(--lavender); }
-.pending-note { color: var(--lavender); }
-
 .history > header {
   display: flex;
   flex-wrap: wrap;
@@ -55,3 +160,16 @@ input.pending { box-shadow: var(--pressed), inset 0 0 0 1px var(--lavender); }
   gap: 0.25rem 1rem;
 }
 .note { overflow-wrap: anywhere; color: var(--muted); }
+
+@media (max-width: 21rem) {
+  /* The popup is a sheet along the bottom, like the other popovers. */
+  .popover.floating {
+    left: 0.5rem;
+    right: 0.5rem;
+    bottom: 0.5rem;
+    min-width: 0;
+    max-width: none;
+  }
+  .grid { font-size: 0.8rem; }
+  .grid .col-album, .grid .col-title, .grid .col-dir { min-width: 9rem; }
+}
