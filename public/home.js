@@ -18,8 +18,20 @@ async function plantsSummary() {
   ];
 }
 
+/* Pills for the music library: albums, and a scan if one runs. */
+async function musicSummary() {
+  const o = await api("GET", "/api/music");
+  if (!o.configured) return [el("span", { class: "pill" }, "Not set up")];
+  return [
+    el("span", { class: "pill" }, plural(o.albums, "album", "albums")),
+    o.scan_state === "running" ? el("span", { class: "pill" }, "Scanning") : null,
+    o.available ? null : el("span", { class: "pill today" }, "Folder missing"),
+  ];
+}
+
 const APPS = [
   { name: "Plants", href: "/plants/", summary: plantsSummary },
+  { name: "Music", href: "/music/", summary: musicSummary },
 ];
 
 async function homePage() {

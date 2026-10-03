@@ -1,0 +1,45 @@
+/* Music app. Shared look and parts: /style.css. */
+
+/* Folder and file names: long, without spaces to break at. */
+.path { overflow-wrap: anywhere; }
+.warn { color: var(--peach); }
+
+.album-card { display: grid; gap: 0.35rem; align-content: start; }
+.album-card .actions { margin-top: 0.4rem; }
+
+.album-head { gap: 0.3rem; }
+.album-head > h2 { font-size: 1.5rem; }
+
+/* Album-wide fields: two per row when there is room. */
+.album-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 16rem), 1fr));
+  gap: var(--gap);
+}
+
+.track { display: grid; gap: 0.7rem; }
+.track > header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.25rem 1rem;
+}
+/* Disc and number narrow, title and artist wide. */
+.track-fields {
+  display: grid;
+  grid-template-columns: 5rem 5rem minmax(0, 1fr) minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: start;
+}
+
+.changes { margin: 0.5rem 0 0; padding-left: 1.2rem; display: grid; gap: 0.2rem; }
+.changes .old { text-decoration: line-through; color: var(--muted); }
+
+@media (max-width: 40rem) {
+  .track-fields { grid-template-columns: 5rem 5rem; }
+  .track-fields > .field:nth-child(n + 3) { grid-column: 1 / -1; }
+}
+
+@media (max-width: 21rem) {
+  .track-fields { grid-template-columns: 1fr 1fr; }
+}

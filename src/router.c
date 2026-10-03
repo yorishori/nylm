@@ -37,6 +37,12 @@ static const struct route routes[] = {
     { "POST",   "/api/plants/log/add",        plants_log_add,      0 },
     { "POST",   "/api/plants/log/update",     plants_log_update,   0 },
     { "POST",   "/api/plants/log/delete",     plants_log_delete,   0 },
+
+    { "GET",    "/api/music",                 music_overview,      0 },
+    { "GET",    "/api/music/albums",          music_albums,        0 },
+    { "GET",    "/api/music/album",           music_album,         0 },
+    { "POST",   "/api/music/album/save",      music_album_save,    0 },
+    { "POST",   "/api/music/scan",            music_scan_start,    0 },
 };
 
 int router_find(const struct route *table, size_t n, const char *method, const char *path)

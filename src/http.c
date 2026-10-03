@@ -259,7 +259,11 @@ const char *http_status_text(int status)
     switch (status) {
     case 200: return "OK";
     case 201: return "Created";
+    case 202: return "Accepted";
     case 204: return "No Content";
+    case 403: return "Forbidden";
+    case 422: return "Unprocessable Content";
+    case 503: return "Service Unavailable";
     case 400: return "Bad Request";
     case 401: return "Unauthorized";
     case 404: return "Not Found";

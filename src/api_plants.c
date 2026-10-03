@@ -107,33 +107,6 @@ static int archived_state(const char *sql, long id)
 #define PLANT_STATE "SELECT archived FROM plants WHERE id = ?"
 #define TYPE_STATE  "SELECT archived FROM care_types WHERE id = ?"
 
-/*
- * A JSON object of the first ncols columns of the current row, keyed by
- * column name: integers, text or null. NULL when out of memory.
- */
-static cJSON *row_object(sqlite3_stmt *st, int ncols)
-{
-    cJSON *obj = cJSON_CreateObject();
-    for (int i = 0; obj != NULL && i < ncols; i++) {
-        const char *key = sqlite3_column_name(st, i);
-        cJSON *item;
-        switch (sqlite3_column_type(st, i)) {
-        case SQLITE_INTEGER:
-            /* ids and small numbers: exact in a double */
-            item = cJSON_AddNumberToObject(obj, key, (double)sqlite3_column_int64(st, i));
-            break;
-        case SQLITE_TEXT:
-            item = cJSON_AddStringToObject(obj, key, (const char *)sqlite3_column_text(st, i));
-            break;
-        default:
-            item = cJSON_AddNullToObject(obj, key);
-        }
-        if (item == NULL)
-            obj = NULL; /* the arena frees what was built */
-    }
-    return obj;
-}
-
 /* Adds day as "YYYY-MM-DD", or null for CARE_NEVER. NULL when out of memory. */
 static cJSON *add_date(cJSON *obj, const char *key, long day)
 {
@@ -315,7 +288,7 @@ static int add_rows(cJSON *array, sqlite3_stmt *st)
         ncols > 0 && strcmp(sqlite3_column_name(st, ncols - 1), "archived") == 0;
     int rc;
     while ((rc = sqlite3_step(st)) == SQLITE_ROW) {
-        cJSON *obj = row_object(st, last_is_archived ? ncols - 1 : ncols);
+        cJSON *obj = json_row(st, last_is_archived ? ncols - 1 : ncols);
         if (obj == NULL || !cJSON_AddItemToArray(array, obj) ||
             (last_is_archived &&
              cJSON_AddBoolToObject(obj, "archived", sqlite3_column_int(st, ncols - 1)) == NULL)) {

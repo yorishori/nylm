@@ -185,6 +185,29 @@ const char *json_get_int(const cJSON *obj, const char *key, long min, long max, 
     return field_error(key, what);
 }
 
+cJSON *json_row(sqlite3_stmt *st, int ncols)
+{
+    cJSON *obj = cJSON_CreateObject();
+    for (int i = 0; obj != NULL && i < ncols; i++) {
+        const char *key = sqlite3_column_name(st, i);
+        cJSON *item;
+        switch (sqlite3_column_type(st, i)) {
+        case SQLITE_INTEGER:
+            /* ids and small numbers: exact in a double */
+            item = cJSON_AddNumberToObject(obj, key, (double)sqlite3_column_int64(st, i));
+            break;
+        case SQLITE_TEXT:
+            item = cJSON_AddStringToObject(obj, key, (const char *)sqlite3_column_text(st, i));
+            break;
+        default:
+            item = cJSON_AddNullToObject(obj, key);
+        }
+        if (item == NULL)
+            obj = NULL; /* the arena frees what was built */
+    }
+    return obj;
+}
+
 const char *json_get_bool(const cJSON *obj, const char *key, int *out)
 {
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);

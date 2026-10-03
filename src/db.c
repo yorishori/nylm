@@ -9,6 +9,7 @@
 
 sqlite3 *core_db;
 sqlite3 *plants_db;
+sqlite3 *music_db;
 
 /* Each app: its folder and file name under the data folder, its schema, and
  * the connection its code uses. */
@@ -20,6 +21,7 @@ static const struct {
 } apps[] = {
     { "core",   core_migrations,   &core_migration_count,   &core_db },
     { "plants", plants_migrations, &plants_migration_count, &plants_db },
+    { "music",  music_migrations,  &music_migration_count,  &music_db },
 };
 
 #define NAPPS (sizeof apps / sizeof apps[0])

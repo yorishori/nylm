@@ -22,6 +22,11 @@ extern const char *const plants_migrations[];
 extern const int plants_migration_count;
 extern sqlite3 *plants_db;
 
+/* music: cache of the music library's tags, scans, audit log. */
+extern const char *const music_migrations[];
+extern const int music_migration_count;
+extern sqlite3 *music_db;
+
 /*
  * Opens every app's database under data_dir, which must already exist (it
  * lives on the data drive: missing means not mounted). Creates missing app

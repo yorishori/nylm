@@ -31,6 +31,9 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 | `src/router.c`    | route table: method, path, handler, login required       |
 | `src/api_*.c`     | handlers, one file per feature                           |
 | `src/care.c`      | plant care dates: when a care rule is next due           |
+| `src/music.c`     | music folder, `nylm music-scan`                          |
+| `src/tags.c`      | music file tags (TagLib): read, safe write               |
+| `src/action.c`    | runs root actions through `sudo -n`                      |
 | `src/auth.c`      | password hashing (Argon2id), sessions                    |
 | `src/db.c`        | SQLite connection, applies migrations                    |
 | `src/migrations.c`| the schema, one appended entry per change                |
@@ -51,6 +54,7 @@ Each app has its own subfolder and SQLite database in it:
 ```
 $NYLM_DATA/core/core.db       login password and sessions
 $NYLM_DATA/plants/plants.db   plant care
+$NYLM_DATA/music/music.db     music tags cache, scans, audit log
 ```
 
 nylm refuses to start if the folder does not exist. In an empty folder it
@@ -75,6 +79,33 @@ mint, teal, sky, periwinkle, lavender, orchid). In the app a plant's colour
 is the stripe on its card and the dot before its name, a care type's colour
 is its chip, and only late (rose) and today (peach) colour the due label.
 
+## Music
+
+Album-first tag editor for the music folder `NYLM_MUSIC` (`src/api_music.c`,
+API under `/api/music`). The files are the truth: `music.db` only caches
+their tags. An album is a folder; its tracks are the `.mp3` and `.flac`
+files in it. Dot files are skipped and symlinks never followed.
+
+`nylm music-scan` reads new and changed files (size or mtime) into the
+cache and drops files that are gone. It runs as its own process: by hand,
+or from the web app (password again) through the root action `music-scan`,
+which starts `nylm-music-scan.service`. One scan at a time
+(`$NYLM_DATA/music/scan.lock`).
+
+Editing changes album-wide tags (album, album artist, genre, date,
+compilation) and per-track ones (title, artist, track and disc number).
+The page shows every change before writing. Then, for every file that
+changes: copy it next to itself (`.nylm-tmp-*`), edit the copy with
+TagLib, read it back and check that exactly the asked tags changed and the
+rest (other tags, pictures, audio) did not; only when every file of the
+album passes are the copies renamed over the originals. A file changed
+since the last scan, or a tag with several values, is refused. Each save
+is in the `audit` table: client, files, old and new values, result.
+
+TagLib saves MP3 tags as ID3v2.4 (an ID3v2.3 tag is upgraded); the ID3v1
+tag it adds is removed again unless the file had one. Replaced files keep
+their mode and, if nylm may set it, their group; they are owned by nylm.
+
 ## Commands
 
 ```sh
@@ -83,9 +114,12 @@ make test                         # unit + end-to-end tests
 sudo deploy/install.sh            # on the server: install or update
 journalctl -u nylm -f             # server logs
 sudo -u nylm env NYLM_DATA=/mnt/data/nylm nylm set-password
+sudo systemctl start nylm-music-scan   # scan the music folder
+journalctl -u nylm-music-scan          # scan output
 NYLM_DATA=dev-data ./nylm-debug set-password   # password for make run
 ```
 
 Configuration is environment variables; `nylm --help` lists them.
-Build needs `gcc`, `make` and the system libraries `sqlite` (3.38+), `cjson`
-and `openssl` (3.2+), linked dynamically: `pacman -Syu` brings their fixes.
+Build needs `gcc`, `make` and the system libraries `sqlite` (3.38+), `cjson`,
+`openssl` (3.2+) and `taglib` (2.0+), linked dynamically: `pacman -Syu`
+brings their fixes.

@@ -42,7 +42,8 @@ iface_cidr() {
 }
 
 step "packages"
-pacman -S --needed --noconfirm gcc make openssl sqlite cjson sudo curl iproute2
+pacman -S --needed --noconfirm gcc make openssl sqlite cjson taglib sudo curl iproute2 \
+    util-linux
 
 step "build and test"
 as_user make release
@@ -68,6 +69,7 @@ if [ -d deploy/actions ]; then
     done
 fi
 install -m 644 deploy/nylm.service /etc/systemd/system/nylm.service
+install -m 644 deploy/nylm-music-scan.service /etc/systemd/system/nylm-music-scan.service
 
 step "sudo rule"
 tmp=$(mktemp)
@@ -120,6 +122,9 @@ else
 NYLM_DATA=$NYLM_DATA
 NYLM_PUBLIC=$SHARE/public
 NYLM_PORT=$PORT
+# Music library folder for the music app; user nylm must be able to read
+# and write it. Leave it commented out to not use the music app.
+#NYLM_MUSIC=/mnt/data/music
 # Addresses to listen on: WireGuard and LAN only, never 0.0.0.0.
 NYLM_LISTEN="${wg%/*} ${lan%/*}"
 # Client subnets accepted; everything else is closed immediately.
@@ -128,6 +133,19 @@ EOF
     chmod 644 "$CONF"
     echo "wrote $CONF:"
     sed 's/^/    /' "$CONF"
+fi
+
+step "music folder"
+# shellcheck disable=SC1090
+NYLM_MUSIC=$(. "$CONF" && printf '%s' "${NYLM_MUSIC:-}")
+if [ -z "$NYLM_MUSIC" ]; then
+    echo "NYLM_MUSIC is not set in $CONF: the music app is off"
+elif sudo -u nylm test -d "$NYLM_MUSIC" -a -r "$NYLM_MUSIC" -a -w "$NYLM_MUSIC" -a -x "$NYLM_MUSIC"; then
+    echo "music: $NYLM_MUSIC"
+else
+    # Not fatal: the folder may be on a drive that is not mounted right now.
+    echo "warning: user nylm can not read and write $NYLM_MUSIC; the music app" \
+         "will show it as not available"
 fi
 
 if [ ! -f "$NYLM_DATA/core/core.db" ]; then

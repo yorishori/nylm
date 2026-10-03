@@ -2,6 +2,7 @@
 #define JSON_H
 
 #include <cjson/cJSON.h>
+#include <sqlite3.h>
 
 #include "http.h"
 
@@ -39,6 +40,12 @@ const char *json_get_int(const cJSON *obj, const char *key, long min, long max, 
 
 /* Reads obj[key] as true/false into *out (1/0). NULL or an error message. */
 const char *json_get_bool(const cJSON *obj, const char *key, int *out);
+
+/*
+ * A JSON object of the first ncols columns of st's current row, keyed by
+ * column name: integers, text or null. NULL when out of memory.
+ */
+cJSON *json_row(sqlite3_stmt *st, int ncols);
 
 /* 1 if s is valid UTF-8 with no control characters (but '\n' if multiline). */
 int text_valid(const char *s, int multiline);

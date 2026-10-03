@@ -92,3 +92,59 @@ const char *const plants_migrations[] = {
 };
 
 const int plants_migration_count = sizeof plants_migrations / sizeof plants_migrations[0];
+
+const char *const music_migrations[] = {
+    /* 1: the music library. The files are the truth: albums and tracks are a
+     * cache of them, filled by `nylm music-scan` and refreshed after every
+     * edit; deleting them loses nothing. An album is a folder. Paths are
+     * relative to NYLM_MUSIC. Tag columns hold the file's value (NULL when
+     * absent); a tag with several values holds them joined by "; " and has
+     * its bit (1 << field, see src/tags.h) set in multi.
+     * scans and audit are not a cache: they record what happened. */
+    "CREATE TABLE albums ("
+    "    id  INTEGER PRIMARY KEY,"
+    "    dir TEXT    NOT NULL UNIQUE"
+    ") STRICT;"
+    "CREATE TABLE tracks ("
+    "    id          INTEGER PRIMARY KEY,"
+    "    album_id    INTEGER NOT NULL REFERENCES albums(id),"
+    "    path        TEXT    NOT NULL UNIQUE,"
+    "    format      TEXT    NOT NULL CHECK (format IN ('mp3', 'flac')),"
+    "    size        INTEGER NOT NULL,"
+    "    mtime       INTEGER NOT NULL," /* ns */
+    "    seconds     INTEGER NOT NULL,"
+    "    pictures    INTEGER NOT NULL,"
+    "    multi       INTEGER NOT NULL,"
+    "    title       TEXT,"
+    "    artist      TEXT,"
+    "    album       TEXT,"
+    "    albumartist TEXT,"
+    "    genre       TEXT,"
+    "    date        TEXT,"
+    "    tracknumber TEXT,"
+    "    discnumber  TEXT,"
+    "    compilation TEXT,"
+    "    scan        INTEGER NOT NULL" /* the last scan that saw the file */
+    ") STRICT;"
+    "CREATE INDEX tracks_by_album ON tracks (album_id);"
+    "CREATE TABLE scans ("
+    "    id       INTEGER PRIMARY KEY,"
+    "    started  INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "    finished INTEGER,"
+    "    files    INTEGER NOT NULL DEFAULT 0," /* music files found */
+    "    parsed   INTEGER NOT NULL DEFAULT 0," /* new or changed: tags read */
+    "    failed   INTEGER NOT NULL DEFAULT 0," /* unreadable files and folders */
+    "    ok       INTEGER CHECK (ok IN (0, 1))"
+    ") STRICT;"
+    /* Every change nylm makes to the library, or tries to. */
+    "CREATE TABLE audit ("
+    "    id     INTEGER PRIMARY KEY,"
+    "    at     INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "    client TEXT    NOT NULL," /* IP address */
+    "    action TEXT    NOT NULL,"
+    "    detail TEXT    NOT NULL," /* JSON */
+    "    result TEXT    NOT NULL"
+    ") STRICT;",
+};
+
+const int music_migration_count = sizeof music_migrations / sizeof music_migrations[0];

@@ -27,4 +27,11 @@ void plants_log_add(struct request *req, struct response *res);
 void plants_log_update(struct request *req, struct response *res);
 void plants_log_delete(struct request *req, struct response *res);
 
+/* api_music.c */
+void music_overview(struct request *req, struct response *res);
+void music_albums(struct request *req, struct response *res);
+void music_album(struct request *req, struct response *res);
+void music_album_save(struct request *req, struct response *res);
+void music_scan_start(struct request *req, struct response *res);
+
 #endif

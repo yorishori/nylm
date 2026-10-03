@@ -137,6 +137,7 @@ static void serve(int client, const char *ip)
         req.method = "-";
         req.path = "-";
     } else {
+        req.client = ip;
         handle(&req, &res);
     }
 

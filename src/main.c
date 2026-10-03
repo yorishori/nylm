@@ -12,6 +12,7 @@
 #include "auth.h"
 #include "db.h"
 #include "json.h"
+#include "music.h"
 #include "server.h"
 
 #define ARENA_SIZE (16 * 1024 * 1024)
@@ -167,10 +168,12 @@ static void usage(void)
     fprintf(stderr,
             "usage: nylm                 run the server\n"
             "       nylm set-password    set the login password (reads stdin)\n"
+            "       nylm music-scan      read new and changed music files into the cache\n"
             "\n"
             "environment (defaults in brackets):\n"
             "  NYLM_DATA    (required)     data folder; must exist. Each app gets its own\n"
             "                              subfolder and database in it\n"
+            "  NYLM_MUSIC   (none)         music library folder; unset: no music app\n"
             "  NYLM_PUBLIC  [public]       static files directory\n"
             "  NYLM_PORT    [8080]         port to listen on\n"
             "  NYLM_LISTEN  [127.0.0.1]    addresses to listen on, e.g. \"10.0.0.1 192.168.1.5\"\n"
@@ -183,15 +186,27 @@ int main(int argc, char **argv)
         usage();
         return 0;
     }
-    if (argc > 2 || (argc == 2 && strcmp(argv[1], "set-password") != 0)) {
+    const char *cmd = argc == 2 ? argv[1] : "";
+    if (argc > 2 || (argc == 2 && strcmp(cmd, "set-password") != 0 &&
+                     strcmp(cmd, "music-scan") != 0)) {
         usage();
         return 2;
     }
 
     if (db_open_all(getenv("NYLM_DATA")) != 0)
         return 1;
+    if (music_configure(getenv("NYLM_MUSIC"), getenv("NYLM_DATA")) != 0) {
+        db_close_all();
+        return 1;
+    }
 
-    int rc = argc == 2 ? cmd_set_password() : cmd_serve();
+    int rc;
+    if (strcmp(cmd, "set-password") == 0)
+        rc = cmd_set_password();
+    else if (strcmp(cmd, "music-scan") == 0)
+        rc = arena_init(ARENA_SIZE) == 0 ? music_scan() : 1;
+    else
+        rc = cmd_serve();
     db_close_all();
     return rc;
 }

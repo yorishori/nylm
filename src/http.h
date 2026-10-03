@@ -25,6 +25,7 @@ struct request {
     size_t content_length;
     char *body;        /* NUL-terminated, NULL if no body */
     size_t body_len;
+    const char *client; /* the client's IP address, for audit logs */
 };
 
 struct response {

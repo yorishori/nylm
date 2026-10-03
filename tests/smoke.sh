@@ -110,12 +110,43 @@ else PASSED=$((PASSED + 1)); fi
 mkdir "$TMP/data"
 echo 'smoke test password' | "$BIN" set-password 2>/dev/null ||
     { echo "set-password failed"; exit 1; }
-for f in core/core.db plants/plants.db; do
+for f in core/core.db plants/plants.db music/music.db; do
     if [ -f "$TMP/data/$f" ]; then PASSED=$((PASSED + 1)); else
         FAILED=$((FAILED + 1)); echo "FAIL: $f not created"; fi
 done
 if [ "$(stat -c %a "$TMP/data/plants")" = 700 ]; then PASSED=$((PASSED + 1)); else
     FAILED=$((FAILED + 1)); echo "FAIL: app folder is not mode 700"; fi
+
+# A music library from the test files: two albums (folders), one track with
+# two genres, a file that is not audio, a hidden folder and a symlink.
+M="$TMP/music"
+mkdir -p "$M/Artist/Album" "$M/Artist/Multi" "$M/.hidden"
+cp tests/data/tagged.mp3 "$M/Artist/Album/01.mp3"
+cp tests/data/tagged.flac "$M/Artist/Album/02.flac"
+cp tests/data/multi.flac "$M/Artist/Multi/01.flac"
+cp tests/data/tagged.mp3 "$M/.hidden/hidden.mp3"
+echo "not audio" > "$M/Artist/Album/03.mp3"
+ln -s "$M/Artist/Album/01.mp3" "$M/Artist/link.mp3"
+export NYLM_MUSIC="$M"
+
+# scan WANT DESCRIPTION [env-args]: `nylm music-scan` exits with WANT (0 or 1).
+scan() {
+    want=$1 desc=$2
+    shift 2
+    if env "$@" "$BIN" music-scan >"$TMP/scan.log" 2>&1; then got=0; else got=1; fi
+    if [ "$got" = "$want" ]; then PASSED=$((PASSED + 1)); else
+        FAILED=$((FAILED + 1)); echo "FAIL: $desc: exit $got: $(cat "$TMP/scan.log")"; fi
+}
+scan 1 "music-scan without NYLM_MUSIC" NYLM_MUSIC=
+scan 1 "music-scan, NYLM_MUSIC /"      NYLM_MUSIC=/
+scan 1 "music-scan, relative"          NYLM_MUSIC=music
+scan 1 "music-scan, missing folder"    NYLM_MUSIC="$TMP/nope"
+scan 0 "music-scan"
+grep -q "4 files, 3 read, 0 removed, 1 failed" "$TMP/scan.log" &&
+    PASSED=$((PASSED + 1)) || { FAILED=$((FAILED + 1)); echo "FAIL: scan counts: $(cat "$TMP/scan.log")"; }
+scan 0 "music-scan again"
+grep -q "4 files, 0 read" "$TMP/scan.log" &&
+    PASSED=$((PASSED + 1)) || { FAILED=$((FAILED + 1)); echo "FAIL: rescan re-read files: $(cat "$TMP/scan.log")"; }
 
 # ---- API and static files (defaults: 127.0.0.1, allow 127.0.0.0/8) ---------
 
@@ -130,6 +161,9 @@ expect 200 "home.js"            "$B/home.js"
 expect 200 "plants page"        "$B/plants/"
 expect 200 "plants.js"          "$B/plants/plants.js"
 expect 200 "plants.css"         "$B/plants/plants.css"
+expect 200 "music page"         "$B/music/"
+expect 200 "music.js"           "$B/music/music.js"
+expect 200 "music.css"          "$B/music/music.css"
 expect 404 "plants without /"   "$B/plants"
 expect 404 "old app.js gone"    "$B/app.js"
 expect 404 "missing file"       "$B/nope.html"
@@ -374,6 +408,133 @@ expect_body "{\"plant_id\":1,\"plant\":\"Monty II\",\"plant_color\":\"teal\",\"c
 if grep -q '"plant_id":2' "$TMP/body"; then
     FAILED=$((FAILED + 1)); echo "FAIL: due list shows an archived plant"
 else PASSED=$((PASSED + 1)); fi
+
+# ---- music -------------------------------------------------------------------
+
+for route in "GET /api/music" "GET /api/music/albums" "GET /api/music/album?id=1" \
+             "POST /api/music/album/save" "POST /api/music/scan"; do
+    expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
+done
+
+# no_tmp DESCRIPTION: no temporary copy was left in the library.
+no_tmp() {
+    if find "$M" -name '.nylm-tmp-*' | grep -q .; then
+        FAILED=$((FAILED + 1)); echo "FAIL: $1: temporary copy left"
+    else PASSED=$((PASSED + 1)); fi
+}
+
+expect 200 "music overview"    -b "$JAR" "$B/api/music"
+expect_body '"configured":true,"available":true,"albums":2,"tracks":3' "music counts"
+expect_body '"files":4,"parsed":0,"failed":1,"ok":1},"scan_state":"done"' "music last scan"
+
+expect 200 "music albums"      -b "$JAR" "$B/api/music/albums"
+expect_body '"dir":"Artist/Album","tracks":2,"with_art":0,"album":"Some Album","albumartist":"Some Artist","date":"2001","genre":"Rock","mixed":[]' "albums list values"
+expect_body '"dir":"Artist/Multi"' "albums list second album"
+A=$(grep -o '"id":[0-9]*,"dir":"Artist/Album"' "$TMP/body" | grep -o '[0-9]*' | head -1)
+MA=$(grep -o '"id":[0-9]*,"dir":"Artist/Multi"' "$TMP/body" | grep -o '[0-9]*' | head -1)
+
+expect 200 "music album"       -b "$JAR" "$B/api/music/album?id=$MA"
+expect_body '"genre":"Rock; Pop"' "album shows several values joined"
+expect_body '"file":"01.flac","locked":["genre"]' "album marks the locked field"
+MT=$(grep -o '"tracks":\[{"id":[0-9]*' "$TMP/body" | grep -o '[0-9]*$')
+expect 200 "music album (2)"   -b "$JAR" "$B/api/music/album?id=$A"
+expect_body '"title":"Song One"' "album track tags"
+expect_body '"file":"01.mp3","locked":[]' "album track file name"
+T1=$(grep -o '"tracks":\[{"id":[0-9]*' "$TMP/body" | grep -o '[0-9]*$')
+expect 400 "album no id"       -b "$JAR" "$B/api/music/album"
+expect 400 "album id 0"        -b "$JAR" "$B/api/music/album?id=0"
+expect 400 "album id text"     -b "$JAR" "$B/api/music/album?id=x"
+expect 404 "album missing"     -b "$JAR" "$B/api/music/album?id=999"
+
+S=/api/music/album/save
+cp "$M/Artist/Album/01.mp3" "$TMP/before.mp3"
+post "save genre for album"    200 $S "{\"id\":$A,\"album\":{\"genre\":\"Jazz\"},\"tracks\":[]}"
+expect_body '"written":2' "save writes both files"
+no_tmp "save"
+expect 200 "album after save"  -b "$JAR" "$B/api/music/album?id=$A"
+expect_body '"genre":"Jazz"' "saved genre is read back"
+if tail -c 128 "$M/Artist/Album/01.mp3" | head -c 3 | grep -q TAG; then
+    FAILED=$((FAILED + 1)); echo "FAIL: save added an ID3v1 tag"
+else PASSED=$((PASSED + 1)); fi
+if cmp -s "$TMP/before.mp3" "$M/Artist/Album/01.mp3"; then
+    FAILED=$((FAILED + 1)); echo "FAIL: the file did not change"
+else PASSED=$((PASSED + 1)); fi
+post "save the same again"     200 $S "{\"id\":$A,\"album\":{\"genre\":\"Jazz\"},\"tracks\":[]}"
+expect_body '"written":0' "unchanged values are not written"
+post "save track title"        200 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1,\"title\":\"New Title\",\"artist\":null}]}"
+expect_body '"written":1' "save writes one file"
+post "save remove date, compilation" 200 $S "{\"id\":$A,\"album\":{\"date\":\"\",\"compilation\":true},\"tracks\":[]}"
+expect 200 "album after removal" -b "$JAR" "$B/api/music/album?id=$A"
+expect_body '"title":"New Title"' "saved title"
+expect_body '"date":null,"tracknumber":"1/2","discnumber":null,"compilation":"1"' "removed date, set compilation"
+
+expect 415 "save needs json"   -b "$JAR" -d "{\"id\":$A}" "$B$S"
+post "save no id"              400 $S '{"album":{},"tracks":[]}'
+post "save no album"           400 $S "{\"id\":$A,\"tracks\":[]}"
+post "save album not object"   400 $S "{\"id\":$A,\"album\":[],\"tracks\":[]}"
+post "save no tracks"          400 $S "{\"id\":$A,\"album\":{}}"
+post "save unknown field"      400 $S "{\"id\":$A,\"album\":{\"title\":\"x\"},\"tracks\":[]}"
+expect_body "unknown field 'title'" "unknown field message"
+post "save empty album"        400 $S "{\"id\":$A,\"album\":{\"album\":\"\"},\"tracks\":[]}"
+expect_body "'album' can not be empty" "required field message"
+post "save spaces"             400 $S "{\"id\":$A,\"album\":{\"album\":\" x\"},\"tracks\":[]}"
+post "save bad date"           400 $S "{\"id\":$A,\"album\":{\"date\":\"2001-02-30\"},\"tracks\":[]}"
+post "save compilation text"   400 $S "{\"id\":$A,\"album\":{\"compilation\":\"1\"},\"tracks\":[]}"
+post "save genre number"       400 $S "{\"id\":$A,\"album\":{\"genre\":5},\"tracks\":[]}"
+post "save genre newline"      400 $S "{\"id\":$A,\"album\":{\"genre\":\"a\\nb\"},\"tracks\":[]}"
+post "save genre too long"     400 $S "{\"id\":$A,\"album\":{\"genre\":\"$(printf '%0501d' 0)\"},\"tracks\":[]}"
+post "save bad track number"   400 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1,\"tracknumber\":\"3/2\"}]}"
+post "save track not object"   400 $S "{\"id\":$A,\"album\":{},\"tracks\":[1]}"
+post "save track no id"        400 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"title\":\"x\"}]}"
+post "save track elsewhere"    400 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$MT,\"title\":\"x\"}]}"
+post "save track twice"        400 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1},{\"id\":$T1}]}"
+post "save track album field"  400 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1,\"genre\":\"x\"}]}"
+post "save album missing"      404 $S '{"id":999,"album":{},"tracks":[]}'
+post "save locked field"       409 $S "{\"id\":$MA,\"album\":{\"genre\":\"Rock\"},\"tracks\":[]}"
+expect_body "genre has several values" "locked field message"
+post "save other field of locked track" 200 $S "{\"id\":$MA,\"album\":{\"album\":\"Multi\"},\"tracks\":[]}"
+
+# A file changed behind nylm's back: refused until scanned again.
+cp "$M/Artist/Album/02.flac" "$TMP/before.flac"
+touch -d '2001-01-01' "$M/Artist/Album/02.flac"
+post "save stale file"         409 $S "{\"id\":$A,\"album\":{\"genre\":\"Blues\"},\"tracks\":[]}"
+expect_body "scan the library again" "stale file message"
+no_tmp "stale save"
+if cmp -s "$TMP/before.flac" "$M/Artist/Album/02.flac"; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: a refused save changed a file"; fi
+expect 200 "album after refused save" -b "$JAR" "$B/api/music/album?id=$A"
+expect_body '"genre":"Jazz"' "a refused save changes no file (first file kept)"
+scan 0 "music-scan after outside change"
+post "save after rescan"       200 $S "{\"id\":$A,\"album\":{\"genre\":\"Blues\"},\"tracks\":[]}"
+expect_body '"written":2' "save after rescan writes"
+
+# The folder is gone (drive not mounted).
+mv "$M" "$TMP/music.away"
+post "save, folder missing"    503 $S "{\"id\":$A,\"album\":{\"genre\":\"Pop\"},\"tracks\":[]}"
+post "scan, folder missing"    503 /api/music/scan '{"password":"smoke test password"}'
+expect 200 "overview, folder missing" -b "$JAR" "$B/api/music"
+expect_body '"configured":true,"available":false' "overview shows the folder missing"
+mv "$TMP/music.away" "$M"
+
+post "scan no password"        400 /api/music/scan '{}'
+post "scan wrong password"     403 /api/music/scan '{"password":"nope"}'
+expect 415 "scan needs json"   -b "$JAR" -d '{"password":"x"}' "$B/api/music/scan"
+flock "$TMP/data/music/scan.lock" sleep 3 &
+LOCKER=$!
+sleep 0.3
+expect 200 "overview while scanning" -b "$JAR" "$B/api/music"
+expect_body '"scan_state":"running"' "overview shows a running scan"
+post "scan while scanning"     409 /api/music/scan '{"password":"smoke test password"}'
+scan 1 "second music-scan while one runs"
+wait "$LOCKER"
+AUDIT=$(sqlite3 "$TMP/data/music/music.db" \
+    "SELECT client || ' ' || action || ' ' || substr(result, 1, 5) FROM audit ORDER BY id" |
+    tr '\n' ',')
+if [ "$AUDIT" = "127.0.0.1 tags ok: 2,127.0.0.1 tags ok: 1,127.0.0.1 tags ok: 2,127.0.0.1 tags ok: 1,127.0.0.1 tags faile,127.0.0.1 tags ok: 2," ]; then
+    PASSED=$((PASSED + 1))
+else
+    FAILED=$((FAILED + 1)); echo "FAIL: audit log: $AUDIT"
+fi
 
 expect 204 "logout"             -b "$JAR" -c "$JAR" -X POST "$B/api/logout"
 expect 401 "after logout"       -b "$JAR" "$B/api/session"
