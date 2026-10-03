@@ -19,11 +19,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "action.h"
 #include "api.h"
 #include "arena.h"
+#include "art.h"
 #include "auth.h"
 #include "db.h"
 #include "json.h"
@@ -737,6 +739,73 @@ void music_changes(struct request *req, struct response *res)
         return;
     }
     json_reply(res, 200, obj);
+}
+
+/* The picture type mime as a constant string, if nylm shows it; else NULL. */
+static const char *shown_mime(const char *mime)
+{
+    static const char *const types[] = { "image/jpeg", "image/png", "image/gif", "image/webp" };
+    for (size_t i = 0; mime != NULL && i < sizeof types / sizeof types[0]; i++)
+        if (strcmp(mime, types[i]) == 0)
+            return types[i];
+    return NULL;
+}
+
+/*
+ * GET /api/music/art?hash=H&size=full|thumb: a stored picture: full as it
+ * is in the file, thumb its JPEG thumbnail (the picture itself if it has
+ * none). The one answer of the API that is not JSON: the bytes, with the
+ * type the art table has (found from the bytes, never what a file claims),
+ * cached for a year (a hash always names the same bytes). 404 if it is not
+ * stored or not a type a browser shows.
+ */
+void music_art(struct request *req, struct response *res)
+{
+    const char *hash = NULL, *size = NULL;
+    if (http_query(req, "hash", &hash) != 0 || !art_hash_valid(hash)) {
+        json_error(res, 400, "query parameter 'hash' must be 64 lowercase hex characters");
+        return;
+    }
+    if (http_query(req, "size", &size) != 0 ||
+        (strcmp(size, "full") != 0 && strcmp(size, "thumb") != 0)) {
+        json_error(res, 400, "query parameter 'size' must be full or thumb");
+        return;
+    }
+    sqlite3_stmt *st = db_prepare(music_db, "SELECT mime, thumb FROM art WHERE hash = ?");
+    int rc = st != NULL && sqlite3_bind_text(st, 1, hash, -1, SQLITE_STATIC) == SQLITE_OK
+                 ? sqlite3_step(st)
+                 : SQLITE_ERROR;
+    const char *mime = rc == SQLITE_ROW ? shown_mime((const char *)sqlite3_column_text(st, 0))
+                                        : NULL;
+    int thumb = rc == SQLITE_ROW && strcmp(size, "thumb") == 0 && sqlite3_column_int(st, 1);
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE)
+        db_log_error(music_db, "art");
+    sqlite3_finalize(st);
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    if (mime == NULL) {
+        json_error(res, 404, rc == SQLITE_ROW ? "this picture is not a type nylm shows"
+                                              : "picture not found");
+        return;
+    }
+    int fd = art_open(hash, thumb);
+    struct stat sb;
+    if (fd < 0 || fstat(fd, &sb) != 0) {
+        int missing = fd < 0 && errno == ENOENT;
+        if (fd >= 0)
+            close(fd);
+        if (!missing)
+            fprintf(stderr, "music: art %s: %s\n", hash, strerror(errno));
+        json_error(res, missing ? 404 : 500, missing ? "picture not found" : "internal error");
+        return;
+    }
+    res->status = 200;
+    res->content_type = thumb ? "image/jpeg" : mime;
+    res->cache_control = "private, max-age=31536000, immutable";
+    res->file_fd = fd;
+    res->file_size = (size_t)sb.st_size;
 }
 
 /* ---- queueing changes --------------------------------------------------- */

@@ -160,7 +160,9 @@ type ("Front Cover", ...) and description, and stores each picture once,
 named by the SHA-256 of its bytes, in `$NYLM_DATA/music/art/`
 (`track_pictures` and `art` tables). JPEG and PNG pictures also get a
 thumbnail of at most 256 pixels, made by the scan with libjpeg-turbo and
-libpng; the server never decodes a picture.
+libpng; the server never decodes a picture. `GET /api/music/art?hash=H&size=full|thumb`
+sends one (the only API answer that is not JSON): the type from the
+`art` table, cached by the browser for a year.
 
 ## Commands
 

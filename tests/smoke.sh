@@ -464,7 +464,7 @@ else PASSED=$((PASSED + 1)); fi
 for route in "GET /api/music" "GET /api/music/albums" "GET /api/music/album?track=1" \
              "GET /api/music/values?field=artist" "GET /api/music/changes" \
              "POST /api/music/queue" "POST /api/music/discard" "POST /api/music/scan" \
-             "POST /api/music/write"; do
+             "POST /api/music/write" "GET /api/music/art?hash=$(printf '%064d' 0)&size=full"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
@@ -751,11 +751,47 @@ if [ "$(od -An -tx1 -N3 "$ART/$BACK.thumb" | tr -d ' ')" = ffd8ff ]; then
 TA=$(sqlite3 "$MDB" "SELECT id FROM tracks WHERE path LIKE '%Art/01.flac'")
 expect 200 "album with pictures" -b "$JAR" "$B/api/music/album?track=$TA"
 expect_body "\"pictures\":[{\"hash\":\"$FRONT\",\"type\":\"Front Cover\",\"description\":\"front\",\"mime\":\"image/jpeg\",\"size\":2388,\"width\":600,\"height\":600,\"thumb\":1},{\"hash\":\"$BACK\",\"type\":\"Back Cover\"" "album lists the pictures"
+# The pictures as images: the stored bytes, the type from the art table.
+AR="$B/api/music/art"
+expect 200 "front cover"        -b "$JAR" "$AR?hash=$FRONT&size=full"
+if [ "$(sha256sum < "$TMP/body" | cut -c1-64)" = "$FRONT" ]; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: the picture sent is not the one stored"; fi
+expect_header "content-type: image/jpeg"  "picture type"      -b "$JAR" "$AR?hash=$FRONT&size=full"
+expect_header "cache-control: private, max-age=31536000, immutable" "picture cached" \
+    -b "$JAR" "$AR?hash=$FRONT&size=full"
+expect_header "x-content-type-options: nosniff" "picture nosniff" -b "$JAR" "$AR?hash=$FRONT&size=full"
+expect_header "content-security-policy: default-src 'self'" "picture CSP" \
+    -b "$JAR" "$AR?hash=$FRONT&size=full"
+expect_header "content-type: image/png"   "PNG type"          -b "$JAR" "$AR?hash=$BACK&size=full"
+expect 200 "thumbnail"          -b "$JAR" "$AR?hash=$BACK&size=thumb"
+same_file "the thumbnail is the stored one" "$TMP/body" "$ART/$BACK.thumb"
+expect_header "content-type: image/jpeg"  "thumbnail type"    -b "$JAR" "$AR?hash=$BACK&size=thumb"
+sqlite3 "$MDB" "UPDATE art SET thumb = 0 WHERE hash = '$BACK'"
+expect 200 "no thumbnail: the picture" -b "$JAR" "$AR?hash=$BACK&size=thumb"
+same_file "the picture instead of a thumbnail" "$TMP/body" "$ART/$BACK"
+sqlite3 "$MDB" "UPDATE art SET mime = NULL WHERE hash = '$BACK'"
+expect 404 "a type nylm does not show" -b "$JAR" "$AR?hash=$BACK&size=full"
+mv "$ART/$FRONT.thumb" "$TMP/thumb.away"
+expect 404 "thumbnail file missing" -b "$JAR" "$AR?hash=$FRONT&size=thumb"
+mv "$TMP/thumb.away" "$ART/$FRONT.thumb"
+expect 404 "picture not stored" -b "$JAR" "$AR?hash=$(printf '%064d' 0)&size=full"
+expect 400 "art no hash"        -b "$JAR" "$AR?size=full"
+expect 400 "art hash short"     -b "$JAR" "$AR?hash=${FRONT%?}&size=full"
+expect 400 "art hash long"      -b "$JAR" "$AR?hash=${FRONT}0&size=full"
+expect 400 "art hash capitals"  -b "$JAR" "$AR?hash=$(echo "$FRONT" | tr a-f A-F)&size=full"
+expect 400 "art hash path"      -b "$JAR" "$AR?hash=..%2F..%2F..%2Fetc%2Fpasswd&size=full"
+expect_body "'hash' must be 64 lowercase hex characters" "hash message"
+expect 400 "art no size"        -b "$JAR" "$AR?hash=$FRONT"
+expect 400 "art bad size"       -b "$JAR" "$AR?hash=$FRONT&size=big"
+expect_body "'size' must be full or thumb" "size message"
+expect 405 "art POST"           -b "$JAR" -H "$J" -d '{}' "$AR?hash=$FRONT&size=full"
+
 # A scan of the whole library removes the pictures no track has.
 rm -r "$M/Artist/Art"
 service 0 "scan after removing the pictures" music-scan
 logged "4 unused picture files removed" "unused picture files removed"
 query "0" "unused art rows removed" "SELECT count(*) FROM art"
+expect 404 "removed picture"    -b "$JAR" "$AR?hash=$FRONT&size=full"
 
 expect 204 "logout"             -b "$JAR" -c "$JAR" -X POST "$B/api/logout"
 expect 401 "after logout"       -b "$JAR" "$B/api/session"

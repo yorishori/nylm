@@ -43,6 +43,7 @@ static const struct route routes[] = {
     { "GET",    "/api/music/album",           music_album,         0 },
     { "GET",    "/api/music/values",          music_values,        0 },
     { "GET",    "/api/music/changes",         music_changes,       0 },
+    { "GET",    "/api/music/art",             music_art,           0 },
     { "POST",   "/api/music/queue",           music_queue,         0 },
     { "POST",   "/api/music/discard",         music_discard,       0 },
     { "POST",   "/api/music/scan",            music_scan_start,    0 },
