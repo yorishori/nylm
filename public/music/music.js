@@ -55,6 +55,10 @@ const POLL_MS = 3000;
 const GENRE_RE = /^[a-z0-9-]+$/;
 const WHOLE_RE = /^(?!0+$)\d{1,4}$/; /* a positive whole number, at most 9999 */
 const encoder = new TextEncoder();
+const COVER_SIDE = 1200;            /* pixels: the longer side of a new cover, at most */
+const COVER_BYTES = 700 * 1024;     /* a new cover's JPEG, at most (the server's limit) */
+const COVER_QUALITIES = [0.9, 0.8, 0.7, 0.6];
+const COVER_FIELD = "picture";      /* the change that sets the cover */
 
 /* ---- values -------------------------------------------------------------- */
 
@@ -144,6 +148,101 @@ function showTime(ts) {
   const d = new Date(ts * 1000);
   return `${showDate(isoDate(d.getFullYear(), d.getMonth() + 1, d.getDate()))} ` +
          `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+/* A tag's name, or "Cover" for a new cover. */
+function fieldLabel(field) {
+  if (field === COVER_FIELD) return "Cover";
+  return FIELDS[field] ? FIELDS[field].label : field;
+}
+
+/* ---- pictures ------------------------------------------------------------- */
+
+function artUrl(hash, size) {
+  return `/api/music/art?hash=${encodeURIComponent(hash)}&size=${size}`;
+}
+
+/* A stored picture's thumbnail; if it can not be shown (no longer stored),
+ * it is swapped for a muted note. */
+function thumbImage(hash, alt, className) {
+  const img = el("img", { src: artUrl(hash, "thumb"), alt, class: className, loading: "lazy",
+                          decoding: "async" });
+  img.addEventListener("error", () => {
+    img.replaceWith(el("span", { class: `${className} no-art`, title: "Not stored any more" },
+                       "gone"));
+  });
+  return img;
+}
+
+/* A list of pictures as small thumbnails, or "none". */
+function thumbList(hashes, alt) {
+  if (!hashes || !hashes.length) return el("span", { class: "muted" }, "none");
+  return el("span", { class: "thumbs" }, hashes.map((h) => thumbImage(h, alt, "thumb small")));
+}
+
+/* "600 × 600 · JPEG · 2.4 KB" */
+function pictureFacts(p) {
+  const type = p.mime ? p.mime.replace("image/", "").toUpperCase() : "unknown type";
+  const size = p.width ? `${p.width} × ${p.height} · ` : "";
+  return `${size}${type} · ${showSize(p.size)}`;
+}
+
+/* Reads a picture file into a bitmap, or rejects with a message. */
+async function loadBitmap(file) {
+  try {
+    return await createImageBitmap(file);
+  } catch (err) {
+    throw new Error("That file is not a picture this browser can read.");
+  }
+}
+
+/* The canvas as a JPEG blob of the given quality. */
+function jpegBlob(canvas, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("The picture could not be made."))),
+                  "image/jpeg", quality);
+  });
+}
+
+/*
+ * A new cover from a picture file: scaled to at most COVER_SIDE pixels (never
+ * up) and made a JPEG of at most COVER_BYTES, lowering the quality, then the
+ * size, until it fits. Resolves to {canvas, blob}.
+ */
+async function makeCover(file) {
+  const bitmap = await loadBitmap(file);
+  let scale = Math.min(1, COVER_SIDE / Math.max(bitmap.width, bitmap.height));
+  for (;;) {
+    const canvas = el("canvas", { class: "cover-preview" });
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#000"; /* transparency becomes black, as in the thumbnails */
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    for (const q of COVER_QUALITIES) {
+      const blob = await jpegBlob(canvas, q);
+      if (blob.size <= COVER_BYTES) {
+        bitmap.close();
+        return { canvas, blob };
+      }
+    }
+    if (canvas.width <= 1 && canvas.height <= 1) {
+      bitmap.close();
+      throw new Error("The picture could not be made small enough.");
+    }
+    scale *= 0.75;
+  }
+}
+
+/* A blob as base64 (what the server takes). */
+function base64Of(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result).split(",")[1] || ""));
+    reader.addEventListener("error", () => reject(new Error("The picture could not be read.")));
+    reader.readAsDataURL(blob);
+  });
 }
 
 /* A path relative to the music folder. */
@@ -659,7 +758,8 @@ function refocus(container, key) {
 
 /* The albums table's filters; kept while the page is drawn again. */
 const filters = { q: "", album: "", albumartist: "", date: "", composer: "", genre: "",
-                  invalid: false, missing: false, artists: false, noArt: false };
+                  invalid: false, missing: false, artists: false, noArt: false,
+                  mixedArt: false };
 
 /* Composers in the albums table: the first, and how many more. */
 function composerSummary(v) {
@@ -679,7 +779,8 @@ function albumMatches(a) {
     if (v && !albumText(a, f).includes(v)) return false;
   }
   return !(filters.invalid && !a.invalid) && !(filters.missing && !a.missing) &&
-         !(filters.artists && !a.several_artists) && !(filters.noArt && !a.no_art);
+         !(filters.artists && !a.several_artists) && !(filters.noArt && !a.no_art) &&
+         !(filters.mixedArt && !a.mixed_art);
 }
 
 /* One album as a table row, editable unless readOnly. */
@@ -693,7 +794,12 @@ function albumRow(a, readOnly) {
     tr.replaceWith(next);
     refocus(next, `${a.track}:${f}`);
   };
+  const coverMarks = [a.changed.includes(COVER_FIELD) ? "edited" : "",
+                      a.mixed_art ? "differs" : ""].filter(Boolean);
   tr.append(
+    el("td", { class: ["col-cover", ...coverMarks].join(" ") },
+      a.cover ? thumbImage(a.cover, "", "thumb")
+              : el("span", { class: "thumb no-art", title: "No picture" }, "none")),
     ...ALBUM_COLUMNS.map((f) => editCell({
       field: f,
       value: a[f],
@@ -735,7 +841,8 @@ function filterBar(show) {
       toggle("invalid", "Invalid tags"),
       toggle("missing", "Missing tags"),
       toggle("artists", "Several artists, not a compilation"),
-      toggle("noArt", "Tracks without art")));
+      toggle("noArt", "Tracks without art"),
+      toggle("mixedArt", "Art differs between tracks")));
 }
 
 function legend() {
@@ -775,6 +882,7 @@ async function albumsPage() {
   const table = el("div", { class: "grid-wrap" },
     el("table", { class: "grid" },
       el("thead", {}, el("tr", {},
+        el("th", { scope: "col", class: "col-cover" }, "Cover"),
         ...ALBUM_COLUMNS.map((f) => el("th", { scope: "col", class: `col-${f}` }, FIELDS[f].label)),
         el("th", { scope: "col" }, "Tracks"))),
       body));
@@ -875,6 +983,112 @@ function albumValues(tracks) {
   return common;
 }
 
+/* A track's pictures as they will be: the new cover alone, else the file's. */
+function plannedPictures(t) {
+  return COVER_FIELD in t.pending ? [t.pending[COVER_FIELD]] : t.pictures.map((p) => p.hash);
+}
+
+/*
+ * The album's pictures: each stored picture once, with how many tracks have
+ * it, and the new cover (not written yet) first if there is one.
+ */
+function albumPictures(tracks) {
+  const found = new Map();
+  for (const t of tracks) {
+    for (const p of t.pictures) {
+      if (!found.has(p.hash)) found.set(p.hash, { ...p, tracks: new Set() });
+      found.get(p.hash).tracks.add(t.id);
+    }
+  }
+  const pending = tracks.filter((t) => COVER_FIELD in t.pending);
+  return {
+    next: pending.length ? { hash: pending[0].pending[COVER_FIELD], tracks: pending.length } : null,
+    stored: [...found.values()],
+  };
+}
+
+/* One picture of the album: thumbnail, what it is, how many tracks have it. */
+function pictureCard(p, total, isNew) {
+  const on = isNew ? p.tracks : p.tracks.size;
+  return el("li", { class: isNew ? "card stack picture new" : "card stack picture" },
+    p.mime === null && !isNew
+      ? el("span", { class: "picture-none muted" }, "A type nylm does not show")
+      : thumbImage(p.hash, isNew ? "New cover" : p.type || "Picture", "picture-image"),
+    el("strong", {}, isNew ? "New cover" : p.type || "Picture"),
+    isNew ? el("p", { class: "edited-text small" }, "Not written yet: it replaces every picture.")
+          : el("p", { class: "muted small" }, pictureFacts(p)),
+    !isNew && p.description ? el("p", { class: "small note" }, p.description) : null,
+    el("p", { class: on === total ? "small" : "small differs-text" },
+       on === total ? `On every track` : `On ${on} of ${plural(total, "track", "tracks")}`),
+    isNew || p.mime === null ? null
+      : el("div", { class: "actions" },
+          el("a", { class: "btn", href: artUrl(p.hash, "full"), target: "_blank",
+                    rel: "noopener" }, "Full size")));
+}
+
+/*
+ * The album's pictures, and Set cover: a picture file is made a JPEG here
+ * (see makeCover), shown, and queued for every track of album id.
+ */
+function picturesSection(id, tracks, readOnly) {
+  const { next, stored } = albumPictures(tracks);
+  const list = el("ul", { class: "pictures" },
+    next ? pictureCard(next, tracks.length, true) : null,
+    stored.map((p) => pictureCard(p, tracks.length, false)));
+  const file = el("input", { type: "file", accept: "image/*", hidden: true });
+  const preview = el("div", { class: "card stack", hidden: true });
+  const choose = el("button", { class: "btn", type: "button", onclick: () => file.click() },
+                    "Set cover…");
+  file.addEventListener("change", async () => {
+    const picked = file.files[0];
+    file.value = "";
+    if (!picked) return;
+    choose.disabled = true;
+    try {
+      const { canvas, blob } = await makeCover(picked);
+      const error = el("p", { class: "form-error", role: "alert" });
+      const use = el("button", { class: "btn go", type: "button" }, "Use as cover");
+      use.addEventListener("click", async () => {
+        use.disabled = true;
+        error.textContent = "";
+        try {
+          const r = await api("POST", "/api/music/cover", { album: id, image: await base64Of(blob) });
+          setStatus(r.queued ? `Cover queued for ${plural(r.queued, "track", "tracks")}`
+                             : "Every track has this cover already");
+          refresh();
+        } catch (err) {
+          if (!(err instanceof ApiError && err.status === 401 && handleError(err))) {
+            error.textContent = err.message;
+          }
+          use.disabled = false;
+        }
+      });
+      preview.replaceChildren(
+        el("h3", {}, "New cover"),
+        canvas,
+        el("p", { class: "muted small" },
+           `${canvas.width} × ${canvas.height} · JPEG · ${showSize(blob.size)}`),
+        el("p", { class: "hint" }, `Queued for every track of the album; writing makes it ` +
+                                   "each track's only picture."),
+        error,
+        el("div", { class: "actions" }, use,
+          el("button", { class: "btn", type: "button",
+                         onclick: () => { preview.hidden = true; choose.focus(); } }, "Cancel")));
+      preview.hidden = false;
+      use.focus();
+    } catch (err) {
+      setStatus(err.message, true);
+    } finally {
+      choose.disabled = false;
+    }
+  });
+  return el("section", { class: "section" },
+    el("header", {}, el("h2", {}, "Pictures ", el("span", { class: "count" }, stored.length))),
+    readOnly ? null : el("div", { class: "actions" }, choose, file),
+    preview,
+    next || stored.length ? list : el("p", { class: "empty" }, "No track has a picture."));
+}
+
 function trackOrder(a, b) {
   return discOf(a) - discOf(b) ||
          (firstNumber(planned(a, "tracknumber")) ?? 1e9) - (firstNumber(planned(b, "tracknumber")) ?? 1e9) ||
@@ -888,6 +1102,14 @@ async function albumPage(id) {
   const tracks = [...list].sort(trackOrder);
   const readOnly = Boolean(o.busy);
   const common = albumValues(tracks);
+  /* The pictures most tracks have (null: all the same), as for the tags. */
+  const pictureCounts = new Map();
+  for (const t of tracks) {
+    const k = JSON.stringify(plannedPictures(t));
+    pictureCounts.set(k, (pictureCounts.get(k) || 0) + 1);
+  }
+  const commonPictures = pictureCounts.size > 1
+    ? [...pictureCounts].sort((x, y) => y[1] - x[1])[0][0] : null;
   const name = planned(tracks[0], "album");
   const artist = planned(tracks[0], "albumartist");
 
@@ -922,8 +1144,12 @@ async function albumPage(id) {
     el("td", { class: "path muted" }, relative(t.path)),
     el("td", { class: "muted" }, t.ext),
     el("td", { class: "num muted" }, showSize(t.size)),
-    el("td", { class: t.pictures.length ? "num muted" : "num missing-art" },
-       String(t.pictures.length)),
+    el("td", { class: ["num", plannedPictures(t).length ? "muted" : "missing-art",
+                       COVER_FIELD in t.pending ? "edited-text" : "",
+                       commonPictures !== null && JSON.stringify(plannedPictures(t)) !== commonPictures
+                         ? "differs-text" : ""]
+                      .filter(Boolean).join(" ") },
+       String(plannedPictures(t).length)),
     el("td", { class: "muted nowrap" }, showTime(t.scanned))));
 
   const refreshForm = serviceForm("/api/music/scan", { track: id },
@@ -942,6 +1168,7 @@ async function albumPage(id) {
       el("p", { class: "muted" }, plural(tracks.length, "track", "tracks"))),
     readOnly ? el("p", { class: "warn" }, "A scan or write is running: editing is possible " +
                                           "again when it is done.") : null,
+    picturesSection(id, tracks, readOnly),
     legend(),
     el("div", { class: "grid-wrap" },
       el("table", { class: "grid tracks" },
@@ -950,23 +1177,26 @@ async function albumPage(id) {
           el("th", { scope: "col" }, "File"),
           el("th", { scope: "col" }, "Type"),
           el("th", { scope: "col" }, "Size"),
-          el("th", { scope: "col" }, "Art"),
+          el("th", { scope: "col" }, "Pictures"),
           el("th", { scope: "col" }, "Scanned"))),
         el("tbody", {}, rows))));
 }
 
 /* ---- changes ------------------------------------------------------------- */
 
-/* One pending change as a table row: track, tag, now, new. */
+/* One pending change as a table row: track, tag, now, new. A cover shows
+ * as pictures: the track's now, the new one. */
 function pendingRow(c) {
-  const now = fromStored(c.field, c.now);
-  const next = fromStored(c.field, c.value);
+  const cover = c.field === COVER_FIELD;
+  const now = cover ? JSON.parse(c.now || "[]") : fromStored(c.field, c.now);
+  const next = cover ? c.value : fromStored(c.field, c.value);
   return el("tr", {},
     el("td", {}, c.title ?? relative(c.path),
        c.title ? el("div", { class: "path muted small" }, relative(c.path)) : null),
-    el("td", {}, FIELDS[c.field] ? FIELDS[c.field].label : c.field),
-    el("td", { class: "old" }, showValue(c.field, now)),
-    el("td", { class: "edited-text" }, next === "" ? "(removed)" : showValue(c.field, next)));
+    el("td", {}, fieldLabel(c.field)),
+    el("td", { class: cover ? "" : "old" }, cover ? thumbList(now, "Picture now") : showValue(c.field, now)),
+    el("td", { class: "edited-text" },
+       cover ? thumbList([next], "New cover") : next === "" ? "(removed)" : showValue(c.field, next)));
 }
 
 /* The pending changes of one batch, with Discard. */
@@ -1038,15 +1268,16 @@ const STATE_TEXT = { done: "Done", warning: "Done, with a warning", failed: "Fai
 /* One written (or failed) change. Rose failed, peach warning. */
 function historyItem(c) {
   const tone = c.state === "failed" ? "late" : c.state === "warning" ? "today" : "";
-  const value = fromStored(c.field, c.value);
+  const cover = c.field === COVER_FIELD;
+  const value = cover ? c.value : fromStored(c.field, c.value);
   return el("li", { class: "card stack history" },
     el("header", {},
       el("span", { class: tone ? `due ${tone}` : "muted" }, STATE_TEXT[c.state] || c.state),
       el("span", { class: "muted" }, showTime(c.finished))),
     el("strong", { class: "path" }, relative(c.path)),
     el("p", {},
-      el("span", { class: "muted" }, `${FIELDS[c.field] ? FIELDS[c.field].label : c.field}: `),
-      value === "" ? "(removed)" : showValue(c.field, value)),
+      el("span", { class: "muted" }, `${fieldLabel(c.field)}: `),
+      cover ? thumbList([value], "Cover") : value === "" ? "(removed)" : showValue(c.field, value)),
     c.note ? el("p", { class: "note" }, c.note) : null);
 }
 
@@ -1062,6 +1293,9 @@ const RULES = [
   "Compilation: yes or no (1 or 0).",
   "Titlesort, albumsort, artistsort, albumartistsort and composersort are written with " +
     "their tag (composersort: the composers joined by \"; \"), cut to 500 bytes if longer.",
+  "Cover: a picture chosen here is scaled to at most 1200 pixels and sent as a JPEG of at " +
+    "most 700 KiB. It must decode completely when written; then it is each track's only " +
+    "picture, as the front cover.",
 ];
 
 async function infoPage() {

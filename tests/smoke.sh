@@ -484,7 +484,7 @@ expect_body "\"configured\":true,\"available\":true,\"root\":\"$M\",\"busy\":nul
 expect_body '"state":"done","files":4,"parsed":0,"removed":0,"failed":1,"others":[{"ext":"jpg","count":2},{"ext":"[blank]","count":1}]},"running":null' "last whole scan"
 
 expect 200 "albums"            -b "$JAR" "$B/api/music/albums"
-expect_body '"album":"Some Album","albumartist":"Some Artist","date":"2001","compilation":"0","genre":null,"composer":[],"tracks":3,"mixed":["genre"],"changed":[],"missing":true,"invalid":true,"several_artists":true,"no_art":true}]' "album row"
+expect_body '"album":"Some Album","albumartist":"Some Artist","date":"2001","compilation":"0","genre":null,"composer":[],"tracks":3,"mixed":["genre"],"changed":[],"missing":true,"invalid":true,"several_artists":true,"no_art":true,"cover":null,"mixed_art":false}]' "album row"
 A=$(grep -o '"track":[0-9]*' "$TMP/body" | head -1 | grep -o '[0-9]*')
 expect 200 "album"             -b "$JAR" "$B/api/music/album?track=$A"
 # id_of FILE: the id of the track whose path ends in FILE, from the last body.
@@ -838,7 +838,7 @@ same_file "the cover is sent" tests/data/cover.jpg "$TMP/body"
 expect 200 "album with a new cover" -b "$JAR" "$B/api/music/album?track=$TA"
 expect_body "\"pending\":{\"picture\":\"$COVER\"},\"pictures\":[{\"hash\":\"$FRONT\"" "the new cover is pending"
 expect 200 "albums with a new cover" -b "$JAR" "$B/api/music/albums?track=$TA"
-expect_body '"changed":["picture"]' "the album's cover changes"
+expect_body "\"changed\":[\"picture\"],\"missing\":true,\"invalid\":true,\"several_artists\":true,\"no_art\":false,\"cover\":\"$COVER\",\"mixed_art\":false}" "the album's planned cover"
 expect 200 "changes with a cover" -b "$JAR" "$B/api/music/changes"
 expect_body "\"field\":\"picture\",\"value\":\"$COVER\",\"now\":\"[\\\"$FRONT\\\",\\\"$BACK\\\"]\"" "the change shows the pictures now"
 expect 200 "the same cover again" -b "$JAR" -H "$J" --data-binary "@$TMP/cover.json" "$B$C"
@@ -857,6 +857,8 @@ query "0|$COVER|Front Cover|" "the cover is the only picture (MP3)" \
     "SELECT position, hash, type, description FROM track_pictures
      WHERE track_id = (SELECT id FROM tracks WHERE path LIKE '%Album/01.mp3')"
 query "300|300|1" "the cover decoded" "SELECT width, height, thumb FROM art WHERE hash = '$COVER'"
+expect 200 "albums after the cover" -b "$JAR" "$B/api/music/albums?track=$TA"
+expect_body "\"no_art\":true,\"cover\":\"$COVER\",\"mixed_art\":true}" "the art now differs between tracks"
 if [ -f "$ART/$COVER.thumb" ]; then PASSED=$((PASSED + 1)); else
     FAILED=$((FAILED + 1)); echo "FAIL: no thumbnail of the cover"; fi
 expect 200 "same cover, now in the files" -b "$JAR" -H "$J" --data-binary "@$TMP/cover.json" "$B$C"

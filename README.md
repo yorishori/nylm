@@ -123,10 +123,15 @@ and refuses to queue or discard anything while a service runs (409).
 The web app has three tabs. Albums: the last scan and a button to scan
 again, filters (search, a field each, and switches for albums with
 invalid tags, missing tags, several artists without being a compilation,
-tracks without art), and a table of albums edited in place: album, album
-artist, date, composers, genres, compilation, for every track at once.
-The tracks count opens the album: every track with every tag, edited in
-place; a value that differs from the rest of the album is ringed rose.
+tracks without art, art that differs between tracks), and a table of
+albums edited in place: the cover, album, album artist, date, composers,
+genres, compilation, for every track at once. The tracks count opens the
+album: its pictures (each once: type, size, on how many tracks, full
+size) with Set cover, then every track with every tag, edited in place;
+a value that differs from the rest of the album is ringed rose. Set
+cover reads a picture file in the browser, scales it to at most 1200
+pixels on a canvas and makes it a JPEG of at most 700 KiB, shows it, and
+queues it.
 Disc and track numbers are set in a popup, X first and Y worked out:
 saving numbers the whole album again (Y per disc for track numbers; a
 missing X gets the lowest free number). Every edit is queued at once as

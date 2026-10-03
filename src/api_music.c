@@ -305,6 +305,16 @@ static uint64_t hash_values(const struct tag_values *v)
     return (h ^ v->n) * 1099511628211ULL;
 }
 
+/* The same for a track's pictures (their hashes, in order). */
+static uint64_t hash_pictures(const struct tags *t)
+{
+    uint64_t h = 1469598103934665603ULL;
+    for (size_t i = 0; i < t->npictures; i++)
+        for (const unsigned char *p = (const unsigned char *)t->pictures[i].hash; *p != '\0'; p++)
+            h = (h ^ *p) * 1099511628211ULL;
+    return (h ^ t->npictures) * 1099511628211ULL;
+}
+
 /* ---- reads -------------------------------------------------------------- */
 
 /* Adds the latest scan of the whole library (null if none) with the files
@@ -421,10 +431,25 @@ fail:
 struct album_sum {
     cJSON *row;
     int tracks;
-    uint64_t hash[NALBUM_FIELDS], artist;
+    uint64_t hash[NALBUM_FIELDS], artist, pictures;
     unsigned mixed, changed, missing, invalid;
-    int several_artists, all_compilation, no_art;
+    int several_artists, all_compilation, no_art, mixed_art;
+    char cover[ART_HASH_LEN + 1]; /* "" if no track has a picture */
+    int cover_front;              /* cover is a "Front Cover" */
 };
+
+/* Notes the album's cover from a track's pictures: the first front cover
+ * of the album's tracks, else the first picture. */
+static void find_cover(struct album_sum *a, const struct tags *t)
+{
+    for (size_t i = 0; i < t->npictures && !a->cover_front; i++) {
+        int front = strcmp(t->pictures[i].type, "Front Cover") == 0;
+        if (front || a->cover[0] == '\0') {
+            memcpy(a->cover, t->pictures[i].hash, sizeof a->cover);
+            a->cover_front = front;
+        }
+    }
+}
 
 /* Starts an album row from its first track: id, the planned values. NULL
  * when out of memory. */
@@ -458,7 +483,10 @@ static int album_end(const struct album_sum *a)
                    cJSON_AddBoolToObject(row, "invalid", a->invalid != 0) != NULL &&
                    cJSON_AddBoolToObject(row, "several_artists",
                                          a->several_artists && !a->all_compilation) != NULL &&
-                   cJSON_AddBoolToObject(row, "no_art", a->no_art) != NULL
+                   cJSON_AddBoolToObject(row, "no_art", a->no_art) != NULL &&
+                   (a->cover[0] != '\0' ? cJSON_AddStringToObject(row, "cover", a->cover)
+                                        : cJSON_AddNullToObject(row, "cover")) != NULL &&
+                   cJSON_AddBoolToObject(row, "mixed_art", a->mixed_art) != NULL
                ? 0
                : -1;
 }
@@ -476,10 +504,12 @@ static int new_album(sqlite3_stmt *st, const char **album, const char **artist, 
 /*
  * GET /api/music/albums[?track=N]: every album (or the album of track N),
  * one row each: track (one of its tracks), the planned album fields
- * (null if absent or mixed), tracks, mixed and changed (fields), and
- * whether a track misses a required tag, has an invalid one, the tracks
- * have several artists without being a compilation, or a track has no
- * picture.
+ * (null if absent or mixed), tracks, mixed and changed (fields;
+ * "picture" for a new cover), and whether a track misses a required tag,
+ * has an invalid one, the tracks have several artists without being a
+ * compilation, or a track has no picture; cover (the hash of the planned
+ * front cover, else of the first picture; null if none) and whether the
+ * tracks' pictures differ (mixed_art).
  */
 void music_albums(struct request *req, struct response *res)
 {
@@ -540,6 +570,10 @@ void music_albums(struct request *req, struct response *res)
         const struct tag_values *c = &t.value[TAG_COMPILATION];
         a.all_compilation &= c->n == 1 && strcmp(c->v[0], "1") == 0;
         a.no_art |= t.npictures == 0;
+        uint64_t pictures = hash_pictures(&t);
+        a.mixed_art |= a.tracks > 0 && pictures != a.pictures;
+        a.pictures = a.tracks == 0 ? pictures : a.pictures;
+        find_cover(&a, &t);
         a.changed |= changed;
         a.missing |= missing;
         a.invalid |= invalid;

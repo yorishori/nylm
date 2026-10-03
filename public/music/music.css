@@ -5,6 +5,8 @@
  *                      lavender stripe on a row with changes)
  *   rose ring        = this track's value differs from the rest of the album
  *   rose tint        = missing or invalid (see the rules in Info)
+ * Pictures follow the same: a lavender ring on a new cover, rose where the
+ * tracks' pictures differ, "none" in rose where there is no picture.
  * Rose and peach keep their meaning in the history: failed and warning. */
 
 .path { overflow-wrap: anywhere; }
@@ -145,6 +147,58 @@ td.bad .cell, td.bad .cell-input, td.bad .switch .track, .mark.bad {
 /* What the colours mean. */
 .legend { display: flex; flex-wrap: wrap; gap: 0.5rem 1rem; align-items: center; }
 .mark { padding: 0.1rem 0.6rem; border-radius: 8px; }
+
+/* ---- album art ----------------------------------------------------------- */
+
+/* A thumbnail in a table; "none" (rose) where there is no picture. */
+.thumb {
+  display: block;
+  width: 2.6rem;
+  height: 2.6rem;
+  border-radius: 6px;
+  object-fit: cover;
+  background: var(--surface);
+}
+.thumb.small { width: 2rem; height: 2rem; }
+.no-art {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--rose);
+  font-size: 0.7rem;
+  box-shadow: inset 2px 2px 5px var(--shade), inset -2px -2px 5px var(--light);
+}
+.thumbs { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.grid .col-cover { width: 3.2rem; }
+td.col-cover.edited .thumb { box-shadow: 0 0 0 2px var(--lavender); }
+td.col-cover.differs .thumb { box-shadow: 0 0 0 2px var(--rose); }
+td.col-cover.edited.differs .thumb { box-shadow: 0 0 0 2px var(--lavender), 0 0 0 4px var(--rose); }
+.differs-text { color: var(--rose); }
+
+/* The album's pictures: flat cards, the new cover ringed lavender. */
+.pictures {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
+  gap: var(--gap);
+}
+.picture { align-content: start; }
+.picture.new { box-shadow: inset 0 0 0 2px var(--lavender); }
+.picture-image, .picture-none, .cover-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1;
+  object-fit: contain;
+  border-radius: 8px;
+  background: var(--surface);
+  text-align: center;
+}
+.cover-preview { max-width: 20rem; }
 
 /* ---- popups -------------------------------------------------------------- */
 
