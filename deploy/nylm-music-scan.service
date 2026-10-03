@@ -4,7 +4,8 @@ Documentation=file:///usr/local/share/nylm/README.md
 
 # Started from the web app (action music-scan) or by hand:
 #   sudo systemctl start nylm-music-scan
-# Only one runs at a time; it reads new and changed files and writes no file.
+# Never runs together with a write; it reads new and changed files and
+# writes no file.
 [Service]
 Type=oneshot
 User=nylm

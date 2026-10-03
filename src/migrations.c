@@ -145,6 +145,34 @@ const char *const music_migrations[] = {
     "    detail TEXT    NOT NULL," /* JSON */
     "    result TEXT    NOT NULL"
     ") STRICT;",
+
+    /* 2: tag changes, queued by the web app and written by `nylm
+     * music-write`. One row per tag of one file. old is the cached value
+     * when it was queued (NULL: absent); the write is refused if the file
+     * no longer has it. new "" removes the tag. A track has at most one
+     * pending change per tag. Written rows stay as history: done, warning
+     * (written, but TagLib also changed what note lists) or failed (note
+     * says why). path keeps the history readable after a scan removes the
+     * track. */
+    "CREATE TABLE changes ("
+    "    id       INTEGER PRIMARY KEY,"
+    "    track_id INTEGER REFERENCES tracks(id) ON DELETE SET NULL,"
+    "    path     TEXT    NOT NULL,"
+    "    field    TEXT    NOT NULL CHECK (field IN ('title', 'artist', 'album',"
+    "                     'albumartist', 'genre', 'date', 'tracknumber', 'discnumber',"
+    "                     'compilation')),"
+    "    old      TEXT,"
+    "    new      TEXT    NOT NULL,"
+    "    client   TEXT    NOT NULL," /* IP address that queued it */
+    "    queued   INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "    state    TEXT    NOT NULL DEFAULT 'pending'"
+    "                     CHECK (state IN ('pending', 'done', 'warning', 'failed')),"
+    "    finished INTEGER,"
+    "    note     TEXT    NOT NULL DEFAULT ''"
+    ") STRICT;"
+    "CREATE UNIQUE INDEX changes_one_pending ON changes (track_id, field)"
+    "    WHERE state = 'pending';"
+    "CREATE INDEX changes_by_state ON changes (state, track_id);",
 };
 
 const int music_migration_count = sizeof music_migrations / sizeof music_migrations[0];

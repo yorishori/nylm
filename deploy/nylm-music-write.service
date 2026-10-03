@@ -1,0 +1,17 @@
+[Unit]
+Description=nylm music tag write
+Documentation=file:///usr/local/share/nylm/README.md
+
+# Started from the web app (action music-write) or by hand:
+#   sudo systemctl start nylm-music-write
+# Writes the pending rows of the changes table into the files, through
+# TagLib, and records each result. Never runs together with a scan.
+[Service]
+Type=oneshot
+User=nylm
+Group=nylm
+EnvironmentFile=/etc/nylm.conf
+ExecStart=/usr/local/bin/nylm music-write
+WorkingDirectory=/var/lib/nylm
+Nice=10
+IOSchedulingClass=idle

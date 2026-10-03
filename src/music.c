@@ -1,9 +1,10 @@
 /*
- * The music library folder and its cache (see music.h). The scan runs as
- * its own process (`nylm music-scan`, by hand or as nylm-music-scan.service)
- * so the single-threaded server never waits for it. It commits about once
- * a second, so the server can write between batches, and holds an flock on
- * <NYLM_DATA>/music/scan.lock while it runs.
+ * The music library folder, its cache, and the two services that work on
+ * the files (see music.h): the scan and the write. Each runs as its own
+ * process (`nylm music-scan`, `nylm music-write`, by hand or as a systemd
+ * service) so the single-threaded server never waits for them and never
+ * opens a music file. The scan commits about once a second so its progress
+ * shows in the web app.
  */
 #define _POSIX_C_SOURCE 200809L
 
@@ -16,6 +17,7 @@
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "arena.h"
@@ -32,7 +34,7 @@ int music_configure(const char *dir, const char *data_dir)
 {
     root[0] = '\0';
     root_len = 0;
-    int n = snprintf(lock_path, sizeof lock_path, "%s/music/scan.lock", data_dir);
+    int n = snprintf(lock_path, sizeof lock_path, "%s/music/library.lock", data_dir);
     if (n < 0 || (size_t)n >= sizeof lock_path) {
         fprintf(stderr, "music: data folder path is too long\n");
         return -1;
@@ -358,7 +360,11 @@ static int scan_finished(struct scan *s, int ok)
     return done ? 0 : -1;
 }
 
-/* Opens the scan lock file; -1 on error (logged). */
+/* ---- the library lock --------------------------------------------------- */
+
+#define LOCK_WAIT_SECONDS 3 /* a service waits this long for the server's writes */
+
+/* Opens the lock file; -1 on error (logged). */
 static int open_lock(void)
 {
     int fd = open(lock_path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
@@ -367,21 +373,95 @@ static int open_lock(void)
     return fd;
 }
 
+/*
+ * Takes the lock for a service ("scan" or "write") and writes its name in
+ * the file. Waits a moment for a write of the server to end; fails if a
+ * service runs. The fd (closing it releases the lock), or -1 (logged).
+ */
+static int lock_service(const char *name)
+{
+    int fd = open_lock();
+    if (fd < 0)
+        return -1;
+    const struct timespec tick = { 0, 100 * 1000 * 1000 };
+    int locked = 0;
+    for (int i = 0; i < LOCK_WAIT_SECONDS * 10 && !locked; i++) {
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0)
+            locked = 1;
+        else if (errno == EWOULDBLOCK)
+            nanosleep(&tick, NULL);
+        else
+            break;
+    }
+    if (!locked) {
+        fprintf(stderr, "music: %s\n", errno == EWOULDBLOCK
+                                           ? "the library is busy: a scan or write is running"
+                                           : strerror(errno));
+        close(fd);
+        return -1;
+    }
+    size_t len = strlen(name);
+    if (ftruncate(fd, 0) != 0 || pwrite(fd, name, len, 0) != (ssize_t)len) {
+        fprintf(stderr, "music: can not write %s: %s\n", lock_path, strerror(errno));
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+int music_lock_shared(void)
+{
+    int fd = open_lock();
+    if (fd < 0)
+        return -1;
+    if (flock(fd, LOCK_SH | LOCK_NB) == 0)
+        return fd;
+    int busy = errno == EWOULDBLOCK;
+    if (!busy)
+        fprintf(stderr, "music: flock %s: %s\n", lock_path, strerror(errno));
+    close(fd);
+    return busy ? MUSIC_BUSY : -1;
+}
+
+void music_unlock(int fd)
+{
+    if (fd >= 0)
+        close(fd);
+}
+
+const char *music_busy(int *error)
+{
+    *error = 0;
+    int fd = music_lock_shared();
+    if (fd >= 0) {
+        music_unlock(fd);
+        return NULL;
+    }
+    if (fd != MUSIC_BUSY) {
+        *error = 1;
+        return NULL;
+    }
+    /* The service writes its name right after locking; until then "busy". */
+    char name[16] = "";
+    fd = open_lock();
+    ssize_t n = fd >= 0 ? pread(fd, name, sizeof name - 1, 0) : -1;
+    if (fd >= 0)
+        close(fd);
+    name[n > 0 ? n : 0] = '\0';
+    return strcmp(name, "scan") == 0 ? "scan" : strcmp(name, "write") == 0 ? "write" : "busy";
+}
+
+/* ---- scan, continued ---------------------------------------------------- */
+
 int music_scan(void)
 {
     if (root[0] == '\0') {
         fprintf(stderr, "music: NYLM_MUSIC is not set\n");
         return 1;
     }
-    int lock = open_lock();
+    int lock = lock_service("scan");
     if (lock < 0)
         return 1;
-    if (flock(lock, LOCK_EX | LOCK_NB) != 0) {
-        fprintf(stderr, "music: %s\n", errno == EWOULDBLOCK ? "a scan is already running"
-                                                            : strerror(errno));
-        close(lock);
-        return 1;
-    }
     if (!music_available()) {
         close(lock);
         return 1;
@@ -421,52 +501,188 @@ int music_scan(void)
     return ok ? 0 : 1;
 }
 
-int music_scan_running(void)
+/* ---- write -------------------------------------------------------------- */
+
+/* Reads a track's file again into its cache row. 0 or -1 (logged). */
+static int reread(long track_id, const char *path, enum tags_format format)
 {
-    int fd = open_lock();
-    if (fd < 0)
+    char err[TAGS_MAX_NOTE];
+    struct stat sb;
+    struct tags t;
+    if (lstat(path, &sb) != 0 || !S_ISREG(sb.st_mode) ||
+        tags_read(path, format, &t, err, sizeof err) != 0) {
+        fprintf(stderr, "music: can not read %s again after writing it\n", path);
         return -1;
-    int running = 0;
-    if (flock(fd, LOCK_SH | LOCK_NB) != 0) {
-        running = errno == EWOULDBLOCK ? 1 : -1;
-        if (running < 0)
-            fprintf(stderr, "music: flock %s: %s\n", lock_path, strerror(errno));
     }
-    close(fd); /* releases our shared lock, if taken */
-    return running;
+    sqlite3_stmt *st = db_prepare(music_db,
+        "UPDATE tracks SET size = ?, mtime = ?, seconds = ?, pictures = ?, multi = ?,"
+        " title = ?, artist = ?, album = ?, albumartist = ?, genre = ?, date = ?,"
+        " tracknumber = ?, discnumber = ?, compilation = ? WHERE id = ?");
+    int rc = st != NULL && bind_file(st, &sb, &t) == SQLITE_OK &&
+                     sqlite3_bind_int64(st, FILE_COLUMN_COUNT + 1, track_id) == SQLITE_OK &&
+                     step_once(st) == 0
+                 ? 0
+                 : -1;
+    sqlite3_finalize(st);
+    return rc;
 }
 
-int music_reread(long track_id)
+/* Copies a text column into the arena; NULL if NULL or out of memory. */
+static const char *column_dup(sqlite3_stmt *st, int col)
+{
+    const char *s = (const char *)sqlite3_column_text(st, col);
+    return s != NULL ? arena_strndup(s, (size_t)sqlite3_column_bytes(st, col)) : NULL;
+}
+
+struct write_counts {
+    long files, done, warnings, failed;
+};
+
+/* Records what became of a change. 0 or -1 (logged). */
+static int change_result(long id, const struct tags_change *c)
+{
+    const char *state = c->failed ? "failed" : c->note[0] != '\0' ? "warning" : "done";
+    sqlite3_stmt *st = db_prepare(music_db,
+        "UPDATE changes SET state = ?, note = ?, finished = unixepoch() WHERE id = ?");
+    int rc = st != NULL && sqlite3_bind_text(st, 1, state, -1, SQLITE_STATIC) == SQLITE_OK &&
+                     sqlite3_bind_text(st, 2, c->note, -1, SQLITE_STATIC) == SQLITE_OK &&
+                     sqlite3_bind_int64(st, 3, id) == SQLITE_OK && step_once(st) == 0
+                 ? 0
+                 : -1;
+    sqlite3_finalize(st);
+    return rc;
+}
+
+/* Writes one track's pending changes and records each result. 0, or -1 on
+ * a database error (the service stops). */
+static int write_track(long track_id, struct write_counts *n)
 {
     sqlite3_stmt *st = db_prepare(music_db, "SELECT path, format FROM tracks WHERE id = ?");
     if (st == NULL || sqlite3_bind_int64(st, 1, track_id) != SQLITE_OK ||
         sqlite3_step(st) != SQLITE_ROW) {
-        db_log_error(music_db, "reread track");
+        db_log_error(music_db, "write: track");
         sqlite3_finalize(st);
         return -1;
     }
-    char path[TAGS_MAX_PATH], err[256];
+    const char *rel = column_dup(st, 0);
     enum tags_format format =
         strcmp((const char *)sqlite3_column_text(st, 1), "mp3") == 0 ? TAGS_MP3 : TAGS_FLAC;
-    int rc = full_path((const char *)sqlite3_column_text(st, 0), path);
     sqlite3_finalize(st);
 
-    struct stat sb;
-    struct tags t;
-    if (rc != 0 || lstat(path, &sb) != 0 || !S_ISREG(sb.st_mode) ||
-        tags_read(path, format, &t, err, sizeof err) != 0) {
-        fprintf(stderr, "music: can not read %s again after editing it\n", path);
+    /* At most one pending change per tag: at most TAG_FIELDS rows. */
+    struct tags_change c[TAG_FIELDS];
+    long ids[TAG_FIELDS];
+    int count = 0, rc;
+    st = db_prepare(music_db, "SELECT id, field, old, new FROM changes"
+                              " WHERE state = 'pending' AND track_id = ? ORDER BY id");
+    if (st == NULL || rel == NULL || sqlite3_bind_int64(st, 1, track_id) != SQLITE_OK) {
+        sqlite3_finalize(st);
         return -1;
     }
-    st = db_prepare(music_db,
-        "UPDATE tracks SET size = ?, mtime = ?, seconds = ?, pictures = ?, multi = ?,"
-        " title = ?, artist = ?, album = ?, albumartist = ?, genre = ?, date = ?,"
-        " tracknumber = ?, discnumber = ?, compilation = ? WHERE id = ?");
-    rc = st != NULL && bind_file(st, &sb, &t) == SQLITE_OK &&
-                 sqlite3_bind_int64(st, FILE_COLUMN_COUNT + 1, track_id) == SQLITE_OK &&
-                 step_once(st) == 0
-             ? 0
-             : -1;
+    while ((rc = sqlite3_step(st)) == SQLITE_ROW && count < TAG_FIELDS) {
+        int field = tags_field_of((const char *)sqlite3_column_text(st, 1));
+        memset(&c[count], 0, sizeof c[count]);
+        ids[count] = (long)sqlite3_column_int64(st, 0);
+        c[count].field = field >= 0 ? (enum tag_field)field : TAG_TITLE;
+        c[count].old = column_dup(st, 2);
+        c[count].value = column_dup(st, 3);
+        if (field < 0 || c[count].value == NULL) {
+            sqlite3_finalize(st);
+            fprintf(stderr, "music: change %ld is not readable\n", ids[count]);
+            return -1;
+        }
+        count++;
+    }
+    if (rc != SQLITE_DONE)
+        db_log_error(music_db, "write: changes");
     sqlite3_finalize(st);
-    return rc;
+    if (rc != SQLITE_DONE)
+        return -1;
+
+    char path[TAGS_MAX_PATH];
+    int saved = 0;
+    if (full_path(rel, path) == 0) {
+        saved = tags_write(path, format, c, count);
+    } else {
+        for (int i = 0; i < count; i++) {
+            c[i].failed = 1;
+            snprintf(c[i].note, sizeof c[i].note, "the path is too long");
+        }
+    }
+
+    n->files += saved;
+    if (db_exec(music_db, "BEGIN IMMEDIATE") != 0)
+        return -1;
+    for (int i = 0; i < count; i++) {
+        if (change_result(ids[i], &c[i]) != 0) {
+            db_exec(music_db, "ROLLBACK");
+            return -1;
+        }
+        if (c[i].failed) {
+            n->failed++;
+            fprintf(stderr, "music: %s: %s not changed: %s\n", rel, tags_name[c[i].field],
+                    c[i].note);
+        } else if (c[i].note[0] != '\0') {
+            n->warnings++;
+            fprintf(stderr, "music: %s: %s changed; %s\n", rel, tags_name[c[i].field],
+                    c[i].note);
+        } else {
+            n->done++;
+        }
+    }
+    /* The changes are recorded even if the cache can not be refreshed;
+     * the next scan does that. */
+    if (saved)
+        reread(track_id, path, format);
+    return db_exec(music_db, "COMMIT") == 0 ? 0 : -1;
+}
+
+int music_write(void)
+{
+    if (root[0] == '\0') {
+        fprintf(stderr, "music: NYLM_MUSIC is not set\n");
+        return 1;
+    }
+    int lock = lock_service("write");
+    if (lock < 0)
+        return 1;
+    if (!music_available()) {
+        close(lock); /* the changes stay pending */
+        return 1;
+    }
+    struct write_counts n = { 0 };
+    int rc = db_exec(music_db,
+        "UPDATE changes SET state = 'failed', finished = unixepoch(),"
+        " note = 'the file is no longer in the library'"
+        " WHERE state = 'pending' AND track_id IS NULL");
+    n.failed += rc == 0 ? sqlite3_changes(music_db) : 0;
+
+    /* One track at a time, in id order: each turn moves past one id. */
+    sqlite3_int64 last = 0;
+    while (rc == 0) {
+        arena_reset();
+        sqlite3_stmt *st = db_prepare(music_db,
+            "SELECT min(track_id) FROM changes WHERE state = 'pending' AND track_id > ?");
+        int step = st != NULL && sqlite3_bind_int64(st, 1, last) == SQLITE_OK
+                       ? sqlite3_step(st) : SQLITE_ERROR;
+        int found = step == SQLITE_ROW && sqlite3_column_type(st, 0) != SQLITE_NULL;
+        if (found)
+            last = sqlite3_column_int64(st, 0);
+        if (step != SQLITE_ROW)
+            db_log_error(music_db, "write: next track");
+        sqlite3_finalize(st);
+        if (step != SQLITE_ROW)
+            rc = -1;
+        else if (!found)
+            break;
+        else
+            rc = write_track((long)last, &n);
+    }
+    if (rc == 0)
+        printf("music: %ld files written; %ld changes done, %ld with warnings, %ld failed\n",
+               n.files, n.done, n.warnings, n.failed);
+    else
+        fprintf(stderr, "music: write stopped (database error)\n");
+    close(lock);
+    return rc == 0 ? 0 : 1;
 }

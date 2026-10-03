@@ -1,0 +1,9 @@
+#!/bin/sh
+# Starts the music tag write (nylm-music-write.service, which runs
+# `nylm music-write` as user nylm) and returns at once. Takes no arguments.
+set -eu
+if [ "$#" -ne 0 ]; then
+    echo "music-write: takes no arguments" >&2
+    exit 2
+fi
+exec /usr/bin/systemctl start --no-block nylm-music-write.service

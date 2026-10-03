@@ -129,24 +129,31 @@ echo "not audio" > "$M/Artist/Album/03.mp3"
 ln -s "$M/Artist/Album/01.mp3" "$M/Artist/link.mp3"
 export NYLM_MUSIC="$M"
 
-# scan WANT DESCRIPTION [env-args]: `nylm music-scan` exits with WANT (0 or 1).
-scan() {
-    want=$1 desc=$2
-    shift 2
-    if env "$@" "$BIN" music-scan >"$TMP/scan.log" 2>&1; then got=0; else got=1; fi
+# service WANT DESCRIPTION COMMAND [env-args]: `nylm COMMAND` (music-scan,
+# music-write) exits with WANT (0 or 1); its output is in $TMP/service.log.
+service() {
+    want=$1 desc=$2 cmd=$3
+    shift 3
+    if env "$@" "$BIN" "$cmd" >"$TMP/service.log" 2>&1; then got=0; else got=1; fi
     if [ "$got" = "$want" ]; then PASSED=$((PASSED + 1)); else
-        FAILED=$((FAILED + 1)); echo "FAIL: $desc: exit $got: $(cat "$TMP/scan.log")"; fi
+        FAILED=$((FAILED + 1)); echo "FAIL: $desc: exit $got: $(cat "$TMP/service.log")"; fi
 }
-scan 1 "music-scan without NYLM_MUSIC" NYLM_MUSIC=
-scan 1 "music-scan, NYLM_MUSIC /"      NYLM_MUSIC=/
-scan 1 "music-scan, relative"          NYLM_MUSIC=music
-scan 1 "music-scan, missing folder"    NYLM_MUSIC="$TMP/nope"
-scan 0 "music-scan"
-grep -q "4 files, 3 read, 0 removed, 1 failed" "$TMP/scan.log" &&
-    PASSED=$((PASSED + 1)) || { FAILED=$((FAILED + 1)); echo "FAIL: scan counts: $(cat "$TMP/scan.log")"; }
-scan 0 "music-scan again"
-grep -q "4 files, 0 read" "$TMP/scan.log" &&
-    PASSED=$((PASSED + 1)) || { FAILED=$((FAILED + 1)); echo "FAIL: rescan re-read files: $(cat "$TMP/scan.log")"; }
+# logged TEXT DESCRIPTION: the last service's output contains TEXT.
+logged() {
+    if grep -qF -- "$1" "$TMP/service.log"; then PASSED=$((PASSED + 1)); else
+        FAILED=$((FAILED + 1)); echo "FAIL: $2: $(cat "$TMP/service.log")"; fi
+}
+service 1 "music-scan without NYLM_MUSIC" music-scan NYLM_MUSIC=
+service 1 "music-scan, NYLM_MUSIC /"      music-scan NYLM_MUSIC=/
+service 1 "music-scan, relative"          music-scan NYLM_MUSIC=music
+service 1 "music-scan, missing folder"    music-scan NYLM_MUSIC="$TMP/nope"
+service 1 "music-write without NYLM_MUSIC" music-write NYLM_MUSIC=
+service 0 "music-scan"                    music-scan
+logged "4 files, 3 read, 0 removed, 1 failed" "scan counts"
+service 0 "music-scan again"              music-scan
+logged "4 files, 0 read" "rescan reads only changed files"
+service 0 "music-write, nothing pending"  music-write
+logged "0 files written" "write with nothing pending"
 
 # ---- API and static files (defaults: 127.0.0.1, allow 127.0.0.0/8) ---------
 
@@ -412,61 +419,58 @@ else PASSED=$((PASSED + 1)); fi
 # ---- music -------------------------------------------------------------------
 
 for route in "GET /api/music" "GET /api/music/albums" "GET /api/music/album?id=1" \
-             "POST /api/music/album/save" "POST /api/music/scan"; do
+             "GET /api/music/changes" "POST /api/music/album/save" \
+             "POST /api/music/changes/cancel" "POST /api/music/scan" "POST /api/music/write"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
-# no_tmp DESCRIPTION: no temporary copy was left in the library.
-no_tmp() {
-    if find "$M" -name '.nylm-tmp-*' | grep -q .; then
-        FAILED=$((FAILED + 1)); echo "FAIL: $1: temporary copy left"
-    else PASSED=$((PASSED + 1)); fi
+# same_file DESCRIPTION A B: the two files are byte for byte the same.
+same_file() {
+    if cmp -s "$2" "$3"; then PASSED=$((PASSED + 1)); else
+        FAILED=$((FAILED + 1)); echo "FAIL: $1: files differ"; fi
 }
+LOCK="$TMP/data/music/library.lock"
 
 expect 200 "music overview"    -b "$JAR" "$B/api/music"
-expect_body '"configured":true,"available":true,"albums":2,"tracks":3' "music counts"
+expect_body '"configured":true,"available":true,"albums":2,"tracks":3,"pending":0,"busy":null' "music counts"
 expect_body '"files":4,"parsed":0,"failed":1,"ok":1},"scan_state":"done"' "music last scan"
 
 expect 200 "music albums"      -b "$JAR" "$B/api/music/albums"
-expect_body '"dir":"Artist/Album","tracks":2,"with_art":0,"album":"Some Album","albumartist":"Some Artist","date":"2001","genre":"Rock","mixed":[]' "albums list values"
+expect_body '"dir":"Artist/Album","tracks":2,"with_art":0,"album":"Some Album","albumartist":"Some Artist","date":"2001","genre":"Rock","pending":0,"mixed":[]' "albums list values"
 expect_body '"dir":"Artist/Multi"' "albums list second album"
 A=$(grep -o '"id":[0-9]*,"dir":"Artist/Album"' "$TMP/body" | grep -o '[0-9]*' | head -1)
 MA=$(grep -o '"id":[0-9]*,"dir":"Artist/Multi"' "$TMP/body" | grep -o '[0-9]*' | head -1)
 
 expect 200 "music album"       -b "$JAR" "$B/api/music/album?id=$MA"
 expect_body '"genre":"Rock; Pop"' "album shows several values joined"
-expect_body '"file":"01.flac","locked":["genre"]' "album marks the locked field"
+expect_body '"file":"01.flac","locked":["genre"],"pending":{}' "album marks the locked field"
 MT=$(grep -o '"tracks":\[{"id":[0-9]*' "$TMP/body" | grep -o '[0-9]*$')
 expect 200 "music album (2)"   -b "$JAR" "$B/api/music/album?id=$A"
 expect_body '"title":"Song One"' "album track tags"
-expect_body '"file":"01.mp3","locked":[]' "album track file name"
 T1=$(grep -o '"tracks":\[{"id":[0-9]*' "$TMP/body" | grep -o '[0-9]*$')
 expect 400 "album no id"       -b "$JAR" "$B/api/music/album"
 expect 400 "album id 0"        -b "$JAR" "$B/api/music/album?id=0"
 expect 400 "album id text"     -b "$JAR" "$B/api/music/album?id=x"
 expect 404 "album missing"     -b "$JAR" "$B/api/music/album?id=999"
 
+# Queueing changes writes no file.
 S=/api/music/album/save
 cp "$M/Artist/Album/01.mp3" "$TMP/before.mp3"
-post "save genre for album"    200 $S "{\"id\":$A,\"album\":{\"genre\":\"Jazz\"},\"tracks\":[]}"
-expect_body '"written":2' "save writes both files"
-no_tmp "save"
-expect 200 "album after save"  -b "$JAR" "$B/api/music/album?id=$A"
-expect_body '"genre":"Jazz"' "saved genre is read back"
-if tail -c 128 "$M/Artist/Album/01.mp3" | head -c 3 | grep -q TAG; then
-    FAILED=$((FAILED + 1)); echo "FAIL: save added an ID3v1 tag"
-else PASSED=$((PASSED + 1)); fi
-if cmp -s "$TMP/before.mp3" "$M/Artist/Album/01.mp3"; then
-    FAILED=$((FAILED + 1)); echo "FAIL: the file did not change"
-else PASSED=$((PASSED + 1)); fi
-post "save the same again"     200 $S "{\"id\":$A,\"album\":{\"genre\":\"Jazz\"},\"tracks\":[]}"
-expect_body '"written":0' "unchanged values are not written"
-post "save track title"        200 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1,\"title\":\"New Title\",\"artist\":null}]}"
-expect_body '"written":1' "save writes one file"
-post "save remove date, compilation" 200 $S "{\"id\":$A,\"album\":{\"date\":\"\",\"compilation\":true},\"tracks\":[]}"
-expect 200 "album after removal" -b "$JAR" "$B/api/music/album?id=$A"
-expect_body '"title":"New Title"' "saved title"
-expect_body '"date":null,"tracknumber":"1/2","discnumber":null,"compilation":"1"' "removed date, set compilation"
+post "queue genre for album"   200 $S "{\"id\":$A,\"album\":{\"genre\":\"Jazz\"},\"tracks\":[]}"
+expect_body '{"queued":2,"dropped":0}' "queue counts"
+same_file "queueing leaves the file alone" "$TMP/before.mp3" "$M/Artist/Album/01.mp3"
+expect 200 "album with pending" -b "$JAR" "$B/api/music/album?id=$A"
+expect_body '"genre":"Rock","date":"2001","tracknumber":"1/2","discnumber":null,"compilation":null,"file":"01.mp3","locked":[],"pending":{"genre":"Jazz"}' "album shows the file value and the pending one"
+post "queue the same again"    200 $S "{\"id\":$A,\"album\":{\"genre\":\"Jazz\"},\"tracks\":[]}"
+expect_body '{"queued":0,"dropped":0}' "same pending value is not queued again"
+post "queue back to the file value" 200 $S "{\"id\":$A,\"album\":{\"genre\":\"Rock\"},\"tracks\":[]}"
+expect_body '{"queued":0,"dropped":2}' "the file's own value drops the pending change"
+post "queue track title"       200 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id\":$T1,\"title\":\"New Title\",\"artist\":null}]}"
+expect_body '{"queued":1,"dropped":0}' "queue one track field"
+post "queue several"           200 $S "{\"id\":$A,\"album\":{\"genre\":\"Jazz\",\"date\":\"\",\"compilation\":true},\"tracks\":[]}"
+expect_body '{"queued":6,"dropped":0}' "queue album fields"
+expect 200 "overview pending"  -b "$JAR" "$B/api/music"
+expect_body '"pending":7,"busy":null' "overview counts pending changes"
 
 expect 415 "save needs json"   -b "$JAR" -d "{\"id\":$A}" "$B$S"
 post "save no id"              400 $S '{"album":{},"tracks":[]}'
@@ -492,49 +496,112 @@ post "save track album field"  400 $S "{\"id\":$A,\"album\":{},\"tracks\":[{\"id
 post "save album missing"      404 $S '{"id":999,"album":{},"tracks":[]}'
 post "save locked field"       409 $S "{\"id\":$MA,\"album\":{\"genre\":\"Rock\"},\"tracks\":[]}"
 expect_body "genre has several values" "locked field message"
-post "save other field of locked track" 200 $S "{\"id\":$MA,\"album\":{\"album\":\"Multi\"},\"tracks\":[]}"
 
-# A file changed behind nylm's back: refused until scanned again.
+# The list of changes, and cancelling pending ones.
+C=/api/music/changes/cancel
+expect 200 "changes"           -b "$JAR" "$B/api/music/changes"
+expect_body '"path":"Artist/Album/01.mp3","field":"title","old":"Song One","new":"New Title","state":"pending","note":""' "pending change listed"
+COMP=$(grep -o '"id":[0-9]*,"album_id":[0-9]*,"path":"[^"]*","field":"compilation"' "$TMP/body" |
+       grep -o '^"id":[0-9]*' | grep -o '[0-9]*' | tr '\n' ',' | sed 's/,$//')
+post "cancel compilation"      200 $C "{\"ids\":[$COMP]}"
+expect_body '{"cancelled":2}' "cancel counts"
+post "cancel again"            200 $C "{\"ids\":[$COMP]}"
+expect_body '{"cancelled":0}' "cancelled changes are gone"
+expect 415 "cancel needs json" -b "$JAR" -d '{"ids":[1]}' "$B$C"
+post "cancel no ids"           400 $C '{}'
+post "cancel empty ids"        400 $C '{"ids":[]}'
+post "cancel ids not numbers"  400 $C '{"ids":["1"]}'
+post "cancel id 0"             400 $C '{"ids":[0]}'
+post "cancel id fraction"      400 $C '{"ids":[1.5]}'
+post "cancel too many"         400 $C "{\"ids\":[$(seq -s, 1 1001)]}"
+
+# Starting the write service: password, then nothing may be running. (The
+# right password with changes pending runs the root action through sudo,
+# which is not tried here: on a server it would start the real service.)
+W=/api/music/write
+post "write no password"       400 $W '{}'
+post "write wrong password"    403 $W '{"password":"nope"}'
+expect 415 "write needs json"  -b "$JAR" -d '{"password":"x"}' "$B$W"
+
+# While a service holds the library lock, the server writes nothing.
+flock "$LOCK" sleep 8 &
+LOCKER=$!
+sleep 0.3
+expect 200 "overview while busy" -b "$JAR" "$B/api/music"
+expect_body '"busy":"' "overview shows the library busy"
+post "queue while busy"        409 $S "{\"id\":$A,\"album\":{\"genre\":\"Pop\"},\"tracks\":[]}"
+expect_body "the library is busy" "busy message"
+post "cancel while busy"       409 $C '{"ids":[1]}'
+post "scan while busy"         409 /api/music/scan '{"password":"smoke test password"}'
+post "write while busy"        409 $W '{"password":"smoke test password"}'
+service 1 "music-write while busy" music-write
+logged "the library is busy" "service refuses while another runs"
+service 1 "music-scan while busy" music-scan
+wait "$LOCKER"
+# A short write by the server (shared lock): the service waits for it.
+flock -s "$LOCK" sleep 1 &
+LOCKER=$!
+sleep 0.2
+
+# The write service writes the pending changes.
+service 0 "music-write"        music-write
+logged "2 files written; 5 changes done, 0 with warnings, 0 failed" "write counts"
+wait "$LOCKER"
+if tail -c 128 "$M/Artist/Album/01.mp3" | head -c 3 | grep -q TAG; then
+    PASSED=$((PASSED + 1)); else FAILED=$((FAILED + 1)); echo "FAIL: TagLib's ID3v1 tag removed"; fi
+expect 200 "album after write" -b "$JAR" "$B/api/music/album?id=$A"
+expect_body '"title":"New Title","artist":"Some Artist","album":"Some Album","albumartist":"Some Artist","genre":"Jazz","date":null,"tracknumber":"1/2","discnumber":null,"compilation":null,"file":"01.mp3","locked":[],"pending":{}' "written tags read back"
+expect 200 "changes after write" -b "$JAR" "$B/api/music/changes"
+expect_body '"pending":[],' "nothing pending after the write"
+expect_body '"field":"title","old":"Song One","new":"New Title","state":"done","note":""' "history keeps the change"
+post "write, nothing pending"  409 $W '{"password":"smoke test password"}'
+expect_body "no pending changes" "nothing to write message"
+
+# A file changed after its change was queued: that change fails, the other
+# file is written.
+post "queue genre again"       200 $S "{\"id\":$A,\"album\":{\"genre\":\"Blues\"},\"tracks\":[]}"
+cp tests/data/tagged.flac "$M/Artist/Album/02.flac"
 cp "$M/Artist/Album/02.flac" "$TMP/before.flac"
-touch -d '2001-01-01' "$M/Artist/Album/02.flac"
-post "save stale file"         409 $S "{\"id\":$A,\"album\":{\"genre\":\"Blues\"},\"tracks\":[]}"
-expect_body "scan the library again" "stale file message"
-no_tmp "stale save"
-if cmp -s "$TMP/before.flac" "$M/Artist/Album/02.flac"; then PASSED=$((PASSED + 1)); else
-    FAILED=$((FAILED + 1)); echo "FAIL: a refused save changed a file"; fi
-expect 200 "album after refused save" -b "$JAR" "$B/api/music/album?id=$A"
-expect_body '"genre":"Jazz"' "a refused save changes no file (first file kept)"
-scan 0 "music-scan after outside change"
-post "save after rescan"       200 $S "{\"id\":$A,\"album\":{\"genre\":\"Blues\"},\"tracks\":[]}"
-expect_body '"written":2' "save after rescan writes"
+service 0 "music-write, one file changed" music-write
+logged "1 files written; 1 changes done, 0 with warnings, 1 failed" "write counts with a failure"
+logged "the file changed since this was queued: it now has Rock" "failure logged"
+same_file "a failed change leaves the file alone" "$TMP/before.flac" "$M/Artist/Album/02.flac"
+expect 200 "changes after failure" -b "$JAR" "$B/api/music/changes"
+expect_body '"path":"Artist/Album/02.flac","field":"genre","old":"Jazz","new":"Blues","state":"failed","note":"the file changed since this was queued: it now has Rock"' "failure recorded with its cause"
 
-# The folder is gone (drive not mounted).
+# The service checks the table itself: a bad value put there directly fails.
+service 0 "rescan" music-scan
+sqlite3 "$TMP/data/music/music.db" \
+    "INSERT INTO changes (track_id, path, field, old, new, client) VALUES ($T1, 'Artist/Album/01.mp3', 'title', 'New Title', '', 'test')"
+service 0 "music-write, invalid value" music-write
+logged "invalid value: title can not be empty" "service validates values"
+expect 200 "album after invalid" -b "$JAR" "$B/api/music/album?id=$A"
+expect_body '"title":"New Title"' "invalid value not written"
+
+# A file removed by a scan: its pending change fails.
+post "queue on the other album" 200 $S "{\"id\":$MA,\"album\":{\"album\":\"Multi\"},\"tracks\":[]}"
+mv "$M/Artist/Multi" "$TMP/multi.away"
+service 0 "scan after removing a folder" music-scan
+service 0 "music-write, file gone" music-write
+logged "1 failed" "change for a removed file fails"
+expect 200 "changes after removal" -b "$JAR" "$B/api/music/changes"
+expect_body '"album_id":null,"path":"Artist/Multi/01.flac","field":"album","old":"Some Album","new":"Multi","state":"failed","note":"the file is no longer in the library"' "removed file recorded"
+mv "$TMP/multi.away" "$M/Artist/Multi"
+service 0 "rescan after restoring the folder" music-scan
+
+# The folder is gone (drive not mounted): services and their start refuse.
+post "queue for folder test"   200 $S "{\"id\":$A,\"album\":{\"genre\":\"Pop\"},\"tracks\":[]}"
 mv "$M" "$TMP/music.away"
-post "save, folder missing"    503 $S "{\"id\":$A,\"album\":{\"genre\":\"Pop\"},\"tracks\":[]}"
+post "write, folder missing"   503 $W '{"password":"smoke test password"}'
 post "scan, folder missing"    503 /api/music/scan '{"password":"smoke test password"}'
+service 1 "music-write, folder missing" music-write
 expect 200 "overview, folder missing" -b "$JAR" "$B/api/music"
-expect_body '"configured":true,"available":false' "overview shows the folder missing"
+expect_body '"configured":true,"available":false,"albums":2,"tracks":3,"pending":2' "pending changes kept while the folder is missing"
 mv "$TMP/music.away" "$M"
 
 post "scan no password"        400 /api/music/scan '{}'
 post "scan wrong password"     403 /api/music/scan '{"password":"nope"}'
 expect 415 "scan needs json"   -b "$JAR" -d '{"password":"x"}' "$B/api/music/scan"
-flock "$TMP/data/music/scan.lock" sleep 3 &
-LOCKER=$!
-sleep 0.3
-expect 200 "overview while scanning" -b "$JAR" "$B/api/music"
-expect_body '"scan_state":"running"' "overview shows a running scan"
-post "scan while scanning"     409 /api/music/scan '{"password":"smoke test password"}'
-scan 1 "second music-scan while one runs"
-wait "$LOCKER"
-AUDIT=$(sqlite3 "$TMP/data/music/music.db" \
-    "SELECT client || ' ' || action || ' ' || substr(result, 1, 5) FROM audit ORDER BY id" |
-    tr '\n' ',')
-if [ "$AUDIT" = "127.0.0.1 tags ok: 2,127.0.0.1 tags ok: 1,127.0.0.1 tags ok: 2,127.0.0.1 tags ok: 1,127.0.0.1 tags faile,127.0.0.1 tags ok: 2," ]; then
-    PASSED=$((PASSED + 1))
-else
-    FAILED=$((FAILED + 1)); echo "FAIL: audit log: $AUDIT"
-fi
 
 expect 204 "logout"             -b "$JAR" -c "$JAR" -X POST "$B/api/logout"
 expect 401 "after logout"       -b "$JAR" "$B/api/session"

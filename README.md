@@ -31,8 +31,8 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 | `src/router.c`    | route table: method, path, handler, login required       |
 | `src/api_*.c`     | handlers, one file per feature                           |
 | `src/care.c`      | plant care dates: when a care rule is next due           |
-| `src/music.c`     | music folder, `nylm music-scan`                          |
-| `src/tags.c`      | music file tags (TagLib): read, safe write               |
+| `src/music.c`     | music folder, lock, `nylm music-scan` and `music-write`  |
+| `src/tags.c`      | music file tags through TagLib: read, write, verify      |
 | `src/action.c`    | runs root actions through `sudo -n`                      |
 | `src/auth.c`      | password hashing (Argon2id), sessions                    |
 | `src/db.c`        | SQLite connection, applies migrations                    |
@@ -54,7 +54,7 @@ Each app has its own subfolder and SQLite database in it:
 ```
 $NYLM_DATA/core/core.db       login password and sessions
 $NYLM_DATA/plants/plants.db   plant care
-$NYLM_DATA/music/music.db     music tags cache, scans, audit log
+$NYLM_DATA/music/music.db     music tags cache, changes, scans, audit log
 ```
 
 nylm refuses to start if the folder does not exist. In an empty folder it
@@ -82,29 +82,39 @@ is its chip, and only late (rose) and today (peach) colour the due label.
 ## Music
 
 Album-first tag editor for the music folder `NYLM_MUSIC` (`src/api_music.c`,
-API under `/api/music`). The files are the truth: `music.db` only caches
-their tags. An album is a folder; its tracks are the `.mp3` and `.flac`
-files in it. Dot files are skipped and symlinks never followed.
+API under `/api/music`). The files are the truth: `music.db` caches their
+tags. An album is a folder; its tracks are the `.mp3` and `.flac` files in
+it. Dot files are skipped and symlinks never followed.
 
-`nylm music-scan` reads new and changed files (size or mtime) into the
-cache and drops files that are gone. It runs as its own process: by hand,
-or from the web app (password again) through the root action `music-scan`,
-which starts `nylm-music-scan.service`. One scan at a time
-(`$NYLM_DATA/music/scan.lock`).
+The server never opens a music file. It reads the cache, queues changes,
+and starts the two services that do work on the files, each its own
+process, started by hand or from the web app (password again, recorded in
+the `audit` table) through a root action that only starts its unit:
 
-Editing changes album-wide tags (album, album artist, genre, date,
-compilation) and per-track ones (title, artist, track and disc number).
-The page shows every change before writing. Then, for every file that
-changes: copy it next to itself (`.nylm-tmp-*`), edit the copy with
-TagLib, read it back and check that exactly the asked tags changed and the
-rest (other tags, pictures, audio) did not; only when every file of the
-album passes are the copies renamed over the originals. A file changed
-since the last scan, or a tag with several values, is refused. Each save
-is in the `audit` table: client, files, old and new values, result.
+- `nylm music-scan` (`nylm-music-scan.service`): reads new and changed
+  files (size or mtime) into the cache, drops files that are gone.
+- `nylm music-write` (`nylm-music-write.service`): writes the pending rows
+  of the `changes` table into the files.
 
-TagLib saves MP3 tags as ID3v2.4 (an ID3v2.3 tag is upgraded); the ID3v1
-tag it adds is removed again unless the file had one. Replaced files keep
-their mode and, if nylm may set it, their group; they are owned by nylm.
+They never run together: each holds `$NYLM_DATA/music/library.lock`
+exclusively. The server holds it shared for its own writes to `music.db`,
+and refuses to queue or cancel anything while a service runs (409).
+
+Editing an album queues album-wide changes (album, album artist, genre,
+date, compilation) and per-track ones (title, artist, track and disc
+number): one `changes` row per tag of a file, with the value it had when
+queued. Pending changes can be cancelled. The write service, per file,
+only through TagLib (`src/tags.c`): checks each value again (one line of
+UTF-8, at most 500 bytes, required tags not empty, dates and numbers well
+formed) and that the file still has the queued-against value, sets the
+tags and saves, then reads the file back. Each change ends `done`,
+`failed` (with the cause), or `warning`: written, but TagLib also changed
+other tags, pictures or audio properties, listed in its note. It only
+changes tags, never a file's path. Tags with several values are not
+changed.
+
+TagLib writes in place. It saves MP3 tags as ID3v2.4 (upgrading ID3v2.3)
+and adds an ID3v1 tag; both stay as TagLib writes them.
 
 ## Commands
 
@@ -115,7 +125,8 @@ sudo deploy/install.sh            # on the server: install or update
 journalctl -u nylm -f             # server logs
 sudo -u nylm env NYLM_DATA=/mnt/data/nylm nylm set-password
 sudo systemctl start nylm-music-scan   # scan the music folder
-journalctl -u nylm-music-scan          # scan output
+sudo systemctl start nylm-music-write  # write the pending tag changes
+journalctl -u nylm-music-scan -u nylm-music-write   # their output
 NYLM_DATA=dev-data ./nylm-debug set-password   # password for make run
 ```
 

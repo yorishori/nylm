@@ -43,3 +43,15 @@
 @media (max-width: 21rem) {
   .track-fields { grid-template-columns: 1fr 1fr; }
 }
+
+/* Queued, not yet written: a lavender line on the field and a lavender note. */
+input.pending { box-shadow: var(--pressed), inset 0 0 0 1px var(--lavender); }
+.pending-note { color: var(--lavender); }
+
+.history > header {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.25rem 1rem;
+}
+.note { overflow-wrap: anywhere; color: var(--muted); }

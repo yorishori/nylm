@@ -4,17 +4,8 @@
 #include <stddef.h>
 
 /*
- * Music file tags through TagLib's C API. The only code in nylm that opens
- * music files. Only MP3 and FLAC are handled.
- *
- * Writing never touches the original file until the very end:
- *   tags_prepare  copies the file to a temporary file in the same folder,
- *                 edits the copy, and reads it back to check that exactly the
- *                 requested tags changed and the audio is the same;
- *   tags_commit   renames the copy over the original (atomic);
- *   tags_discard  deletes the copy instead.
- * Prepare every file of an album first, then commit them all, so a failure
- * on any file leaves every file as it was.
+ * Music file tags through TagLib's C API. TagLib is the only thing that
+ * opens music files (nylm itself only lstat()s them). Only MP3 and FLAC.
  */
 
 /* The tags nylm reads and edits, by index. */
@@ -36,12 +27,15 @@ extern const char *const tags_name[TAG_FIELDS]; /* JSON and column name: "title"
 
 #define TAGS_MAX_VALUE 500  /* bytes in one tag value */
 #define TAGS_MAX_PATH  4096
-#define TAGS_TMP_PREFIX ".nylm-tmp-" /* temporary copies; scans skip dot files */
+#define TAGS_MAX_NOTE  256  /* bytes in a change's note */
 
 enum tags_format { TAGS_NONE, TAGS_MP3, TAGS_FLAC };
 
 /* The format a file name stands for (".mp3", ".flac", any case). */
 enum tags_format tags_format_of(const char *name);
+
+/* The field called name ("title", ...), or -1. */
+int tags_field_of(const char *name);
 
 struct tags {
     const char *value[TAG_FIELDS]; /* NULL: absent; several values joined by "; " */
@@ -50,13 +44,9 @@ struct tags {
     int seconds;                   /* audio length */
 };
 
-/* Results of tags_prepare / tags_commit besides 0 (done) and -1 (failed). */
-#define TAGS_STALE  1 /* the file changed since it was scanned */
-#define TAGS_LOCKED 2 /* a tag to change has several values */
-
 /*
- * Reads a file's tags; strings go into the request arena. 0, or -1 with a
- * reason in err.
+ * Reads a file's tags; strings go into the arena. 0, or -1 with a reason
+ * in err.
  */
 int tags_read(const char *path, enum tags_format format, struct tags *out, char *err,
               size_t errlen);
@@ -68,23 +58,28 @@ int tags_read(const char *path, enum tags_format format, struct tags *out, char 
  */
 const char *tags_check_value(enum tag_field field, const char *value);
 
-struct tags_edit {
-    const char *path;             /* absolute path of the file */
-    enum tags_format format;
-    long long size, mtime;        /* as scanned (mtime in ns); must still match */
-    const char *set[TAG_FIELDS];  /* NULL: keep; "": remove; else the new value */
-    char tmp[TAGS_MAX_PATH];      /* the prepared copy; "" if none */
+/* One tag to change, and what became of it. */
+struct tags_change {
+    enum tag_field field;
+    const char *old;   /* the value it was queued against (NULL: absent) */
+    const char *value; /* the new value; "" removes the tag */
+    int failed;        /* set by tags_write: 1 if not done */
+    char note[TAGS_MAX_NOTE]; /* why it failed, or what else changed */
 };
 
-/* Writes and verifies the edited copy. 0, TAGS_STALE, TAGS_LOCKED or -1;
- * on anything but 0 no copy is left and err says why. */
-int tags_prepare(struct tags_edit *e, char *err, size_t errlen);
-
-/* Replaces the original with the prepared copy. 0, TAGS_STALE or -1. */
-int tags_commit(struct tags_edit *e, char *err, size_t errlen);
-
-/* Deletes the prepared copy, if any. */
-void tags_discard(struct tags_edit *e);
+/*
+ * Writes the changes into the file in place, through TagLib. Each change
+ * is checked first: a valid value (tags_check_value), and the file still
+ * has the old value, with a single value. Failing changes are skipped;
+ * the others are set and the file is saved once. Then it is read back:
+ * every change must read as asked; any other tag, picture or audio
+ * property that differs from before is listed in each done change's note
+ * (a warning: the file is already written).
+ *
+ * Returns 1 if the file was saved, 0 if nothing was written (all changes
+ * failed, each with its note).
+ */
+int tags_write(const char *path, enum tags_format format, struct tags_change *changes, int n);
 
 /* A file's modification time in ns, as stored for a scan. */
 struct stat;

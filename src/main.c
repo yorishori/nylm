@@ -169,6 +169,7 @@ static void usage(void)
             "usage: nylm                 run the server\n"
             "       nylm set-password    set the login password (reads stdin)\n"
             "       nylm music-scan      read new and changed music files into the cache\n"
+            "       nylm music-write     write the pending music tag changes\n"
             "\n"
             "environment (defaults in brackets):\n"
             "  NYLM_DATA    (required)     data folder; must exist. Each app gets its own\n"
@@ -188,7 +189,7 @@ int main(int argc, char **argv)
     }
     const char *cmd = argc == 2 ? argv[1] : "";
     if (argc > 2 || (argc == 2 && strcmp(cmd, "set-password") != 0 &&
-                     strcmp(cmd, "music-scan") != 0)) {
+                     strcmp(cmd, "music-scan") != 0 && strcmp(cmd, "music-write") != 0)) {
         usage();
         return 2;
     }
@@ -205,6 +206,8 @@ int main(int argc, char **argv)
         rc = cmd_set_password();
     else if (strcmp(cmd, "music-scan") == 0)
         rc = arena_init(ARENA_SIZE) == 0 ? music_scan() : 1;
+    else if (strcmp(cmd, "music-write") == 0)
+        rc = arena_init(ARENA_SIZE) == 0 ? music_write() : 1;
     else
         rc = cmd_serve();
     db_close_all();

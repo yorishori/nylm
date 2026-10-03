@@ -70,6 +70,7 @@ if [ -d deploy/actions ]; then
 fi
 install -m 644 deploy/nylm.service /etc/systemd/system/nylm.service
 install -m 644 deploy/nylm-music-scan.service /etc/systemd/system/nylm-music-scan.service
+install -m 644 deploy/nylm-music-write.service /etc/systemd/system/nylm-music-write.service
 
 step "sudo rule"
 tmp=$(mktemp)

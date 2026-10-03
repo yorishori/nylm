@@ -3,10 +3,13 @@
 /*
  * Music app (/music/). Sections by URL hash:
  *   #/albums      every album (a folder of the library), and the library scan
- *   #/album/ID    one album: change its tags, review every change, write
+ *   #/album/ID    one album: change its tags; the changes are queued
+ *   #/changes     queued changes (cancel, or write them), and the history
  *
- * The files are the truth; the server keeps a cache of their tags, filled
- * by a scan. Nothing is written before the review lists every change.
+ * The server never touches the files: it keeps a cache of their tags and a
+ * queue of changes. Two services do the work, one at a time: the scan
+ * (files -> cache) and the write (queue -> files). Both are started here,
+ * with the password again. While one runs, nothing can be queued.
  */
 
 const ALBUM_FIELDS = [
@@ -24,7 +27,7 @@ const TRACK_FIELDS = [
 const LABELS = Object.fromEntries([...ALBUM_FIELDS, ...TRACK_FIELDS,
                                    ["compilation", "Compilation"]]);
 const MAX_VALUE = 500; /* bytes; the server checks the exact limit */
-const SCAN_POLL_MS = 3000;
+const POLL_MS = 3000;
 
 /* "3:05" or "1:02:03". */
 function duration(seconds) {
@@ -41,13 +44,92 @@ function showTime(ts) {
          `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
-function shell(...content) {
+/* A tag value for people: compilation "1" is "yes", nothing is "(none)". */
+function showValue(field, v) {
+  if (v == null || v === "") return "(none)";
+  if (field === "compilation") return v === "1" ? "yes" : v;
+  return v;
+}
+
+function shell(active, overview, ...content) {
+  const tabs = [
+    ["albums", "Albums"],
+    ["changes", overview.pending ? `Changes (${overview.pending})` : "Changes"],
+  ];
   return el("section", {},
-    el("header", { class: "app-head" }, el("h1", {}, "Music")),
+    el("header", { class: "app-head" },
+      el("h1", {}, "Music"),
+      el("nav", { class: "tabs", "aria-label": "Music sections" },
+        tabs.map(([key, label]) =>
+          el("a", { href: `#/${key}`, "aria-current": key === active ? "page" : null },
+             label)))),
     ...content);
 }
 
-/* ---- library and scan --------------------------------------------------- */
+/* ---- services ----------------------------------------------------------- */
+
+function busyText(o) {
+  if (o.busy === "scan") {
+    const s = o.scan;
+    return s && s.finished == null ? `Scanning… ${plural(s.files, "file", "files")} so far.`
+                                   : "Scanning…";
+  }
+  if (o.busy === "write") return "Writing changes to the files…";
+  return o.busy ? "Starting…" : "";
+}
+
+/*
+ * While a service runs, checks back every few seconds: text shows the
+ * progress; when it ends the page is shown again. node: stop when it is
+ * no longer on the page.
+ */
+function watchBusy(o, node, text) {
+  if (!o.busy) return;
+  const poll = async () => {
+    if (!node.isConnected) return;
+    try {
+      const now = await api("GET", "/api/music");
+      if (!node.isConnected) return;
+      if (now.busy) {
+        text.textContent = busyText(now);
+        setTimeout(poll, POLL_MS);
+      } else {
+        setStatus(o.busy === "write" ? "Writing finished: see the results below"
+                                     : "Scan finished");
+        refresh();
+      }
+    } catch (err) {
+      handleError(err);
+    }
+  };
+  setTimeout(poll, POLL_MS);
+}
+
+/* A password form that starts a service (path), then shows the page again. */
+function serviceForm(path, intro, submitLabel, started) {
+  const password = el("input", { type: "password", name: "password", required: true,
+                                 autocomplete: "current-password" });
+  const node = form({ class: "raised", hidden: true }, async () => {
+    try {
+      await api("POST", path, { password: password.value });
+    } finally {
+      password.value = "";
+    }
+    setStatus(started);
+    refresh();
+  },
+    el("p", {}, intro),
+    field("Password", password, "Starting it needs your password again."),
+    el("div", { class: "actions" },
+      el("button", { class: "btn go", type: "submit" }, submitLabel),
+      el("button", { class: "btn", type: "button", onclick: () => { node.hidden = true; } },
+         "Cancel")));
+  node.open = () => {
+    node.hidden = false;
+    password.focus();
+  };
+  return node;
+}
 
 function scanText(o) {
   const s = o.scan;
@@ -55,8 +137,7 @@ function scanText(o) {
     case "never":
       return "Never scanned.";
     case "running":
-      return s && s.finished == null ? `Scanning… ${plural(s.files, "file", "files")} so far.`
-                                     : "Scanning…";
+      return busyText(o);
     case "interrupted":
       return `The scan started ${showTime(s.started)} did not finish.`;
     case "failed":
@@ -68,69 +149,26 @@ function scanText(o) {
   }
 }
 
-/* The password form that starts a scan. */
-function scanForm(onCancel) {
-  const password = el("input", { type: "password", name: "password", required: true,
-                                 autocomplete: "current-password" });
-  const node = form({ class: "raised", hidden: true }, async () => {
-    try {
-      await api("POST", "/api/music/scan", { password: password.value });
-    } finally {
-      password.value = "";
-    }
-    setStatus("Scan started");
-    refresh();
-  },
-    el("p", {}, "The scan reads new and changed files. It changes no file."),
-    field("Password", password, "Starting a scan needs your password again."),
-    el("div", { class: "actions" },
-      el("button", { class: "btn go", type: "submit" }, "Start scan"),
-      el("button", { class: "btn", type: "button", onclick: onCancel }, "Cancel")));
-  node.focusFirst = () => password.focus();
-  return node;
-}
-
-/* Counts, the last scan, and the scan button. While a scan runs it checks
- * back every few seconds and shows the page again when it is done. */
+/* Counts, the last scan, and the scan button. */
 function libraryCard(o) {
-  const text = el("p", {}, scanText(o));
-  const scan = scanForm(() => { scan.hidden = true; });
+  const text = el("p", {}, o.busy && o.busy !== "scan" ? busyText(o) : scanText(o));
+  const scan = serviceForm("/api/music/scan",
+    "The scan reads new and changed files into nylm. It changes no file.",
+    "Start scan", "Scan started");
   const card = el("section", { class: "card stack" },
     el("h2", {}, "Library"),
     el("p", {}, `${plural(o.albums, "album", "albums")}, ${plural(o.tracks, "track", "tracks")}`),
     o.available ? null
                 : el("p", { class: "warn" },
                      "The music folder is not available (is the drive mounted?). The albums " +
-                     "below are from the last scan; nothing can be changed now."),
+                     "below are from the last scan; nothing can be scanned or written now."),
     text,
-    o.scan_state === "running" || !o.available ? null
+    o.busy || !o.available ? null
       : el("div", { class: "actions" },
-          el("button", { class: "btn", type: "button", onclick: () => {
-            scan.hidden = false;
-            scan.focusFirst();
-          } }, "Scan library…")),
+          el("button", { class: "btn", type: "button", onclick: () => scan.open() },
+             "Scan library…")),
     scan);
-
-  if (o.scan_state === "running") {
-    const poll = async () => {
-      if (!card.isConnected) return;
-      try {
-        const now = await api("GET", "/api/music");
-        if (!card.isConnected) return;
-        if (now.scan_state === "running") {
-          text.textContent = scanText(now);
-          setTimeout(poll, SCAN_POLL_MS);
-        } else {
-          setStatus(now.scan_state === "done" ? "Scan finished" : "Scan ended with problems",
-                    now.scan_state !== "done");
-          refresh();
-        }
-      } catch (err) {
-        handleError(err);
-      }
-    };
-    setTimeout(poll, SCAN_POLL_MS);
-  }
+  watchBusy(o, card, text);
   return card;
 }
 
@@ -153,15 +191,19 @@ function albumCard(a) {
       ? el("p", { class: "hint" },
            `Differs between tracks: ${a.mixed.map((f) => LABELS[f].toLowerCase()).join(", ")}`)
       : null,
+    a.pending ? el("p", { class: "pending-note" }, `${plural(a.pending, "change", "changes")} pending`)
+              : null,
     el("div", { class: "actions" }, navButton("Open", `#/album/${a.id}`)));
 }
 
 async function albumsPage() {
   const o = await api("GET", "/api/music");
   if (!o.configured) {
-    return shell(el("div", { class: "empty" },
-      el("p", {}, "Music is not set up. Set NYLM_MUSIC in /etc/nylm.conf to the music " +
-                  "folder, restart nylm, then scan the library.")));
+    return el("section", {},
+      el("header", { class: "app-head" }, el("h1", {}, "Music")),
+      el("div", { class: "empty" },
+        el("p", {}, "Music is not set up. Set NYLM_MUSIC in /etc/nylm.conf to the music " +
+                    "folder, restart nylm, then scan the library.")));
   }
   const albums = await api("GET", "/api/music/albums");
   const filter = el("input", { type: "search", "aria-label": "Filter albums",
@@ -177,7 +219,7 @@ async function albumsPage() {
   };
   filter.addEventListener("input", show);
   show();
-  return shell(
+  return shell("albums", o,
     libraryCard(o),
     el("section", { class: "section" },
       el("header", {}, el("h2", {}, "Albums ", count)),
@@ -187,25 +229,34 @@ async function albumsPage() {
 
 /* ---- one album ---------------------------------------------------------- */
 
-/* What the album's tracks have for field f: shared value or not, locked. */
+/* A track's value for field f as it will be: the pending change, else the
+ * file's value ("" when absent). */
+function planned(t, f) {
+  return f in t.pending ? t.pending[f] : t[f] ?? "";
+}
+
+/* What the album's tracks will have for field f: shared or not, locked,
+ * whether a change is pending. */
 function fieldState(tracks, f) {
-  const values = tracks.map((t) => t[f]);
+  const values = tracks.map((t) => planned(t, f));
   const same = values.every((v) => v === values[0]);
   return {
     same,
     shared: same ? values[0] : null,
-    distinct: [...new Set(values.map((v) => v ?? "(none)"))],
+    distinct: [...new Set(values.map((v) => showValue(f, v)))],
     locked: tracks.some((t) => t.locked.includes(f)),
+    pending: tracks.some((t) => f in t.pending),
   };
 }
 
 /*
  * A text input for a tag. read() gives the new value, or null if it was
- * not changed (the server then keeps what each file has).
+ * not changed from what is shown (the file's value or the pending one).
  */
-function tagInput(label, initial, { locked, placeholder }) {
+function tagInput(label, initial, { locked, placeholder, pending }) {
   const input = el("input", { maxlength: MAX_VALUE, value: initial, placeholder,
-                              disabled: Boolean(locked), "aria-label": label });
+                              disabled: Boolean(locked), "aria-label": label,
+                              class: pending ? "pending" : null });
   input.read = () => (locked || input.value === initial ? null : input.value.trim());
   return input;
 }
@@ -217,15 +268,17 @@ function albumInputs(tracks) {
   const inputs = [];
   const fields = ALBUM_FIELDS.map(([f, label]) => {
     const s = fieldState(tracks, f);
-    const input = tagInput(label, s.same ? s.shared ?? "" : "", {
+    const input = tagInput(label, s.same ? s.shared : "", {
       locked: s.locked,
+      pending: s.pending,
       placeholder: s.same ? (f === "date" ? "YYYY or YYYY-MM-DD" : "") : "Leave empty to keep",
     });
-    inputs.push([f, input]);
+    inputs.push([f, input, s.same]);
     const hint = s.locked ? LOCKED_HINT
-               : s.same ? null
-               : `Differs between tracks: ${s.distinct.slice(0, 4).join(", ")}` +
-                 (s.distinct.length > 4 ? ", …" : "") + ". Leave empty to keep each.";
+               : !s.same ? `Differs between tracks: ${s.distinct.slice(0, 4).join(", ")}` +
+                           (s.distinct.length > 4 ? ", …" : "") + ". Leave empty to keep each."
+               : s.pending ? "Includes a pending change."
+               : null;
     return field(label, input, hint);
   });
 
@@ -241,16 +294,17 @@ function albumInputs(tracks) {
     ],
   });
   fields.push(comp.locked ? field("Compilation", el("p", { class: "muted" }, LOCKED_HINT))
-                          : field("Compilation", compChoice));
+                          : field("Compilation", compChoice,
+                                  comp.pending ? "Includes a pending change." : null));
 
   return {
     fields,
     read() {
       const out = {};
-      for (const [f, input] of inputs) {
+      for (const [f, input, same] of inputs) {
         const v = input.read();
         /* A differing field left empty is kept, not removed. */
-        if (v !== null && (fieldState(tracks, f).same || v !== "")) out[f] = v;
+        if (v !== null && (same || v !== "")) out[f] = v;
       }
       if (compChoice && compChoice.value !== compInitial) {
         out.compilation = compChoice.value === "yes";
@@ -263,7 +317,9 @@ function albumInputs(tracks) {
 /* One track's row of inputs. read() gives {field: value} of the changed ones. */
 function trackRow(t) {
   const inputs = TRACK_FIELDS.map(([f, label]) =>
-    [f, tagInput(label, t[f] ?? "", { locked: t.locked.includes(f) })]);
+    [f, tagInput(label, planned(t, f), { locked: t.locked.includes(f), pending: f in t.pending })]);
+  const hint = (f) => t.locked.includes(f) ? LOCKED_HINT
+                    : f in t.pending ? `Pending (file has ${showValue(f, t[f])})` : null;
   const row = el("li", { class: "card track" },
     el("header", {},
       el("strong", { class: "path" }, t.file),
@@ -271,8 +327,7 @@ function trackRow(t) {
          [t.format.toUpperCase(), duration(t.seconds), t.pictures ? "cover" : "no cover"]
            .join(" · "))),
     el("div", { class: "track-fields" },
-      inputs.map(([f, input]) => field(LABELS[f], input,
-                                       t.locked.includes(f) ? LOCKED_HINT : null))));
+      inputs.map(([f, input]) => field(LABELS[f], input, hint(f)))));
   row.read = () => {
     const out = {};
     for (const [f, input] of inputs) {
@@ -284,8 +339,11 @@ function trackRow(t) {
   return row;
 }
 
-/* The tags a change really changes, per track, as the server will see it:
- * [{track, changes: [[field, old, new]]}] with only real differences. */
+/*
+ * What the request will do per track, as the server sees it:
+ * [{track, changes: [[field, file value, new value, cancels]]}], where
+ * cancels means the new value is the file's own (the pending change goes).
+ */
 function plannedChanges(tracks, albumChanges, trackChanges) {
   const plan = [];
   for (const t of tracks) {
@@ -293,19 +351,22 @@ function plannedChanges(tracks, albumChanges, trackChanges) {
     const wanted = { ...albumChanges, ...(trackChanges.get(t.id) || {}) };
     for (const [f, value] of Object.entries(wanted)) {
       const v = f === "compilation" ? (value ? "1" : "") : value;
-      if ((t[f] ?? "") !== v) changes.push([f, t[f], v]);
+      if (planned(t, f) === v) continue;
+      changes.push([f, t[f], v, (t[f] ?? "") === v]);
     }
     if (changes.length) plan.push({ track: t, changes });
   }
   return plan;
 }
 
-function changeLine([f, before, after]) {
+function changeLine(field, before, after, cancels) {
   return el("li", {},
-    el("span", { class: "muted" }, `${LABELS[f]}: `),
-    el("span", { class: "old" }, before ?? "(none)"),
+    el("span", { class: "muted" }, `${LABELS[field]}: `),
+    el("span", { class: "old" }, showValue(field, before)),
     " → ",
-    el("strong", {}, after === "" ? "(removed)" : after));
+    el("strong", {}, after === "" ? "(removed)" : showValue(field, after)),
+    cancels ? el("span", { class: "muted" }, " (the file's own value: cancels the pending change)")
+            : null);
 }
 
 async function albumPage(id) {
@@ -315,21 +376,26 @@ async function albumPage(id) {
   const rows = a.tracks.map(trackRow);
   const seconds = a.tracks.reduce((sum, t) => sum + t.seconds, 0);
   const covers = a.tracks.filter((t) => t.pictures > 0).length;
+  const pending = a.tracks.reduce((sum, t) => sum + Object.keys(t.pending).length, 0);
   const title = fieldState(a.tracks, "album");
 
   const review = el("div", { hidden: true });
   const editor = el("div", { class: "stack" },
+    pending ? el("p", { class: "pending-note" },
+                 `${plural(pending, "change", "changes")} pending for this album: shown in ` +
+                 "the fields below, written when you write the changes.") : null,
     el("section", { class: "raised stack" },
       el("h2", {}, "Whole album"),
-      el("p", { class: "hint" }, "Set here, a tag is written to every track of the album."),
+      el("p", { class: "hint" }, "Set here, a tag is changed on every track of the album."),
       el("div", { class: "album-fields" }, album.fields)),
     el("section", { class: "section" },
       el("header", {}, el("h2", {}, "Tracks ", el("span", { class: "count" }, a.tracks.length))),
       el("ol", { class: "list" }, rows)),
-    o.available
-      ? el("div", { class: "actions" },
-          el("button", { class: "btn go", type: "button", onclick: showReview }, "Review changes"))
-      : el("p", { class: "warn" }, "The music folder is not available: nothing can be changed."));
+    o.busy
+      ? el("p", { class: "warn" }, "A scan or write is running; changes can be queued when " +
+                                   "it is done.")
+      : el("div", { class: "actions" },
+          el("button", { class: "btn go", type: "button", onclick: showReview }, "Review changes")));
 
   function showReview() {
     const albumChanges = album.read();
@@ -339,6 +405,7 @@ async function albumPage(id) {
       setStatus("Nothing to change");
       return;
     }
+    const count = plan.reduce((sum, p) => sum + p.changes.length, 0);
     const body = {
       id: a.id,
       album: albumChanges,
@@ -351,30 +418,36 @@ async function albumPage(id) {
     };
     review.replaceChildren(form({ class: "raised stack" }, async () => {
       const result = await api("POST", "/api/music/album/save", body);
-      setStatus(`Wrote ${plural(result.written, "file", "files")}`);
+      const parts = [];
+      if (result.queued) parts.push(`queued ${plural(result.queued, "change", "changes")}`);
+      if (result.dropped) parts.push(`cancelled ${plural(result.dropped, "pending change", "pending changes")}`);
+      const text = parts.join(", ") || "nothing changed";
+      setStatus(text[0].toUpperCase() + text.slice(1) +
+                (result.queued ? ". Write them from Changes." : ""));
       refresh();
     },
-      el("h2", {}, `Review: ${plural(plan.length, "file", "files")} will change`),
+      el("h2", {}, `Review: ${plural(count, "change", "changes")} in ` +
+                   plural(plan.length, "file", "files")),
       el("p", { class: "hint" },
-         "Each file is copied, changed and checked first; only if every file passes are " +
-         "they replaced. Nothing else in the files changes."),
+         "These changes are queued, not written yet. Write them from Changes; the files are " +
+         "checked before and after each change."),
       el("ul", { class: "list" }, plan.map(({ track, changes }) =>
         el("li", { class: "card" },
           el("strong", { class: "path" }, track.file),
-          el("ul", { class: "changes" }, changes.map(changeLine))))),
+          el("ul", { class: "changes" }, changes.map((c) => changeLine(...c)))))),
       el("div", { class: "actions" },
         el("button", { class: "btn go", type: "submit" },
-           `Write ${plural(plan.length, "file", "files")}`),
+           `Queue ${plural(count, "change", "changes")}`),
         el("button", { class: "btn", type: "button", onclick: back }, "Back to editing"))));
     editor.hidden = true;
     review.hidden = false;
     review.querySelector("h2").scrollIntoView({ block: "start" });
   }
 
-  return shell(
+  return shell("albums", o,
     el("div", { class: "actions" }, navButton("All albums", "#/albums")),
     el("header", { class: "section album-head" },
-      el("h2", {}, title.same ? title.shared ?? "No album name" : "Several album names"),
+      el("h2", {}, title.same ? title.shared || "No album name" : "Several album names"),
       el("p", { class: "muted path" }, a.dir || "(the top folder)"),
       el("p", { class: "muted" },
          `${plural(a.tracks.length, "track", "tracks")} · ${duration(seconds)} · ` +
@@ -383,14 +456,113 @@ async function albumPage(id) {
     review);
 }
 
+/* ---- changes ------------------------------------------------------------ */
+
+async function cancelChanges(ids, what) {
+  const result = await api("POST", "/api/music/changes/cancel", { ids });
+  setStatus(`Cancelled ${plural(result.cancelled, "change", "changes")}${what}`);
+  refresh();
+}
+
+/* A button that cancels the given pending changes (asks first if many). */
+function cancelButton(label, ids, what) {
+  const button = el("button", { class: "btn", type: "button", onclick: async () => {
+    if (ids.length > 1 && !sure(`Cancel ${plural(ids.length, "pending change", "pending changes")}${what}?`)) {
+      return;
+    }
+    button.disabled = true;
+    try {
+      await cancelChanges(ids, what);
+    } catch (err) {
+      handleError(err);
+      button.disabled = false;
+    }
+  } }, label);
+  return button;
+}
+
+/* The pending changes of one file. */
+function pendingCard(path, rows) {
+  const albumId = rows[0].album_id;
+  return el("li", { class: "card stack" },
+    el("strong", { class: "path" }, path),
+    el("ul", { class: "changes" },
+       rows.map((c) => changeLine(c.field, c.old, c.new, false))),
+    el("div", { class: "actions" },
+      albumId != null ? navButton("Open album", `#/album/${albumId}`) : null,
+      cancelButton(rows.length > 1 ? "Cancel these" : "Cancel", rows.map((c) => c.id),
+                   ` for ${path.split("/").pop()}`)));
+}
+
+const STATE_TEXT = { done: "Done", warning: "Done, with a warning", failed: "Failed" };
+
+/* One written (or failed) change. Colour only for what needs a look:
+ * rose failed, peach warning. */
+function historyItem(c) {
+  const tone = c.state === "failed" ? "late" : c.state === "warning" ? "today" : "";
+  return el("li", { class: "card stack history" },
+    el("header", {},
+      el("span", { class: tone ? `due ${tone}` : "muted" }, STATE_TEXT[c.state]),
+      el("span", { class: "muted" }, c.finished ? showTime(c.finished) : "")),
+    el("strong", { class: "path" }, c.path),
+    el("ul", { class: "changes" }, changeLine(c.field, c.old, c.new, false)),
+    c.note ? el("p", { class: c.state === "failed" ? "note failed" : "note" }, c.note) : null);
+}
+
+async function changesPage() {
+  const [o, ch] = await Promise.all([api("GET", "/api/music"),
+                                     api("GET", "/api/music/changes")]);
+  const byFile = new Map();
+  for (const c of ch.pending) {
+    if (!byFile.has(c.path)) byFile.set(c.path, []);
+    byFile.get(c.path).push(c);
+  }
+  const write = serviceForm("/api/music/write",
+    `Writes ${plural(ch.pending.length, "change", "changes")} into ` +
+    `${plural(byFile.size, "file", "files")}. Each file is checked first (the value it was ` +
+    "queued against, a valid new value) and read back after; the result of each change is " +
+    "listed below.",
+    "Write changes", "Writing started");
+  const text = el("p", {}, busyText(o));
+  const panel = el("section", { class: "card stack" },
+    el("h2", {}, "Pending ", el("span", { class: "count" }, ch.pending.length)),
+    o.busy ? text : null,
+    !o.available ? el("p", { class: "warn" },
+                      "The music folder is not available (is the drive mounted?): nothing can " +
+                      "be written now.") : null,
+    ch.pending.length === 0
+      ? el("p", { class: "muted" }, "Nothing is queued. Change tags on an album to queue changes.")
+      : o.busy || !o.available ? null
+      : el("div", { class: "actions" },
+          el("button", { class: "btn go", type: "button", onclick: () => write.open() },
+             "Write changes…"),
+          cancelButton("Cancel all", ch.pending.map((c) => c.id), "")),
+    write);
+  watchBusy(o, panel, text);
+
+  return shell("changes", o,
+    panel,
+    byFile.size
+      ? el("section", { class: "section" },
+          el("ul", { class: "list cols" },
+             [...byFile].map(([path, rows]) => pendingCard(path, rows))))
+      : null,
+    el("section", { class: "section" },
+      el("header", {}, el("h2", {}, "History ", el("span", { class: "count" }, ch.history.length))),
+      ch.history.length
+        ? el("ul", { class: "list cols" }, ch.history.map(historyItem))
+        : el("p", { class: "empty" }, "Nothing written yet.")));
+}
+
 /* ---- routing ------------------------------------------------------------ */
 
-/* ["album", "3"] -> that album; anything else goes to the albums. */
+/* ["album", "3"] -> that album, etc. Anything else goes to the albums. */
 function route(parts) {
   const [section, rawId] = parts;
   const id = Number(rawId);
   if (section === "album" && Number.isInteger(id) && id > 0) return albumPage(id);
   if (section === "albums" && rawId === undefined) return albumsPage();
+  if (section === "changes" && rawId === undefined) return changesPage();
   go("#/albums");
   return null;
 }

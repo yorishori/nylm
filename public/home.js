@@ -18,13 +18,15 @@ async function plantsSummary() {
   ];
 }
 
-/* Pills for the music library: albums, and a scan if one runs. */
+/* Pills for the music library: albums, pending changes, a running service. */
 async function musicSummary() {
   const o = await api("GET", "/api/music");
   if (!o.configured) return [el("span", { class: "pill" }, "Not set up")];
   return [
     el("span", { class: "pill" }, plural(o.albums, "album", "albums")),
-    o.scan_state === "running" ? el("span", { class: "pill" }, "Scanning") : null,
+    o.pending ? el("span", { class: "pill" }, `${o.pending} pending`) : null,
+    o.busy === "scan" ? el("span", { class: "pill" }, "Scanning") : null,
+    o.busy === "write" ? el("span", { class: "pill" }, "Writing") : null,
     o.available ? null : el("span", { class: "pill today" }, "Folder missing"),
   ];
 }
