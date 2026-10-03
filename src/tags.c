@@ -327,8 +327,74 @@ static size_t count(char **list)
     return n;
 }
 
-/* Reads every tag of the open file f into out. 0, or -1 when out of memory. */
-static int read_open(const TagLib_File *f, struct tags *out)
+/* A picture's type or description as kept: at most 500 bytes, and "" if
+ * absent or not UTF-8 text without control characters. In the arena; NULL
+ * when out of memory. */
+static const char *picture_text(const char *s)
+{
+    if (s == NULL)
+        return "";
+    const char *t = cut(s, TAGS_MAX_VALUE);
+    if (t == s)
+        t = arena_strndup(s, strlen(s));
+    return t != NULL && !text_valid(t, 0) ? "" : t;
+}
+
+/*
+ * Reads the first TAGS_MAX_PICTURES pictures of the open file f into out,
+ * passing each to on_picture (if not NULL). 0, -1 when out of memory, -2
+ * when on_picture failed.
+ */
+static int read_pictures(const TagLib_File *f, struct tags *out, tags_picture_fn on_picture,
+                         void *ctx)
+{
+    TagLib_Complex_Property_Attribute ***pics = taglib_complex_property_get(f, "PICTURE");
+    size_t n = 0;
+    while (pics != NULL && pics[n] != NULL)
+        n++;
+    if (n > TAGS_MAX_PICTURES)
+        n = TAGS_MAX_PICTURES;
+    struct tag_picture *list = n > 0 ? arena_alloc(n * sizeof *list) : NULL;
+    int rc = n > 0 && list == NULL ? -1 : 0;
+    size_t kept = 0;
+    for (size_t i = 0; i < n && rc == 0; i++) {
+        const unsigned char *data = NULL;
+        size_t size = 0;
+        const char *type = NULL, *description = NULL;
+        for (TagLib_Complex_Property_Attribute **a = pics[i]; *a != NULL; a++) {
+            const TagLib_Variant *v = &(*a)->value;
+            if (strcmp((*a)->key, "data") == 0 && v->type == TagLib_Variant_ByteVector) {
+                data = (const unsigned char *)v->value.byteVectorValue;
+                size = v->size;
+            } else if (strcmp((*a)->key, "pictureType") == 0 && v->type == TagLib_Variant_String) {
+                type = v->value.stringValue;
+            } else if (strcmp((*a)->key, "description") == 0 &&
+                       v->type == TagLib_Variant_String) {
+                description = v->value.stringValue;
+            }
+        }
+        if (data == NULL)
+            continue; /* no picture in it */
+        struct tag_picture *p = &list[kept];
+        if (art_hash(data, size, p->hash) != 0 || (p->type = picture_text(type)) == NULL ||
+            (p->description = picture_text(description)) == NULL)
+            rc = -1;
+        else if (on_picture != NULL && on_picture(ctx, p, data, size) != 0)
+            rc = -2;
+        else
+            kept++;
+    }
+    if (pics != NULL)
+        taglib_complex_property_free(pics);
+    out->pictures = list;
+    out->npictures = rc == 0 ? kept : 0;
+    return rc;
+}
+
+/* Reads every tag and the pictures of the open file f into out. 0, -1 when
+ * out of memory, -2 when on_picture failed. */
+static int read_open(const TagLib_File *f, struct tags *out, tags_picture_fn on_picture,
+                     void *ctx)
 {
     memset(out, 0, sizeof *out);
     int rc = 0;
@@ -356,15 +422,11 @@ static int read_open(const TagLib_File *f, struct tags *out)
     }
     if (rc == 0 && out->value[TAG_COMPILATION].n == 0)
         rc = tags_set_one(out, TAG_COMPILATION, "0");
-
-    TagLib_Complex_Property_Attribute ***pics = taglib_complex_property_get(f, "PICTURE");
-    out->has_art = pics != NULL && pics[0] != NULL;
-    if (pics != NULL)
-        taglib_complex_property_free(pics);
-    return rc;
+    return rc == 0 ? read_pictures(f, out, on_picture, ctx) : rc;
 }
 
-int tags_read(const char *path, struct tags *out, char *err, size_t errlen)
+int tags_read(const char *path, struct tags *out, tags_picture_fn on_picture, void *ctx,
+              char *err, size_t errlen)
 {
     memset(out, 0, sizeof *out);
     TagLib_File *f = open_file(path);
@@ -372,28 +434,38 @@ int tags_read(const char *path, struct tags *out, char *err, size_t errlen)
         set_err(err, errlen, "TagLib can not read it");
         return -1;
     }
-    int rc = read_open(f, out);
+    int rc = read_open(f, out, on_picture, ctx);
     taglib_file_free(f);
     if (rc != 0)
-        set_err(err, errlen, "out of memory");
-    return rc;
+        set_err(err, errlen, rc == -2 ? "a picture could not be stored" : "out of memory");
+    return rc != 0 ? -1 : 0;
+}
+
+int tags_same_pictures(const struct tags *a, const struct tags *b)
+{
+    if (a->npictures != b->npictures)
+        return 0;
+    for (size_t i = 0; i < a->npictures; i++)
+        if (strcmp(a->pictures[i].hash, b->pictures[i].hash) != 0)
+            return 0;
+    return 1;
 }
 
 /* ---- writing ------------------------------------------------------------ */
 
-/* The first field where a and b differ (has_art: TAG_FIELDS), or -1. */
+/* The first field where a and b differ (the pictures: TAG_FIELDS), or -1. */
 static int first_difference(const struct tags *a, const struct tags *b)
 {
     for (int i = 0; i < TAG_FIELDS; i++)
         if (!tags_equal(&a->value[i], &b->value[i]))
             return i;
-    return a->has_art != b->has_art ? TAG_FIELDS : -1;
+    return tags_same_pictures(a, b) ? -1 : TAG_FIELDS;
 }
 
-/* A field's name for messages; TAG_FIELDS is the picture. */
+/* A field's name for messages; TAG_FIELDS is the pictures. */
 static const char *field_key(int field)
 {
-    return field < TAG_FIELDS ? tags_key[field] : "the picture";
+    return field < TAG_FIELDS ? tags_key[field] : "the pictures";
 }
 
 enum tags_result tags_write(const char *path, const struct tags *now, const struct tags *want,
@@ -414,7 +486,7 @@ enum tags_result tags_write(const char *path, const struct tags *now, const stru
         return TAGS_NOT_WRITTEN;
     }
     struct tags before;
-    if (read_open(f, &before) != 0) {
+    if (read_open(f, &before, NULL, NULL) != 0) {
         taglib_file_free(f);
         set_err(err, errlen, "out of memory");
         return TAGS_NOT_WRITTEN;
@@ -446,19 +518,20 @@ enum tags_result tags_write(const char *path, const struct tags *now, const stru
 
     struct tags after;
     char why[128];
-    if (tags_read(path, &after, why, sizeof why) != 0) {
+    if (tags_read(path, &after, NULL, NULL, why, sizeof why) != 0) {
         set_err(err, errlen, "after saving, %s; check that it still plays", why);
         fprintf(stderr, "tags: can not read %s after saving it\n", path);
         return TAGS_WRITTEN_BAD;
     }
-    struct tags expect = *want;
-    expect.has_art = before.has_art;
-    diff = first_difference(&after, &expect);
+    diff = first_difference(&after, want);
+    if (diff == TAG_FIELDS) {
+        set_err(err, errlen, "after saving, the pictures differ");
+        return TAGS_WRITTEN_BAD;
+    }
     if (diff >= 0) {
-        const struct tag_values *v = diff < TAG_FIELDS ? &after.value[diff] : NULL;
+        const struct tag_values *v = &after.value[diff];
         set_err(err, errlen, "after saving, %s reads %.200s", field_key(diff),
-                v == NULL ? (after.has_art ? "present" : "absent")
-                : v->n == 0 ? "nothing" : v->v[0]);
+                v->n == 0 ? "nothing" : v->v[0]);
         return TAGS_WRITTEN_BAD;
     }
     return TAGS_WRITTEN;

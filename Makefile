@@ -1,8 +1,9 @@
 CC      = gcc
 CFLAGS  = -std=c11 -Wall -Wextra -Werror -Wpedantic -Wshadow -Wconversion -MMD -MP
 LDFLAGS =
-# System libraries (Arch packages: sqlite, cjson, openssl, taglib).
-LDLIBS  = -lsqlite3 -lcjson -lcrypto -ltag_c
+# System libraries (Arch packages: sqlite, cjson, openssl, taglib, libjpeg-turbo,
+# libpng).
+LDLIBS  = -lsqlite3 -lcjson -lcrypto -ltag_c -ljpeg -lpng16
 
 SRC = $(wildcard src/*.c)
 

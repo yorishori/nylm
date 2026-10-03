@@ -1,7 +1,7 @@
 /* Music tags: the field table, the rules, preparing a write, reading and
- * writing through TagLib on copies of the files in tests/data (MP3 with
- * ID3v2.3; FLAC; FLAC with two genres and two titles; MP3 with the track
- * number "0/0", which TagLib drops on save). */
+ * writing through TagLib (pictures included) on copies of the files in
+ * tests/data (MP3 with ID3v2.3; FLAC; FLAC with two genres and two titles;
+ * MP3 with the track number "0/0", which TagLib drops on save). */
 #define _POSIX_C_SOURCE 200809L
 
 #include <dirent.h>
@@ -276,7 +276,7 @@ static void test_read(void)
     struct tags t;
 
     copy_fixture("tagged.mp3", "read.mp3", path, sizeof path);
-    CHECK(tags_read(path, &t, err, sizeof err) == 0);
+    CHECK(tags_read(path, &t, NULL, NULL, err, sizeof err) == 0);
     CHECK_STR(t.value[TAG_TITLE].v[0], "Song One");
     CHECK_STR(t.value[TAG_ALBUMARTIST].v[0], "Some Artist");
     CHECK_STR(t.value[TAG_TRACKNUMBER].v[0], "1/2");
@@ -285,11 +285,11 @@ static void test_read(void)
     CHECK(t.value[TAG_DISCNUMBER].n == 0);
     CHECK(t.value[TAG_COMPOSER].n == 0);
     CHECK_STR(t.value[TAG_COMPILATION].v[0], "0"); /* absent reads as 0 */
-    CHECK(!t.has_art);
+    CHECK(t.npictures == 0);
 
     /* several values: genre keeps them, a single-valued tag joins them */
     copy_fixture("multi.flac", "read.flac", path, sizeof path);
-    CHECK(tags_read(path, &t, err, sizeof err) == 0);
+    CHECK(tags_read(path, &t, NULL, NULL, err, sizeof err) == 0);
     CHECK(t.value[TAG_GENRE].n == 2);
     CHECK_STR(t.value[TAG_GENRE].v[0], "Rock");
     CHECK_STR(t.value[TAG_GENRE].v[1], "Pop");
@@ -299,31 +299,138 @@ static void test_read(void)
 
     /* any music extension, any case: TagLib picks the type from it */
     copy_fixture("tagged.flac", "upper.FLAC", path, sizeof path);
-    CHECK(tags_read(path, &t, err, sizeof err) == 0);
+    CHECK(tags_read(path, &t, NULL, NULL, err, sizeof err) == 0);
     CHECK_STR(t.value[TAG_TITLE].v[0], "Song Two");
 
     /* not audio, missing */
     snprintf(path, sizeof path, "%s/text.mp3", dir);
     FILE *f = fopen(path, "w");
     CHECK(f != NULL && fputs("not an mp3\n", f) >= 0 && fclose(f) == 0);
-    CHECK(tags_read(path, &t, err, sizeof err) == -1);
+    CHECK(tags_read(path, &t, NULL, NULL, err, sizeof err) == -1);
     snprintf(path, sizeof path, "%s/missing.flac", dir);
-    CHECK(tags_read(path, &t, err, sizeof err) == -1);
+    CHECK(tags_read(path, &t, NULL, NULL, err, sizeof err) == -1);
 }
 
-/* Adds a picture to the file through TagLib. */
-static void add_picture(const char *path)
+static const char picture_data[] = "\xff\xd8\xff\xe0 not really a jpeg";
+/* SHA-256 of picture_data (with its NUL) */
+#define PICTURE_HASH "12603fef261932ae066a6391abab0cf3a6a339b6ce27e0f5841937323a89c463"
+
+/* Adds a picture to the file through TagLib: n copies, the k-th with the
+ * byte k after picture_data, so each is different. */
+static void add_pictures(const char *path, int n, const char *description)
 {
-    static const char data[] = "\xff\xd8\xff\xe0 not really a jpeg";
     TagLib_File *f = taglib_file_new(path);
     CHECK(f != NULL);
     if (f == NULL)
         return;
-    TAGLIB_COMPLEX_PROPERTY_PICTURE(pic, data, sizeof data, "test", "image/jpeg",
-                                    "Front Cover");
-    CHECK(taglib_complex_property_set(f, "PICTURE", pic));
+    for (int k = 0; k < n; k++) {
+        char data[sizeof picture_data + 1];
+        memcpy(data, picture_data, sizeof picture_data);
+        data[sizeof picture_data] = (char)k;
+        TAGLIB_COMPLEX_PROPERTY_PICTURE(pic, data, k == 0 ? sizeof picture_data : sizeof data,
+                                        description, "image/jpeg",
+                                        k == 0 ? "Front Cover" : "Back Cover");
+        CHECK(k == 0 ? taglib_complex_property_set(f, "PICTURE", pic)
+                     : taglib_complex_property_set_append(f, "PICTURE", pic));
+    }
     CHECK(taglib_file_save(f));
     taglib_file_free(f);
+}
+
+static void add_picture(const char *path)
+{
+    add_pictures(path, 1, "test");
+}
+
+/* on_picture that counts the pictures and checks it gets their bytes. */
+static int count_pictures(void *ctx, const struct tag_picture *p, const unsigned char *data,
+                          size_t size)
+{
+    int *n = ctx;
+    CHECK(size >= sizeof picture_data && memcmp(data, picture_data, sizeof picture_data) == 0);
+    CHECK(strlen(p->hash) == 64);
+    (*n)++;
+    return 0;
+}
+
+/* on_picture that fails. */
+static int refuse_picture(void *ctx, const struct tag_picture *p, const unsigned char *data,
+                          size_t size)
+{
+    (void)ctx;
+    (void)p;
+    (void)data;
+    (void)size;
+    return -1;
+}
+
+static void test_pictures(void)
+{
+    char path[512], err[256];
+    struct tags t;
+    int n = 0;
+
+    /* one picture: its hash, type and description; the bytes to on_picture */
+    copy_fixture("tagged.flac", "pic.flac", path, sizeof path);
+    add_picture(path);
+    CHECK(tags_read(path, &t, count_pictures, &n, err, sizeof err) == 0);
+    CHECK(n == 1 && t.npictures == 1);
+    CHECK_STR(t.pictures[0].hash, PICTURE_HASH);
+    CHECK_STR(t.pictures[0].type, "Front Cover");
+    CHECK_STR(t.pictures[0].description, "test");
+    CHECK(tags_read(path, &t, refuse_picture, NULL, err, sizeof err) == -1);
+    CHECK(strstr(err, "a picture could not be stored") != NULL);
+
+    /* several, in order; at most TAGS_MAX_PICTURES (max, max + 1) */
+    copy_fixture("tagged.mp3", "pics.mp3", path, sizeof path);
+    add_pictures(path, TAGS_MAX_PICTURES, "");
+    n = 0;
+    CHECK(tags_read(path, &t, count_pictures, &n, err, sizeof err) == 0);
+    CHECK(n == TAGS_MAX_PICTURES && t.npictures == TAGS_MAX_PICTURES);
+    CHECK_STR(t.pictures[0].hash, PICTURE_HASH);
+    CHECK_STR(t.pictures[1].type, "Back Cover");
+    CHECK_STR(t.pictures[1].description, "");
+    for (size_t i = 1; i < t.npictures; i++)
+        CHECK(strcmp(t.pictures[i].hash, t.pictures[i - 1].hash) != 0);
+    add_pictures(path, TAGS_MAX_PICTURES + 1, "");
+    n = 0;
+    CHECK(tags_read(path, &t, count_pictures, &n, err, sizeof err) == 0);
+    CHECK(n == TAGS_MAX_PICTURES && t.npictures == TAGS_MAX_PICTURES);
+
+    /* a description over 500 bytes is cut; one that is not text is "" */
+    static char longest[TAGS_MAX_VALUE + 2];
+    memset(longest, 'd', TAGS_MAX_VALUE + 1);
+    copy_fixture("tagged.flac", "desc.flac", path, sizeof path);
+    add_pictures(path, 1, longest);
+    CHECK(tags_read(path, &t, NULL, NULL, err, sizeof err) == 0);
+    CHECK(t.npictures == 1 && strlen(t.pictures[0].description) == TAGS_MAX_VALUE);
+    add_pictures(path, 1, "a\nb");
+    CHECK(tags_read(path, &t, NULL, NULL, err, sizeof err) == 0);
+    CHECK(t.npictures == 1 && strcmp(t.pictures[0].description, "") == 0);
+
+    /* the same pictures: by their bytes, in order */
+    struct tags a, b;
+    memset(&a, 0, sizeof a);
+    memset(&b, 0, sizeof b);
+    struct tag_picture pa[2], pb[2];
+    memset(pa, 0, sizeof pa);
+    memset(pb, 0, sizeof pb);
+    memset(pa[0].hash, 'a', 64);
+    memset(pa[1].hash, 'b', 64);
+    memset(pb[0].hash, 'a', 64);
+    memset(pb[1].hash, 'b', 64);
+    pa[0].type = "Front Cover";
+    pb[0].type = "Other";
+    a.pictures = pa;
+    b.pictures = pb;
+    CHECK(tags_same_pictures(&a, &b)); /* none */
+    a.npictures = b.npictures = 2;
+    CHECK(tags_same_pictures(&a, &b)); /* the type does not matter */
+    b.npictures = 1;
+    CHECK(!tags_same_pictures(&a, &b));
+    b.npictures = 2;
+    pb[1].hash[0] = 'c';
+    CHECK(!tags_same_pictures(&a, &b));
 }
 
 static void test_write(void)
@@ -334,7 +441,7 @@ static void test_write(void)
 
     copy_fixture("tagged.mp3", "write.mp3", path, sizeof path);
     CHECK(chmod(path, 0640) == 0);
-    CHECK(tags_read(path, &now, err, sizeof err) == 0);
+    CHECK(tags_read(path, &now, NULL, NULL, err, sizeof err) == 0);
     want = now;
     const char *genres[] = { "rock", "pop" }, *composers[] = { "Bach", "Händel" };
     want.value[TAG_TITLE] = one("Song Uno – ñ");
@@ -345,7 +452,7 @@ static void test_write(void)
     want.value[TAG_MUSICBRAINZ_ALBUMID] = one("1b1a7e2c-0000-4000-8000-000000000000");
     want.value[TAG_COMPILATION] = one("1");
     CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_WRITTEN);
-    CHECK(tags_read(path, &t, err, sizeof err) == 0);
+    CHECK(tags_read(path, &t, NULL, NULL, err, sizeof err) == 0);
     CHECK_STR(t.value[TAG_TITLE].v[0], "Song Uno – ñ");
     CHECK(t.value[TAG_GENRE].n == 2 && strcmp(t.value[TAG_GENRE].v[1], "pop") == 0);
     CHECK(t.value[TAG_COMPOSER].n == 2 && strcmp(t.value[TAG_COMPOSER].v[0], "Bach") == 0);
@@ -357,23 +464,24 @@ static void test_write(void)
 
     /* remove a tag, keep a picture */
     add_picture(path);
-    CHECK(tags_read(path, &now, err, sizeof err) == 0 && now.has_art);
+    CHECK(tags_read(path, &now, NULL, NULL, err, sizeof err) == 0 && now.npictures == 1);
     want = now;
     want.value[TAG_ISRC] = one(NULL);
     want.value[TAG_COMPILATION] = one("0");
     CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_WRITTEN);
-    CHECK(tags_read(path, &t, err, sizeof err) == 0);
-    CHECK(t.value[TAG_ISRC].n == 0 && t.has_art);
+    CHECK(tags_read(path, &t, NULL, NULL, err, sizeof err) == 0);
+    CHECK(t.value[TAG_ISRC].n == 0 && t.npictures == 1);
+    CHECK_STR(t.pictures[0].hash, PICTURE_HASH);
     CHECK_STR(t.value[TAG_COMPILATION].v[0], "0");
 
     /* FLAC */
     copy_fixture("tagged.flac", "write.flac", path, sizeof path);
-    CHECK(tags_read(path, &now, err, sizeof err) == 0);
+    CHECK(tags_read(path, &now, NULL, NULL, err, sizeof err) == 0);
     want = now;
     want.value[TAG_ALBUM] = one("Other Album");
     want.value[TAG_ALBUMSORT] = one("Other Album");
     CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_WRITTEN);
-    CHECK(tags_read(path, &t, err, sizeof err) == 0);
+    CHECK(tags_read(path, &t, NULL, NULL, err, sizeof err) == 0);
     CHECK_STR(t.value[TAG_ALBUM].v[0], "Other Album");
     CHECK_STR(t.value[TAG_ALBUMSORT].v[0], "Other Album");
 }
@@ -388,16 +496,20 @@ static void test_refusals(void)
     /* the file no longer has what the cache says */
     copy_fixture("tagged.flac", "stale.flac", path, sizeof path);
     long len = slurp(path, a, sizeof a);
-    CHECK(tags_read(path, &now, err, sizeof err) == 0);
+    CHECK(tags_read(path, &now, NULL, NULL, err, sizeof err) == 0);
     want = now;
     want.value[TAG_TITLE] = one("New");
     now.value[TAG_DATE] = one("1999");
     CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_NOT_WRITTEN);
     CHECK(strstr(err, "changed since it was scanned (DATE)") != NULL);
     now.value[TAG_DATE] = one("2001");
-    now.has_art = 1;
+    struct tag_picture pic;
+    memset(&pic, 0, sizeof pic);
+    memcpy(pic.hash, PICTURE_HASH, sizeof pic.hash);
+    now.pictures = &pic;
+    now.npictures = 1;
     CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_NOT_WRITTEN);
-    CHECK(strstr(err, "(the picture)") != NULL);
+    CHECK(strstr(err, "(the pictures)") != NULL);
     CHECK(slurp(path, b, sizeof b) == len && memcmp(a, b, (size_t)len) == 0);
 
     /* not audio, missing, a symlink, a folder */
@@ -423,7 +535,7 @@ static void test_read_back(void)
     struct tags now, want;
 
     copy_fixture("odd.mp3", "odd.mp3", path, sizeof path);
-    CHECK(tags_read(path, &now, err, sizeof err) == 0);
+    CHECK(tags_read(path, &now, NULL, NULL, err, sizeof err) == 0);
     CHECK_STR(now.value[TAG_TRACKNUMBER].v[0], "0/0");
     want = now;
     want.value[TAG_MOOD] = one("calm");
@@ -440,6 +552,7 @@ int main(void)
     test_check();
     test_prepare();
     test_read();
+    test_pictures();
     test_write();
     test_refusals();
     test_read_back();

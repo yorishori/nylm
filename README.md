@@ -33,6 +33,8 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 | `src/care.c`      | plant care dates: when a care rule is next due           |
 | `src/music.c`     | music folder, lock, `nylm music-scan` and `music-write`  |
 | `src/tags.c`      | music file tags through TagLib: read, write, verify      |
+| `src/art.c`       | album art files, named by SHA-256; base64                |
+| `src/image.c`     | thumbnails (libjpeg-turbo, libpng), only in the services |
 | `src/action.c`    | runs root actions through `sudo -n`                      |
 | `src/auth.c`      | password hashing (Argon2id), sessions                    |
 | `src/db.c`        | SQLite connection, applies migrations                    |
@@ -55,6 +57,7 @@ Each app has its own subfolder and SQLite database in it:
 $NYLM_DATA/core/core.db       login password and sessions
 $NYLM_DATA/plants/plants.db   plant care
 $NYLM_DATA/music/music.db     music tags cache, changes, scans, audit log
+$NYLM_DATA/music/art/         album art: each picture once, and its thumbnail
 ```
 
 nylm refuses to start if the folder does not exist. In an empty folder it
@@ -108,7 +111,8 @@ unit:
   again), or the whole library if none is queued. A folder's new and
   changed files are read (size, or ctime after the last scan), a single
   file always; tracks no longer there leave the cache. A scan of the whole
-  library also counts the other files by extension (`[blank]`: none).
+  library also counts the other files by extension (`[blank]`: none), and
+  removes the stored pictures no track has.
 - `nylm music-write` (`nylm-music-write.service`): writes the pending
   changes, track by track, then reads each track back into the cache.
 
@@ -151,11 +155,12 @@ read back as written).
 TagLib writes in place. It saves MP3 tags as ID3v2.4 (upgrading ID3v2.3)
 and adds an ID3v1 tag; both stay as TagLib writes them.
 
-Album art, later: the scan records whether a track has a picture
-(`has_art`). Uploading art will be a pending change like the others (the
-picture saved under `$NYLM_DATA/music/`, the write service setting it
-through TagLib's PICTURE property), and showing it a read of the cache. A
-picture can be bigger than the 1 MiB request body limit allows today.
+Album art: the scan reads every picture of a track (at most 32) with its
+type ("Front Cover", ...) and description, and stores each picture once,
+named by the SHA-256 of its bytes, in `$NYLM_DATA/music/art/`
+(`track_pictures` and `art` tables). JPEG and PNG pictures also get a
+thumbnail of at most 256 pixels, made by the scan with libjpeg-turbo and
+libpng; the server never decodes a picture.
 
 ## Commands
 

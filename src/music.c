@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -21,8 +22,10 @@
 #include <unistd.h>
 
 #include "arena.h"
+#include "art.h"
 #include "conn.h"
 #include "db.h"
+#include "image.h"
 #include "json.h"
 
 static char root[MUSIC_MAX_ROOT + 1];
@@ -34,7 +37,7 @@ int music_configure(const char *dir, const char *data_dir)
     root[0] = '\0';
     root_len = 0;
     int n = snprintf(lock_path, sizeof lock_path, "%s/music/library.lock", data_dir);
-    if (n < 0 || (size_t)n >= sizeof lock_path) {
+    if (n < 0 || (size_t)n >= sizeof lock_path || art_configure(data_dir) != 0) {
         fprintf(stderr, "music: data folder path is too long\n");
         return -1;
     }
@@ -156,10 +159,44 @@ const char *music_values_json(const struct tag_values *v)
     return list != NULL ? cJSON_PrintUnformatted(list) : NULL;
 }
 
+/* A JSON array of {hash, type, description} (MUSIC_TAG_COLUMNS) into out's
+ * pictures, in the arena. 0, or -1 if it is not one or out of memory. */
+static int pictures_parse(const char *json, struct tags *out)
+{
+    cJSON *list = cJSON_Parse(json);
+    int n = cJSON_GetArraySize(list);
+    if (!cJSON_IsArray(list) || n > TAGS_MAX_PICTURES)
+        return -1;
+    if (n == 0)
+        return 0;
+    struct tag_picture *p = arena_alloc((size_t)n * sizeof *p);
+    if (p == NULL)
+        return -1;
+    size_t i = 0;
+    const cJSON *item;
+    cJSON_ArrayForEach(item, list) {
+        const cJSON *hash = cJSON_GetObjectItemCaseSensitive(item, "hash");
+        const cJSON *type = cJSON_GetObjectItemCaseSensitive(item, "type");
+        const cJSON *desc = cJSON_GetObjectItemCaseSensitive(item, "description");
+        if (!cJSON_IsString(hash) || !art_hash_valid(hash->valuestring) ||
+            !cJSON_IsString(type) || !cJSON_IsString(desc))
+            return -1;
+        memcpy(p[i].hash, hash->valuestring, ART_HASH_LEN + 1);
+        p[i].type = type->valuestring;
+        p[i].description = desc->valuestring;
+        i++;
+    }
+    out->pictures = p;
+    out->npictures = i;
+    return 0;
+}
+
 int music_track_tags(sqlite3_stmt *st, int col, struct tags *out)
 {
     memset(out, 0, sizeof *out);
-    out->has_art = sqlite3_column_int(st, col) != 0;
+    const char *pictures = (const char *)sqlite3_column_text(st, col);
+    if (pictures == NULL || pictures_parse(pictures, out) != 0)
+        return -1;
     for (int i = 0; i < TAG_FIELDS; i++) {
         int c = col + 1 + i;
         const char *s = (const char *)sqlite3_column_text(st, c);
@@ -191,10 +228,13 @@ struct scan {
     long long id;             /* the scans row; 0 for the writer's reads */
     long files, parsed, failed;
     int incomplete;           /* something could not be read: nothing is removed */
+    int store_failed;         /* a picture could not be stored: the scan stops */
+    const char *path;         /* the file being read, for messages */
     double batch_start;
     struct ext_count other[MAX_OTHER_EXT + 1];
     int nother;
     sqlite3_stmt *find, *seen, *mark_seen, *upsert, *clear_values, *add_value;
+    sqlite3_stmt *find_art, *add_art, *clear_pictures, *add_picture;
 };
 
 /* Prepares the statements a scan uses, and the table of the tracks it saw
@@ -207,15 +247,15 @@ static int scan_prepare(struct scan *s)
     s->seen = db_prepare(music_db, "UPDATE tracks SET scanned = ? WHERE id = ?");
     s->mark_seen = db_prepare(music_db, "INSERT OR IGNORE INTO temp.seen (id) VALUES (?)");
     s->upsert = db_prepare(music_db,
-        "INSERT INTO tracks (path, size, ext, scanned, has_art, title, album, artist,"
+        "INSERT INTO tracks (path, size, ext, scanned, title, album, artist,"
         "  albumartist, tracknumber, discnumber, date, compilation, isrc, asin, bpm,"
         "  copyright, encodedby, mood, media, label, catalognumber, barcode, titlesort,"
         "  albumsort, artistsort, albumartistsort, composersort, musicbrainz_trackid,"
         "  musicbrainz_albumid, navidrome_id)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
-        "  ?, ?, ?, ?, ?)"
+        "  ?, ?, ?, ?)"
         " ON CONFLICT (path) DO UPDATE SET size = excluded.size, ext = excluded.ext,"
-        "  scanned = excluded.scanned, has_art = excluded.has_art, title = excluded.title,"
+        "  scanned = excluded.scanned, title = excluded.title,"
         "  album = excluded.album, artist = excluded.artist,"
         "  albumartist = excluded.albumartist, tracknumber = excluded.tracknumber,"
         "  discnumber = excluded.discnumber, date = excluded.date,"
@@ -233,7 +273,16 @@ static int scan_prepare(struct scan *s)
     s->clear_values = db_prepare(music_db, "DELETE FROM track_values WHERE track_id = ?");
     s->add_value = db_prepare(music_db,
         "INSERT INTO track_values (track_id, field, position, value) VALUES (?, ?, ?, ?)");
-    return s->find && s->seen && s->mark_seen && s->upsert && s->clear_values && s->add_value
+    s->find_art = db_prepare(music_db, "SELECT 1 FROM art WHERE hash = ?");
+    s->add_art = db_prepare(music_db, "INSERT INTO art (hash, mime, size, width, height, thumb)"
+                                      " VALUES (?, ?, ?, ?, ?, ?)");
+    s->clear_pictures = db_prepare(music_db, "DELETE FROM track_pictures WHERE track_id = ?");
+    s->add_picture = db_prepare(music_db,
+        "INSERT INTO track_pictures (track_id, position, hash, type, description)"
+        " VALUES (?, ?, ?, ?, ?)");
+    return s->find && s->seen && s->mark_seen && s->upsert && s->clear_values &&
+                   s->add_value && s->find_art && s->add_art && s->clear_pictures &&
+                   s->add_picture
                ? 0
                : -1;
 }
@@ -246,6 +295,10 @@ static void scan_finalize(struct scan *s)
     sqlite3_finalize(s->upsert);
     sqlite3_finalize(s->clear_values);
     sqlite3_finalize(s->add_value);
+    sqlite3_finalize(s->find_art);
+    sqlite3_finalize(s->add_art);
+    sqlite3_finalize(s->clear_pictures);
+    sqlite3_finalize(s->add_picture);
 }
 
 /* Records the counts of the running scan. 0 or -1 (logged). */
@@ -276,8 +329,78 @@ static int maybe_commit(struct scan *s)
     return 0;
 }
 
-/* Stores the tags read from the file at path as its cache row; its id in
- * *out. 0 or -1. */
+/*
+ * Makes the thumbnail of the picture hash (data, size bytes) and stores it.
+ * *width and *height: the picture's size. 0, or -1 with the reason in err.
+ */
+static int make_thumbnail(const char *hash, const unsigned char *data, size_t size,
+                          unsigned *width, unsigned *height, char *err, size_t errlen)
+{
+    size_t mark = arena_mark();
+    unsigned char *thumb;
+    size_t len;
+    int rc = image_thumbnail(data, size, ART_THUMB_SIZE, &thumb, &len, width, height, err,
+                             errlen);
+    arena_rewind(mark);
+    if (rc != 0)
+        return -1;
+    rc = art_save(hash, 1, thumb, len);
+    free(thumb);
+    if (rc != 0)
+        snprintf(err, errlen, "the thumbnail could not be saved");
+    return rc;
+}
+
+/*
+ * tags_read()'s on_picture for the scan: stores a picture the art table
+ * does not have yet (its file, its thumbnail if it can be decoded, its
+ * row). 0, or -1 (logged; the scan stops).
+ */
+static int store_picture(void *ctx, const struct tag_picture *p, const unsigned char *data,
+                         size_t size)
+{
+    struct scan *s = ctx;
+    int rc = sqlite3_bind_text(s->find_art, 1, p->hash, -1, SQLITE_STATIC) == SQLITE_OK
+                 ? sqlite3_step(s->find_art)
+                 : SQLITE_ERROR;
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE)
+        db_log_error(music_db, "find art");
+    sqlite3_reset(s->find_art);
+    sqlite3_clear_bindings(s->find_art);
+    if (rc == SQLITE_ROW)
+        return 0;
+    if (rc != SQLITE_DONE || art_save(p->hash, 0, data, size) != 0) {
+        s->store_failed = 1;
+        return -1;
+    }
+    unsigned width = 0, height = 0;
+    char err[200];
+    int thumb = make_thumbnail(p->hash, data, size, &width, &height, err, sizeof err) == 0;
+    if (!thumb)
+        fprintf(stderr, "music: %s: a picture has no thumbnail: %s\n", s->path, err);
+    sqlite3_stmt *st = s->add_art;
+    rc = sqlite3_bind_text(st, 1, p->hash, -1, SQLITE_STATIC);
+    if (rc == SQLITE_OK)
+        rc = bind_text(st, 2, art_mime(data, size));
+    if (rc == SQLITE_OK)
+        rc = sqlite3_bind_int64(st, 3, (sqlite3_int64)size);
+    if (rc == SQLITE_OK)
+        rc = thumb ? sqlite3_bind_int64(st, 4, width) : sqlite3_bind_null(st, 4);
+    if (rc == SQLITE_OK)
+        rc = thumb ? sqlite3_bind_int64(st, 5, height) : sqlite3_bind_null(st, 5);
+    if (rc == SQLITE_OK)
+        rc = sqlite3_bind_int(st, 6, thumb);
+    if (rc != SQLITE_OK || step_once(st) != 0) {
+        sqlite3_reset(st);
+        sqlite3_clear_bindings(st);
+        s->store_failed = 1;
+        return -1;
+    }
+    return 0;
+}
+
+/* Stores the tags read from the file at path as its cache row, with its
+ * values and pictures; its id in *out. 0 or -1. */
 static int store_track(struct scan *s, const char *path, const char *ext,
                        const struct stat *sb, long long now, const struct tags *t,
                        long long *out)
@@ -290,10 +413,8 @@ static int store_track(struct scan *s, const char *path, const char *ext,
         rc = bind_text(st, 3, ext);
     if (rc == SQLITE_OK)
         rc = sqlite3_bind_int64(st, 4, now);
-    if (rc == SQLITE_OK)
-        rc = sqlite3_bind_int(st, 5, t->has_art);
     for (int i = 0; i < TAG_SINGLE_FIELDS && rc == SQLITE_OK; i++)
-        rc = bind_text(st, 6 + i, t->value[i].n > 0 ? t->value[i].v[0] : NULL);
+        rc = bind_text(st, 5 + i, t->value[i].n > 0 ? t->value[i].v[0] : NULL);
     long long id = -1;
     if (rc == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW)
         id = sqlite3_column_int64(st, 0);
@@ -313,6 +434,19 @@ static int store_track(struct scan *s, const char *path, const char *ext,
                 bind_text(st, 4, t->value[f].v[k]) != SQLITE_OK || step_once(st) != 0)
                 return -1;
         }
+    }
+    if (sqlite3_bind_int64(s->clear_pictures, 1, id) != SQLITE_OK ||
+        step_once(s->clear_pictures) != 0)
+        return -1;
+    for (size_t k = 0; k < t->npictures; k++) {
+        const struct tag_picture *p = &t->pictures[k];
+        st = s->add_picture;
+        if (sqlite3_bind_int64(st, 1, id) != SQLITE_OK ||
+            sqlite3_bind_int64(st, 2, (sqlite3_int64)k) != SQLITE_OK ||
+            sqlite3_bind_text(st, 3, p->hash, -1, SQLITE_STATIC) != SQLITE_OK ||
+            bind_text(st, 4, p->type) != SQLITE_OK ||
+            bind_text(st, 5, p->description) != SQLITE_OK || step_once(st) != 0)
+            return -1;
     }
     *out = id;
     return 0;
@@ -350,7 +484,10 @@ static int scan_file(struct scan *s, const char *path, const char *ext, const st
     } else {
         char err[128];
         struct tags t;
-        if (tags_read(path, &t, err, sizeof err) != 0) {
+        s->path = path;
+        if (tags_read(path, &t, store_picture, s, err, sizeof err) != 0) {
+            if (s->store_failed)
+                return -1;
             fprintf(stderr, "music: skipped %s: %s\n", path, err);
             s->failed++;
             return 0;
@@ -534,6 +671,42 @@ static long remove_missing(const char *path)
     return rc == 0 ? (long)sqlite3_changes(music_db) : -1;
 }
 
+/* Deletes the art rows no track uses. 0 or -1. */
+static int remove_unused_art(void)
+{
+    sqlite3_stmt *st = db_prepare(music_db,
+        "DELETE FROM art WHERE hash NOT IN (SELECT hash FROM track_pictures)");
+    int rc = st != NULL ? step_once(st) : -1;
+    sqlite3_finalize(st);
+    return rc;
+}
+
+/* art_sweep()'s keep: 1 if the art table has hash, 0 if not, -1. */
+static int art_listed(const char *hash, void *ctx)
+{
+    sqlite3_stmt *st = ctx;
+    int rc = sqlite3_bind_text(st, 1, hash, -1, SQLITE_STATIC) == SQLITE_OK ? sqlite3_step(st)
+                                                                            : SQLITE_ERROR;
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE)
+        db_log_error(music_db, "art sweep");
+    sqlite3_reset(st);
+    sqlite3_clear_bindings(st);
+    return rc == SQLITE_ROW ? 1 : rc == SQLITE_DONE ? 0 : -1;
+}
+
+/* Removes the files of the art no longer listed (once remove_unused_art()
+ * is committed), and says how many. */
+static void sweep_art(void)
+{
+    sqlite3_stmt *st = db_prepare(music_db, "SELECT 1 FROM art WHERE hash = ?");
+    long n = st != NULL ? art_sweep(art_listed, st) : -1;
+    sqlite3_finalize(st);
+    if (n < 0)
+        fprintf(stderr, "music: unused picture files could not all be removed\n");
+    else
+        printf("music: %ld unused picture files removed\n", n);
+}
+
 /* Records the end of a scan: its counts, state and the other extensions.
  * 0 or -1. */
 static int scan_finished(const struct scan *s, long removed)
@@ -582,6 +755,9 @@ static int run_scan(struct scan *s, long long id, const char *path)
     long removed = 0;
     if (rc == 0 && !s->incomplete && (removed = remove_missing(path)) < 0)
         rc = -1;
+    int whole = path == NULL && !s->incomplete; /* complete scan of the whole library */
+    if (rc == 0 && whole && remove_unused_art() != 0)
+        rc = -1;
     if (rc == 0 && (scan_finished(s, removed) != 0 || db_exec(music_db, "COMMIT") != 0))
         rc = -1;
     if (rc != 0) {
@@ -595,6 +771,8 @@ static int run_scan(struct scan *s, long long id, const char *path)
     printf("music: %ld files, %ld read, %ld removed, %ld failed%s\n", s->files, s->parsed,
            removed, s->failed,
            s->incomplete ? " (something could not be read: nothing was removed)" : "");
+    if (whole)
+        sweep_art();
     return s->incomplete ? 1 : 0;
 }
 

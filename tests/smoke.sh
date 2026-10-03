@@ -496,7 +496,7 @@ T2=$(id_of Album/02.FLAC)
 T3=$(id_of Multi/01.flac)
 expect_body "\"path\":\"$M/Artist/Album/01.mp3\",\"size\":1523,\"ext\":\"mp3\",\"scanned\":" "track file"
 expect_body '"tags":{"title":"Song One","album":"Some Album","artist":"Some Artist","albumartist":"Some Artist","tracknumber":"1/2","discnumber":null,"date":"2001","compilation":"0"' "track tags"
-expect_body '"genre":["Rock"],"composer":[]},"pending":{},"has_art":false,"missing":["discnumber","composer"],"invalid":["genre"]}' "track problems"
+expect_body '"genre":["Rock"],"composer":[]},"pending":{},"pictures":[],"missing":["discnumber","composer"],"invalid":["genre"]}' "track problems"
 expect_body '"title":"Song Two; Other Title"' "several titles shown joined"
 expect_body '"genre":["Rock","Pop"]' "several genres in order"
 expect_body '"invalid":["tracknumber","genre"]' "track number without a total is invalid"
@@ -533,7 +533,7 @@ post "back to the file value"  200 $Q "{\"edits\":[{\"track\":$T1,\"field\":\"ti
 expect_body '"queued":0,"dropped":1' "the file's own value drops the pending change"
 post "queue title again"       200 $Q "{\"edits\":[{\"track\":$T1,\"field\":\"title\",\"value\":\"New Title\"}]}"
 expect 200 "album with pending" -b "$JAR" "$B/api/music/album?track=$T1"
-expect_body '"pending":{"title":"New Title","tracknumber":"1/3","date":"1999","genre":["rock","pop"],"composer":["Bach","Händel"]},"has_art":false,"missing":["discnumber"],"invalid":[]' "album shows pending changes and planned problems"
+expect_body '"pending":{"title":"New Title","tracknumber":"1/3","date":"1999","genre":["rock","pop"],"composer":["Bach","Händel"]},"pictures":[],"missing":["discnumber"],"invalid":[]' "album shows pending changes and planned problems"
 expect 200 "composer values, pending" -b "$JAR" "$B/api/music/values?field=composer"
 expect_body '["Bach","Händel"]' "values include pending ones"
 expect 200 "overview pending"  -b "$JAR" "$B/api/music"
@@ -654,7 +654,7 @@ expect 200 "album after write" -b "$JAR" "$B/api/music/album?track=$T1"
 expect_body '"tags":{"title":"New Title","album":"Some Album","artist":"Some Artist","albumartist":"Some Artist","tracknumber":"1/3","discnumber":"1/1","date":"1999","compilation":"0"' "written tags read back"
 expect_body '"titlesort":"New Title","albumsort":null' "the sort tag of a changed tag is mirrored, others left"
 expect_body '"composersort":"Bach; Händel"' "composer sort joins the composers"
-expect_body '"genre":["rock","pop"],"composer":["Bach","Händel"]},"pending":{},"has_art":false,"missing":[],"invalid":[]' "lists written in order; nothing missing"
+expect_body '"genre":["rock","pop"],"composer":["Bach","Händel"]},"pending":{},"pictures":[],"missing":[],"invalid":[]' "lists written in order; nothing missing"
 expect_body '"title":"Song Three"' "several titles replaced by one"
 expect 200 "changes after write" -b "$JAR" "$B/api/music/changes"
 expect_body '"pending":[],' "nothing pending after the write"
@@ -723,6 +723,39 @@ expect 200 "overview, folder missing" -b "$JAR" "$B/api/music"
 expect_body '"available":false,' "folder shown missing"
 expect_body '"pending":3,' "pending changes kept while the folder is missing"
 mv "$TMP/music.away" "$M"
+
+# Album art: a track's pictures are stored once each by their SHA-256, with
+# a thumbnail; art.flac has a JPEG front cover (600x600, "front") and a PNG
+# back cover (50x30).
+FRONT=14119064e0ef22b0b4207937be10d472a2cc547d58567e7c4bb203c0fe55ef15
+BACK=468c143e2ba5751d19914f40386f1304e406d5f6d703afc2bf51ae3fdb481c47
+ART="$TMP/data/music/art"
+mkdir "$M/Artist/Art"
+cp tests/data/art.flac "$M/Artist/Art/01.flac"
+cp tests/data/art.flac "$M/Artist/Art/02.flac"
+scan_path 0 "scan tracks with pictures" "$M/Artist/Art"
+logged "2 files, 2 read, 0 removed, 0 failed" "pictures scan counts"
+query "$FRONT|image/jpeg|2388|600|600|1
+$BACK|image/png|142|50|30|1" "each picture stored once, with its size" \
+    "SELECT hash, mime, size, width, height, thumb FROM art ORDER BY mime"
+query "0|$FRONT|Front Cover|front
+1|$BACK|Back Cover|" "a track's pictures in order" \
+    "SELECT position, hash, type, description FROM track_pictures
+     WHERE track_id = (SELECT id FROM tracks WHERE path LIKE '%Art/01.flac') ORDER BY position"
+for f in "$FRONT" "$FRONT.thumb" "$BACK" "$BACK.thumb"; do
+    if [ -f "$ART/$f" ]; then PASSED=$((PASSED + 1)); else
+        FAILED=$((FAILED + 1)); echo "FAIL: $f not stored"; fi
+done
+if [ "$(od -An -tx1 -N3 "$ART/$BACK.thumb" | tr -d ' ')" = ffd8ff ]; then
+    PASSED=$((PASSED + 1)); else FAILED=$((FAILED + 1)); echo "FAIL: thumbnail is not a JPEG"; fi
+TA=$(sqlite3 "$MDB" "SELECT id FROM tracks WHERE path LIKE '%Art/01.flac'")
+expect 200 "album with pictures" -b "$JAR" "$B/api/music/album?track=$TA"
+expect_body "\"pictures\":[{\"hash\":\"$FRONT\",\"type\":\"Front Cover\",\"description\":\"front\",\"mime\":\"image/jpeg\",\"size\":2388,\"width\":600,\"height\":600,\"thumb\":1},{\"hash\":\"$BACK\",\"type\":\"Back Cover\"" "album lists the pictures"
+# A scan of the whole library removes the pictures no track has.
+rm -r "$M/Artist/Art"
+service 0 "scan after removing the pictures" music-scan
+logged "4 unused picture files removed" "unused picture files removed"
+query "0" "unused art rows removed" "SELECT count(*) FROM art"
 
 expect 204 "logout"             -b "$JAR" -c "$JAR" -X POST "$B/api/logout"
 expect 401 "after logout"       -b "$JAR" "$B/api/session"

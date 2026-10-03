@@ -42,8 +42,8 @@ iface_cidr() {
 }
 
 step "packages"
-pacman -S --needed --noconfirm gcc make openssl sqlite cjson taglib sudo curl iproute2 \
-    util-linux
+pacman -S --needed --noconfirm gcc make openssl sqlite cjson taglib libjpeg-turbo libpng \
+    sudo curl iproute2 util-linux
 
 step "build and test"
 as_user make release

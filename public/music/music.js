@@ -922,7 +922,8 @@ async function albumPage(id) {
     el("td", { class: "path muted" }, relative(t.path)),
     el("td", { class: "muted" }, t.ext),
     el("td", { class: "num muted" }, showSize(t.size)),
-    el("td", { class: t.has_art ? "muted" : "missing-art" }, t.has_art ? "yes" : "no"),
+    el("td", { class: t.pictures.length ? "num muted" : "num missing-art" },
+       String(t.pictures.length)),
     el("td", { class: "muted nowrap" }, showTime(t.scanned))));
 
   const refreshForm = serviceForm("/api/music/scan", { track: id },

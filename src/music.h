@@ -49,8 +49,10 @@ int music_inside(const char *path);
  * `nylm music-scan [path]`: with a path (the library folder or a folder or
  * file in it), scans that. Without, runs the scans the web app queued, or
  * the whole library if none is queued. A folder's new and changed files
- * are read (a single file always is); tracks no longer there are dropped
- * from the cache. Prints what it did; 0 or 1 (exit code).
+ * are read (a single file always is), their pictures stored (src/art.h);
+ * tracks no longer there are dropped from the cache. A complete scan of
+ * the whole library also removes the stored pictures no track has. Prints
+ * what it did; 0 or 1 (exit code).
  */
 int music_scan(const char *path);
 
@@ -72,13 +74,17 @@ void music_unlock(int fd);
 const char *music_busy(int *error);
 
 /*
- * The columns of a track's tags in a query on "tracks t": has_art, the
- * single-valued tags in tags.h order, then genre and composer as JSON
- * arrays. music_track_tags() reads them.
+ * The columns of a track's tags in a query on "tracks t": its pictures (a
+ * JSON array of {hash, type, description}), the single-valued tags in
+ * tags.h order, then genre and composer as JSON arrays.
+ * music_track_tags() reads them.
  */
 #define MUSIC_TAG_COLUMNS                                                               \
-    "t.has_art, t.title, t.album, t.artist, t.albumartist, t.tracknumber,"              \
-    " t.discnumber, t.date, t.compilation, t.isrc, t.asin, t.bpm, t.copyright,"         \
+    "(SELECT json_group_array(json_object('hash', p.hash, 'type', p.type,"              \
+    "  'description', p.description) ORDER BY p.position)"                              \
+    "  FROM track_pictures p WHERE p.track_id = t.id),"                                 \
+    " t.title, t.album, t.artist, t.albumartist, t.tracknumber, t.discnumber,"          \
+    " t.date, t.compilation, t.isrc, t.asin, t.bpm, t.copyright,"                      \
     " t.encodedby, t.mood, t.media, t.label, t.catalognumber, t.barcode, t.titlesort,"  \
     " t.albumsort, t.artistsort, t.albumartistsort, t.composersort,"                    \
     " t.musicbrainz_trackid, t.musicbrainz_albumid, t.navidrome_id,"                    \

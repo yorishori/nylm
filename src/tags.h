@@ -3,6 +3,8 @@
 
 #include <stddef.h>
 
+#include "art.h"
+
 /*
  * Music file tags through TagLib's C API. TagLib is the only thing that
  * opens music files (nylm itself only lstat()s them), and only the tags
@@ -77,10 +79,25 @@ struct tag_values {
     const char **v;
 };
 
+#define TAGS_MAX_PICTURES 32 /* pictures of one track that are kept */
+
+/* An embedded picture. */
+struct tag_picture {
+    char hash[ART_HASH_LEN + 1]; /* SHA-256 of its bytes */
+    const char *type;            /* "Front Cover", ...; "" if the format has none */
+    const char *description;     /* "" if none */
+};
+
 struct tags {
     struct tag_values value[TAG_FIELDS];
-    int has_art; /* an embedded picture */
+    size_t npictures;
+    const struct tag_picture *pictures; /* in the file's order */
 };
+
+/* Called by tags_read() for each picture, with its bytes (valid only
+ * during the call); returns 0, or -1 to fail the read. */
+typedef int (*tags_picture_fn)(void *ctx, const struct tag_picture *p,
+                               const unsigned char *data, size_t size);
 
 /* 1 if a and b hold the same values in the same order. */
 int tags_equal(const struct tag_values *a, const struct tag_values *b);
@@ -90,10 +107,15 @@ int tags_equal(const struct tag_values *a, const struct tag_values *b);
 int tags_set_one(struct tags *t, enum tag_field f, const char *s);
 
 /*
- * Reads a file's tags; strings go into the arena. An absent compilation
- * reads as "0". 0, or -1 with a reason in err.
+ * Reads a file's tags and its first TAGS_MAX_PICTURES pictures (each also
+ * passed to on_picture, unless NULL); strings go into the arena. An absent
+ * compilation reads as "0". 0, or -1 with a reason in err.
  */
-int tags_read(const char *path, struct tags *out, char *err, size_t errlen);
+int tags_read(const char *path, struct tags *out, tags_picture_fn on_picture, void *ctx,
+              char *err, size_t errlen);
+
+/* 1 if a and b hold the same pictures (by their bytes) in the same order. */
+int tags_same_pictures(const struct tags *a, const struct tags *b);
 
 /*
  * Checks one tag's values. NULL if valid, else what is wrong:
@@ -129,10 +151,11 @@ enum tags_result {
 
 /*
  * Writes want into the file in place, through TagLib. First the file must
- * still hold now (what the cache has); then every tag that differs is set
- * (a genre or composer value by value, in order) and the file is saved
- * once; then it is read back: every tag must read as want, and the picture
- * must still be there (or not). err says why when not TAGS_WRITTEN.
+ * still hold now (what the cache has, pictures included); then every tag
+ * that differs is set (a genre or composer value by value, in order) and
+ * the file is saved once; then it is read back: every tag must read as
+ * want, and the pictures must be the same. err says why when not
+ * TAGS_WRITTEN.
  */
 enum tags_result tags_write(const char *path, const struct tags *now, const struct tags *want,
                             char *err, size_t errlen);

@@ -529,7 +529,7 @@ void music_albums(struct request *req, struct response *res)
         a.artist = a.tracks == 0 ? artist : a.artist;
         const struct tag_values *c = &t.value[TAG_COMPILATION];
         a.all_compilation &= c->n == 1 && strcmp(c->v[0], "1") == 0;
-        a.no_art |= !t.has_art;
+        a.no_art |= t.npictures == 0;
         a.changed |= changed;
         a.missing |= missing;
         a.invalid |= invalid;
@@ -549,11 +549,20 @@ void music_albums(struct request *req, struct response *res)
     json_reply(res, 200, list);
 }
 
+/* A track's pictures in a query on "tracks t", as a JSON array: hash, type,
+ * description, and what the art table knows (mime, size, width, height,
+ * thumb). */
+#define PICTURES_SQL                                                                   \
+    "(SELECT json_group_array(json_object('hash', p.hash, 'type', p.type,"             \
+    "  'description', p.description, 'mime', a.mime, 'size', a.size, 'width', a.width," \
+    "  'height', a.height, 'thumb', a.thumb) ORDER BY p.position)"                     \
+    " FROM track_pictures p JOIN art a ON a.hash = p.hash WHERE p.track_id = t.id)"
+
 /*
  * GET /api/music/album?track=N: the tracks of the album of track N: their
- * file (path, size, ext, scanned, has_art), tags as in the files, pending
- * changes ({field: new value}), and which planned tags are missing or
- * invalid.
+ * file (path, size, ext, scanned), tags as in the files, pending changes
+ * ({field: new value}), pictures (PICTURES_SQL), and which planned tags
+ * are missing or invalid.
  */
 void music_album(struct request *req, struct response *res)
 {
@@ -571,12 +580,12 @@ void music_album(struct request *req, struct response *res)
     }
     cJSON *list = cJSON_CreateArray();
     sqlite3_stmt *st = list != NULL ? db_prepare(music_db,
-        "SELECT t.id, t.path, t.size, t.ext, t.scanned, " MUSIC_TAG_COLUMNS
+        "SELECT t.id, t.path, t.size, t.ext, t.scanned, " PICTURES_SQL ", " MUSIC_TAG_COLUMNS
         " FROM tracks t WHERE" SAME_ALBUM " ORDER BY t.path") : NULL;
     sqlite3_stmt *pending = st != NULL ? db_prepare(music_db, PENDING_SQL) : NULL;
     int rc = pending != NULL && sqlite3_bind_int64(st, 1, id) == SQLITE_OK ? SQLITE_ROW
                                                                             : SQLITE_ERROR;
-    const int tags_col = 5;
+    const int pictures_col = 5, tags_col = 6;
     while (rc == SQLITE_ROW && (rc = sqlite3_step(st)) == SQLITE_ROW) {
         long long tid = sqlite3_column_int64(st, 0);
         size_t mark = arena_mark();
@@ -590,11 +599,12 @@ void music_album(struct request *req, struct response *res)
         arena_rewind(mark);
 
         /* The row as JSON: everything in it stays in the arena. */
-        cJSON *row = json_row(st, tags_col);
+        cJSON *row = json_row(st, pictures_col);
         cJSON *tags = row != NULL ? cJSON_AddObjectToObject(row, "tags") : NULL;
         cJSON *planned = row != NULL ? cJSON_AddObjectToObject(row, "pending") : NULL;
-        int ok = planned != NULL && cJSON_AddItemToArray(list, row) &&
-                 cJSON_AddBoolToObject(row, "has_art", sqlite3_column_int(st, tags_col)) != NULL &&
+        cJSON *pictures = cJSON_Parse((const char *)sqlite3_column_text(st, pictures_col));
+        int ok = planned != NULL && cJSON_IsArray(pictures) && cJSON_AddItemToArray(list, row) &&
+                 cJSON_AddItemToObject(row, "pictures", pictures) &&
                  add_field_names(row, "missing", missing) != NULL &&
                  add_field_names(row, "invalid", invalid) != NULL &&
                  planned_tags(st, tags_col, tid, pending, &t, &changed) == 0;

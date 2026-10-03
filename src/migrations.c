@@ -206,6 +206,35 @@ const char *const music_migrations[] = {
     "    detail TEXT    NOT NULL," /* JSON */
     "    result TEXT    NOT NULL"
     ") STRICT;",
+
+    /* 2: album art. Every picture in a track is a row of track_pictures,
+     * in the file's order; type and description as the file has them ("" if
+     * none). Its bytes are stored once, in the art folder under their
+     * SHA-256 (src/art.h), and listed in art: mime from the first bytes
+     * (NULL: not a picture type nylm knows), size in bytes, width and
+     * height (NULL until decoded), thumb 1 if a thumbnail was made. The
+     * scan of the whole library removes art no track uses. tracks loses
+     * has_art, and every track is read again by the next scan (scanned 0)
+     * to find its pictures. */
+    "ALTER TABLE tracks DROP COLUMN has_art;"
+    "UPDATE tracks SET scanned = 0;"
+    "CREATE TABLE art ("
+    "    hash   TEXT    PRIMARY KEY CHECK (length(hash) = 64 AND hash NOT GLOB '*[^0-9a-f]*'),"
+    "    mime   TEXT    CHECK (mime IN ('image/jpeg', 'image/png', 'image/gif', 'image/webp')),"
+    "    size   INTEGER NOT NULL,"
+    "    width  INTEGER,"
+    "    height INTEGER,"
+    "    thumb  INTEGER NOT NULL DEFAULT 0 CHECK (thumb IN (0, 1))"
+    ") STRICT, WITHOUT ROWID;"
+    "CREATE TABLE track_pictures ("
+    "    track_id    INTEGER NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,"
+    "    position    INTEGER NOT NULL,"
+    "    hash        TEXT    NOT NULL REFERENCES art(hash),"
+    "    type        TEXT    NOT NULL,"
+    "    description TEXT    NOT NULL,"
+    "    PRIMARY KEY (track_id, position)"
+    ") STRICT, WITHOUT ROWID;"
+    "CREATE INDEX track_pictures_by_hash ON track_pictures (hash);",
 };
 
 const int music_migration_count = sizeof music_migrations / sizeof music_migrations[0];

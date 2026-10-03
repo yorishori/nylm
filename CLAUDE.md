@@ -29,8 +29,9 @@ If a rule blocks the task, stop and ask the user; do not work around it.
 
 ## 2. Dependencies
 
-1. The only libraries are libc, SQLite, cJSON and OpenSSL libcrypto, all
-   linked dynamically from the distro packages (`sqlite`, `cjson`, `openssl`).
+1. The only libraries are libc, SQLite, cJSON, OpenSSL libcrypto, TagLib,
+   libjpeg-turbo and libpng, all linked dynamically from the distro packages
+   (`sqlite`, `cjson`, `openssl`, `taglib`, `libjpeg-turbo`, `libpng`).
    NEVER add another library, tool, framework, package manager or build step,
    and NEVER copy library source into the repo, without the user's explicit
    approval.
