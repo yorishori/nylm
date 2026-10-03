@@ -244,7 +244,10 @@ static int number_valid(const char *s)
     return s[a] == '/' && b >= 1 && b <= 4 && t[b] == '\0' && digits(t, b) >= n;
 }
 
-/* Genres: lowercase a-z and '-', several separated by "; " ("rock; pop-punk"). */
+/*
+ * Genres: words of lowercase a-z and '-' separated by single spaces,
+ * several genres separated by "; " ("hip hop; pop-punk").
+ */
 static int genre_valid(const char *s)
 {
     for (;;) {
@@ -254,9 +257,12 @@ static int genre_valid(const char *s)
         s += n;
         if (*s == '\0')
             return 1;
-        if (s[0] != ';' || s[1] != ' ')
+        if (s[0] == ' ')
+            s += 1; /* the next word of the same genre */
+        else if (s[0] == ';' && s[1] == ' ')
+            s += 2; /* the next genre */
+        else
             return 0;
-        s += 2;
     }
 }
 
@@ -285,7 +291,8 @@ const char *tags_check_value(enum tag_field field, const char *value)
         return strcmp(value, "1") == 0 ? NULL : "must be 1 or empty";
     case TAG_GENRE:
         return genre_valid(value) ? NULL
-                                  : "must be lowercase a-z and -, several separated by \"; \"";
+                                  : "must be words of lowercase a-z and - (single spaces "
+                                    "between), several separated by \"; \"";
     default:
         return NULL;
     }

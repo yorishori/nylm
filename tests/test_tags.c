@@ -88,7 +88,15 @@ static void test_values(void)
     CHECK(!ok(TAG_TRACKNUMBER, "-1"));
     CHECK(!ok(TAG_TRACKNUMBER, "A1"));
 
-    /* genres: lowercase a-z and '-', several separated by "; " */
+    /* genres: words of lowercase a-z and '-' with single spaces, several
+     * separated by "; " */
+    CHECK(ok(TAG_GENRE, "hip hop"));
+    CHECK(ok(TAG_GENRE, "hip hop; drum and bass; lo-fi"));
+    CHECK(!ok(TAG_GENRE, "hip  hop"));
+    CHECK(!ok(TAG_GENRE, "hip hop ; jazz"));
+    CHECK(!ok(TAG_GENRE, "hip hop;jazz"));
+    CHECK(!ok(TAG_GENRE, "hip ; hop"));
+    CHECK(!ok(TAG_GENRE, "rock;  pop-punk"));
     CHECK(ok(TAG_GENRE, "rock"));
     CHECK(ok(TAG_GENRE, "pop-punk"));
     CHECK(ok(TAG_GENRE, "rock; pop-punk; jazz"));
@@ -102,7 +110,6 @@ static void test_values(void)
     CHECK(!ok(TAG_GENRE, "rock;"));
     CHECK(!ok(TAG_GENRE, "; rock"));
     CHECK(!ok(TAG_GENRE, "rock; ; pop"));
-    CHECK(!ok(TAG_GENRE, "hip hop"));
     CHECK(!ok(TAG_GENRE, "rock2"));
     CHECK(!ok(TAG_GENRE, "rock_pop"));
     CHECK(!ok(TAG_GENRE, "rock/pop"));

@@ -263,7 +263,8 @@ function tagInput(label, initial, { locked, placeholder, pending, fill }) {
 }
 
 const LOCKED_HINT = "Several values in some files: nylm does not change those yet.";
-const GENRE_HINT = "Lowercase a-z and -, several separated by \"; \" (rock; pop-punk).";
+const GENRE_HINT = "Lowercase a-z, - and single spaces; several separated by \"; \" " +
+                   "(hip hop; pop-punk).";
 const DISC_DEFAULT = "1/1";
 
 /* The album-wide inputs. read() gives {field: value} of the changed ones. */
@@ -276,7 +277,7 @@ function albumInputs(tracks) {
       pending: s.pending,
       placeholder: !s.same ? "Leave empty to keep"
                  : f === "date" ? "YYYY or YYYY-MM-DD"
-                 : f === "genre" ? "rock; pop-punk" : "",
+                 : f === "genre" ? "hip hop; pop-punk" : "",
     });
     inputs.push([f, input, s.same]);
     const hints = [

@@ -54,7 +54,8 @@ int tags_read(const char *path, enum tags_format format, struct tags *out, char 
 /*
  * Checks a new value for a field. "" means remove the tag; title, artist,
  * album, album artist, track and disc number can not be removed. A genre is
- * lowercase a-z and '-', several separated by "; " (written as one string).
+ * words of lowercase a-z and '-' with single spaces, several separated by
+ * "; " (written as one string).
  * NULL if valid, else what is wrong.
  */
 const char *tags_check_value(enum tag_field field, const char *value);

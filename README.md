@@ -110,8 +110,8 @@ disc number: an album's changes are refused while one would have none
 The rules for a value: one line of UTF-8, at most 500 bytes, no leading
 or trailing space; title, artist, album, album artist, track and disc
 number can not be empty; dates `YYYY[-MM[-DD]]`; numbers `N` or `N/M`;
-genres lowercase `a-z` and `-`, several separated by `"; "`
-(`rock; pop-punk`), written as one string.
+genres words of lowercase `a-z` and `-` with single spaces, several
+separated by `"; "` (`hip hop; pop-punk`), written as one string.
 
 The write service, per file, only through TagLib (`src/tags.c`): checks
 each value again against those rules and that the file still has the
