@@ -2,6 +2,7 @@
 
 #include "sysinfo.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -962,5 +963,191 @@ cJSON *sysinfo_containers(const char *text)
     for (size_t i = 0; out != NULL && i < n; i++)
         if (!cJSON_AddItemToArray(out, items[i]))
             return NULL;
+    return out;
+}
+
+/* ---- network ------------------------------------------------------------- */
+
+/* n hex digits at s as a number in *v. 0, or -1. */
+static int hex(const char *s, int n, unsigned long *v)
+{
+    *v = 0;
+    for (int i = 0; i < n; i++) {
+        char c = s[i];
+        int d = c >= '0' && c <= '9' ? c - '0' : c >= 'A' && c <= 'F' ? c - 'A' + 10
+                : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+        if (d < 0)
+            return -1;
+        *v = *v * 16 + (unsigned long)d;
+    }
+    return 0;
+}
+
+/* /proc's "ADDR:PORT" (ADDR 8 or 32 hex digits, 32-bit words in host
+ * order) -> text address and port. 0, or -1. */
+static int proc_address(const char *s, int v6, char *out, size_t size, unsigned long *port)
+{
+    int words = v6 ? 4 : 1;
+    unsigned char bytes[16];
+    for (int w = 0; w < words; w++) {
+        unsigned long v;
+        if (hex(s + w * 8, 8, &v) != 0)
+            return -1;
+        for (int b = 0; b < 4; b++)
+            bytes[w * 4 + b] = (unsigned char)(v >> (8 * b));
+    }
+    const char *colon = s + words * 8;
+    if (*colon != ':' || hex(colon + 1, 4, port) != 0 || (colon[5] != ' ' && colon[5] != '\0'))
+        return -1;
+    return inet_ntop(v6 ? AF_INET6 : AF_INET, bytes, out, (socklen_t)size) != NULL ? 0 : -1;
+}
+
+int sysinfo_listening(const char *text, const char *proto, int v6, cJSON *list)
+{
+    int udp = proto[0] == 'u';
+    const char *line = strchr(text, '\n'); /* the first line names the columns */
+    if (line == NULL)
+        return -1;
+    for (line++; *line != '\0';) {
+        const char *nl = strchr(line, '\n');
+        size_t len = nl != NULL ? (size_t)(nl - line) : strlen(line);
+        if (len > LINE_MAX_LEN)
+            return -1;
+        char *copy = arena_strndup(line, len);
+        if (copy == NULL)
+            return -1;
+        line += len + (nl != NULL);
+
+        char *save = NULL;
+        char *sl = strtok_r(copy, " ", &save);
+        char *local = sl != NULL ? strtok_r(NULL, " ", &save) : NULL;
+        char *remote = local != NULL ? strtok_r(NULL, " ", &save) : NULL;
+        char *state = remote != NULL ? strtok_r(NULL, " ", &save) : NULL;
+        if (sl == NULL)
+            continue;
+        if (state == NULL || strlen(local) != (v6 ? 37u : 13u) || strlen(state) != 2)
+            return -1;
+        /* TCP_LISTEN is 0A; an unconnected UDP socket is TCP_CLOSE, 07. */
+        if (strcmp(state, udp ? "07" : "0A") != 0)
+            continue;
+        char address[64];
+        unsigned long port;
+        if (proc_address(local, v6, address, sizeof address, &port) != 0)
+            return -1;
+        if (cJSON_GetArraySize(list) >= SYSINFO_MAX_SOCKETS)
+            return -1;
+        cJSON *o = cJSON_CreateObject();
+        if (o == NULL || cJSON_AddStringToObject(o, "proto", udp ? "udp" : "tcp") == NULL ||
+            cJSON_AddStringToObject(o, "address", address) == NULL ||
+            cJSON_AddNumberToObject(o, "port", (double)port) == NULL ||
+            !cJSON_AddItemToArray(list, o))
+            return -1;
+    }
+    return 0;
+}
+
+int sysinfo_wg_key_valid(const char *s)
+{
+    if (s == NULL || strlen(s) != 44 || s[43] != '=')
+        return 0;
+    for (int i = 0; i < 43; i++)
+        if (!(is_alnum(s[i]) || s[i] == '+' || s[i] == '/'))
+            return 0;
+    return 1;
+}
+
+/* A whole number field of wg's dump; -1 if it is not one. */
+static double dump_number(const char *s)
+{
+    char *end;
+    errno = 0;
+    long long v = strtoll(s, &end, 10);
+    return errno != 0 || end == s || *end != '\0' || v < 0 ? -1 : (double)v;
+}
+
+/* One "peer" line's fields (after "peer") -> a peer; NULL if invalid. */
+static cJSON *wg_peer(char **f)
+{
+    /* f: interface, key, endpoint, allowed ips, handshake, rx, tx, keepalive */
+    double handshake = dump_number(f[4]), rx = dump_number(f[5]), tx = dump_number(f[6]);
+    double keepalive = strcmp(f[7], "off") == 0 ? 0 : dump_number(f[7]);
+    if (!sysinfo_unit_valid(f[0]) || !sysinfo_wg_key_valid(f[1]) || handshake < 0 || rx < 0 ||
+        tx < 0 || keepalive < 0)
+        return NULL;
+    cJSON *ips = cJSON_CreateArray();
+    if (ips == NULL)
+        return NULL;
+    if (strcmp(f[3], "(none)") != 0) {
+        char *save = NULL;
+        for (char *ip = strtok_r(f[3], ",", &save); ip != NULL; ip = strtok_r(NULL, ",", &save)) {
+            cJSON *v = cJSON_CreateString(ip);
+            if (v == NULL || !cJSON_AddItemToArray(ips, v))
+                return NULL;
+        }
+    }
+    cJSON *p = cJSON_CreateObject();
+    int none = strcmp(f[2], "(none)") == 0;
+    if (p == NULL || cJSON_AddStringToObject(p, "interface", f[0]) == NULL ||
+        cJSON_AddStringToObject(p, "public_key", f[1]) == NULL ||
+        (none ? cJSON_AddNullToObject(p, "endpoint")
+              : cJSON_AddStringToObject(p, "endpoint", f[2])) == NULL ||
+        !cJSON_AddItemToObject(p, "allowed_ips", ips) ||
+        number_or_null(p, "handshake", handshake > 0 ? handshake : -1) != 0 ||
+        cJSON_AddNumberToObject(p, "rx", rx) == NULL ||
+        cJSON_AddNumberToObject(p, "tx", tx) == NULL ||
+        number_or_null(p, "keepalive", keepalive > 0 ? keepalive : -1) != 0)
+        return NULL;
+    return p;
+}
+
+cJSON *sysinfo_wireguard(const char *text)
+{
+    cJSON *out = cJSON_CreateObject();
+    cJSON *ifaces = out != NULL ? cJSON_AddArrayToObject(out, "interfaces") : NULL;
+    cJSON *peers = ifaces != NULL ? cJSON_AddArrayToObject(out, "peers") : NULL;
+    if (peers == NULL)
+        return NULL;
+    for (const char *line = text; *line != '\0';) {
+        const char *nl = strchr(line, '\n');
+        size_t len = nl != NULL ? (size_t)(nl - line) : strlen(line);
+        if (len > LINE_MAX_LEN)
+            return NULL;
+        char *copy = arena_strndup(line, len);
+        if (copy == NULL)
+            return NULL;
+        line += len + (nl != NULL);
+        if (len == 0)
+            continue;
+
+        /* Tab-separated; no field is empty. */
+        char *f[10];
+        int n = 0;
+        for (char *p = copy; n < 10;) {
+            f[n++] = p;
+            char *tab = strchr(p, '\t');
+            if (tab == NULL)
+                break;
+            *tab = '\0';
+            p = tab + 1;
+        }
+        if (n == 4 && strcmp(f[0], "interface") == 0) {
+            double port = dump_number(f[3]);
+            cJSON *i = cJSON_CreateObject();
+            if (!sysinfo_unit_valid(f[1]) || !sysinfo_wg_key_valid(f[2]) || port < 0 ||
+                port > 65535 || i == NULL || cJSON_AddStringToObject(i, "name", f[1]) == NULL ||
+                cJSON_AddStringToObject(i, "public_key", f[2]) == NULL ||
+                cJSON_AddNumberToObject(i, "port", port) == NULL ||
+                !cJSON_AddItemToArray(ifaces, i))
+                return NULL;
+        } else if (n == 9 && strcmp(f[0], "peer") == 0) {
+            if (cJSON_GetArraySize(peers) == SYSINFO_MAX_PEERS)
+                continue;
+            cJSON *p = wg_peer(f + 1);
+            if (p == NULL || !cJSON_AddItemToArray(peers, p))
+                return NULL;
+        } else {
+            return NULL;
+        }
+    }
     return out;
 }

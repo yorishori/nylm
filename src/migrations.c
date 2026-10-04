@@ -336,6 +336,13 @@ const char *const server_migrations[] = {
     "    detail TEXT    NOT NULL," /* what it acted on, "" if nothing */
     "    result TEXT    NOT NULL"
     ") STRICT;",
+
+    /* 2: the names given to WireGuard peers, by their public key (WireGuard
+     * itself only knows keys). */
+    "CREATE TABLE wg_peers ("
+    "    public_key TEXT PRIMARY KEY CHECK (length(public_key) = 44),"
+    "    name       TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 100)"
+    ") STRICT, WITHOUT ROWID;",
 };
 
 const int server_migration_count = sizeof server_migrations / sizeof server_migrations[0];

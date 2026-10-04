@@ -67,7 +67,7 @@ $NYLM_DATA/plants/photos/     journal photos: each once, and its thumbnail
 $NYLM_DATA/music/music.db     music tags cache, changes, scans, audit log
 $NYLM_DATA/music/art/         album art: each picture once, and its thumbnail
 $NYLM_DATA/music/*.lock       the library's lock and the Qobuz service's
-$NYLM_DATA/server/server.db   server app: audit log
+$NYLM_DATA/server/server.db   server app: audit log, WireGuard peer names
 ```
 
 nylm refuses to start if the folder does not exist. In an empty folder it
@@ -313,6 +313,16 @@ action `docker-restart NAME`: `docker restart`, not while a job runs).
 A name is checked by Docker's rule in nylm and in the action, which also
 checks that the container exists. nylm is never in the `docker` group.
 
+Network: WireGuard (action `wg-show`: `wg show all dump` without the
+private and preshared keys, which never leave the action): each
+interface and its port, and each peer: where it last connected from (its
+public address), its last handshake (connected while it is less than 3
+minutes old), its VPN address and traffic, and a name you give it
+(`wg_peers` in `server.db`, by public key; no password: a label). Open
+ports: the listening TCP and unconnected UDP sockets of
+`/proc/net/{tcp,udp}{,6}` (no root), each with what it is: nylm,
+WireGuard, the container that publishes it, or a well-known service.
+
 Settings in `/etc/nylm.conf` (restart nylm after changing them):
 
 ```sh
@@ -363,4 +373,5 @@ Build needs `gcc`, `make` and the system libraries `sqlite` (3.44+), `cjson`,
 `openssl` (3.2+; libssl only for `nylm-qobuz`), `taglib` (2.0+),
 `libjpeg-turbo` and `libpng`, linked dynamically: `pacman -Syu` brings their
 fixes. `make` builds `nylm` and `nylm-qobuz`. The server app's root
-actions also use `smartmontools` (`install.sh` installs what they need).
+actions also use `smartmontools` and `wireguard-tools` (`install.sh` installs
+what they need).

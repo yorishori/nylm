@@ -8,6 +8,8 @@
  *              latest actions
  *   #/containers every Docker container: state, health, ports, use; restart
  *              it, read its log
+ *   #/network  WireGuard: each peer, where it connects from, its last
+ *              handshake and traffic, a name for it; the open ports
  *
  * Reads never ask for anything; every button that changes the machine
  * asks for the password again, and the server records it (latest actions).
@@ -15,7 +17,7 @@
  * back while it runs, and shows its log.
  */
 
-const TABS = [["system", "System"], ["containers", "Containers"]];
+const TABS = [["system", "System"], ["containers", "Containers"], ["network", "Network"]];
 
 /* What each recorded action was, by its name in the audit log. */
 const ACTION_TEXT = {
@@ -415,12 +417,130 @@ async function containersPage() {
         : el("p", { class: "empty" }, "No containers.")));
 }
 
+/* ---- network ------------------------------------------------------------- */
+
+const KNOWN_PORTS = { 22: "SSH", 53: "DNS", 67: "DHCP", 68: "DHCP", 80: "HTTP", 123: "NTP",
+                      443: "HTTPS", 631: "printing (CUPS)", 5353: "mDNS", 5355: "LLMNR" };
+
+/* What listens on port/proto: nylm, WireGuard, a container, or a well
+ * known service; "" if unknown. */
+function portOwner(port, proto, ctx) {
+  if (proto === "tcp" && port === ctx.nylmPort) return "nylm";
+  const wg = ctx.wg && ctx.wg.interfaces.find((i) => i.port === port);
+  if (proto === "udp" && wg) return `WireGuard (${wg.name})`;
+  const names = (ctx.containers || [])
+    .filter((c) => c.ports.some((p) => p.host && p.host.endsWith(`:${port}`) &&
+                                       p.container.endsWith(`/${proto}`)))
+    .map((c) => c.name);
+  if (names.length) return `container ${names.join(", ")}`;
+  return KNOWN_PORTS[port] || "";
+}
+
+/* One row per port and protocol, with every address it listens on. */
+function portsCard(ports, ctx) {
+  const rows = new Map();
+  for (const p of ports) {
+    const key = `${p.proto} ${p.port}`;
+    if (!rows.has(key)) rows.set(key, { ...p, addresses: [] });
+    if (!rows.get(key).addresses.includes(p.address)) rows.get(key).addresses.push(p.address);
+  }
+  const sorted = [...rows.values()].sort((a, b) => a.port - b.port || a.proto.localeCompare(b.proto));
+  const local = (a) => a.startsWith("127.") || a === "::1";
+  return el("section", { class: "card stack" },
+    el("h2", {}, "Open ports"),
+    el("p", { class: "muted small" },
+      "Listening sockets on this machine. Only the router's forwarded ports reach the internet."),
+    table([["Port", "num"], ["Proto"], ["On"], ["What"]], sorted.map((p) => el("tr", {},
+      el("td", { class: "num" }, String(p.port)),
+      el("td", {}, p.proto),
+      el("td", { class: "muted small" }, p.addresses.every(local) ? "this machine only"
+                                         : p.addresses.join(", ")),
+      el("td", {}, portOwner(p.port, p.proto, ctx) || el("span", { class: "muted" }, "?"))))));
+}
+
+/* "2 min ago" */
+function ago(ts) {
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  return s < 60 ? "just now" : `${showDuration(s)} ago`;
+}
+
+/* A peer is connected while its handshakes are fresh: WireGuard makes a
+ * new one every 2 minutes while there is traffic. */
+const CONNECTED_SECONDS = 180;
+
+function peerItem(p) {
+  const name = el("input", { type: "text", maxlength: 100, value: p.name || "",
+                             placeholder: "a name for this peer" });
+  const connected = p.handshake && Date.now() / 1000 - p.handshake < CONNECTED_SECONDS;
+  return el("li", { class: "card stack" },
+    el("header", { class: "line" },
+      el("h3", {}, p.name || "Unnamed peer"),
+      connected ? el("strong", { class: "ok" }, "connected")
+                : el("span", { class: "muted" }, p.handshake ? "idle" : "never connected")),
+    facts([
+      ["From", p.endpoint || el("span", { class: "muted" }, "not seen since WireGuard started")],
+      ["Last handshake", p.handshake ? `${ago(p.handshake)} (${showTime(p.handshake)})` : "never"],
+      ["VPN address", p.allowed_ips.join(", ") || "none"],
+      ["Received", showSize(p.rx)],
+      ["Sent", showSize(p.tx)],
+      ["Key", el("span", { class: "path small muted" }, p.public_key)],
+    ]),
+    form({}, async () => {
+      await api("POST", "/api/server/wireguard/name", { public_key: p.public_key,
+                                                        name: name.value.trim() });
+      setStatus(name.value.trim() ? "Peer named" : "Peer name removed");
+      refresh();
+    },
+      el("div", { class: "row" }, name,
+        el("button", { class: "btn", type: "submit" }, "Save name"))));
+}
+
+function wireguardSection(wg) {
+  if (wg.error) {
+    return el("section", { class: "section" }, el("h2", {}, "WireGuard"),
+      el("p", { class: "bad" }, wg.error));
+  }
+  return el("section", { class: "section" },
+    el("header", {}, el("h2", {}, "WireGuard ",
+      el("span", { class: "count" }, plural(wg.peers.length, "peer", "peers")))),
+    wg.interfaces.length
+      ? el("p", { class: "muted" }, wg.interfaces.map((i) =>
+          `${i.name}: listening on UDP ${i.port}, from the internet through the router.`).join(" "))
+      : el("p", { class: "bad" }, "No WireGuard interface is up."),
+    wg.peers.length ? el("ul", { class: "list cols" }, wg.peers.map(peerItem)) : null);
+}
+
+/* The result of a request, or {error} when it failed (but a lost login). */
+async function orError(promise) {
+  try {
+    return await promise;
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) throw err;
+    return { error: err.message };
+  }
+}
+
+async function networkPage() {
+  const [ports, wg, docker] = await Promise.all([
+    api("GET", "/api/server/ports"),
+    orError(api("GET", "/api/server/wireguard")),
+    orError(api("GET", "/api/server/containers")),
+  ]);
+  const ctx = { nylmPort: ports.nylm_port, wg: wg.error ? null : wg,
+                containers: docker.error ? null : docker.containers };
+  return shell("network",
+    wireguardSection(wg),
+    portsCard(ports.ports, ctx),
+    docker.error ? el("p", { class: "muted small" }, `Containers unknown: ${docker.error}`) : null);
+}
+
 /* ---- routing ------------------------------------------------------------- */
 
 function route(parts) {
   const [section, rest] = parts;
   if (section === "system" && rest === undefined) return systemPage();
   if (section === "containers" && rest === undefined) return containersPage();
+  if (section === "network" && rest === undefined) return networkPage();
   go("#/system");
   return null;
 }

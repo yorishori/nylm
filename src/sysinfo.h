@@ -135,4 +135,29 @@ double sysinfo_docker_size(const char *s);
 #define SYSINFO_MAX_CONTAINERS 256
 cJSON *sysinfo_containers(const char *text);
 
+/* ---- network ------------------------------------------------------------- */
+
+/*
+ * Adds the listening sockets of a /proc/net file (tcp, tcp6, udp, udp6) to
+ * list as {proto, address, port}: TCP sockets in LISTEN, UDP sockets that
+ * are not connected. v6: the file is tcp6 or udp6. Addresses in /proc are
+ * in the host's byte order (little-endian here). 0, or -1 if the text is
+ * not what was expected or there are more than SYSINFO_MAX_SOCKETS.
+ */
+#define SYSINFO_MAX_SOCKETS 1024
+int sysinfo_listening(const char *text, const char *proto, int v6, cJSON *list);
+
+/*
+ * The action wg-show's output -> {interfaces: [{name, public_key, port}],
+ * peers: [{interface, public_key, endpoint, allowed_ips: [...],
+ * handshake, rx, tx, keepalive}]}; endpoint, handshake (unix seconds) and
+ * keepalive (seconds) are null when there is none. At most
+ * SYSINFO_MAX_PEERS peers.
+ */
+#define SYSINFO_MAX_PEERS 256
+cJSON *sysinfo_wireguard(const char *text);
+
+/* A WireGuard public key: 44 characters of base64 ending in '='. */
+int sysinfo_wg_key_valid(const char *s);
+
 #endif

@@ -1209,7 +1209,8 @@ logged "NYLM_MUSIC is not set" "nylm-qobuz says why"
 for route in "GET /api/server" "GET /api/server/audit" "GET /api/server/log?unit=nylm.service" \
              "GET /api/server/disk-usage" "POST /api/server/disk-usage" "GET /api/server/smart" \
              "GET /api/server/containers" "GET /api/server/containers/log?name=web" \
-             "POST /api/server/containers/restart" "GET /api/server/units"; do
+             "POST /api/server/containers/restart" "GET /api/server/units" "GET /api/server/ports" \
+             "GET /api/server/wireguard" "POST /api/server/wireguard/name"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
@@ -1267,6 +1268,33 @@ expect_body '{"units":[{"unit":"docker.service",' "units start with NYLM_UNITS"
 expect_body '{"unit":"wg-quick@wg0.service",' "a unit name as systemd completes it"
 expect_body '{"unit":"nylm.service",' "nylm's own units"
 expect_body '"unit":"nylm-disk-usage.service",' "nylm's jobs"
+
+# Network: listening sockets from /proc/net, nylm's among them.
+expect 200 "ports"               -b "$JAR" "$B/api/server/ports"
+expect_body "{\"proto\":\"tcp\",\"address\":\"127.0.0.1\",\"port\":$PORT}" "nylm listens"
+expect_body "\"nylm_port\":$PORT}" "nylm's port"
+# WireGuard through the root action (not installed here: 502); peer names.
+expect_either 200 502 "wireguard" -b "$JAR" "$B/api/server/wireguard"
+WN=/api/server/wireguard/name
+KEY="bB+/0123456789abcdefghijklmnopqrstuvwxyzABC="
+post "peer name"               200 $WN "{\"public_key\":\"$KEY\",\"name\":\"Phone\"}"
+query_server() { # WANT DESCRIPTION SQL
+    got=$(sqlite3 "$TMP/data/server/server.db" "$3")
+    if [ "$got" = "$1" ]; then PASSED=$((PASSED + 1)); else
+        FAILED=$((FAILED + 1)); echo "FAIL: $2: want '$1', got '$got'"; fi
+}
+query_server "Phone" "peer named" "SELECT name FROM wg_peers WHERE public_key = '$KEY'"
+post "peer renamed"            200 $WN "{\"public_key\":\"$KEY\",\"name\":\"Laptop ü\"}"
+query_server "Laptop ü" "peer renamed" "SELECT name FROM wg_peers"
+post "peer name forgotten"     200 $WN "{\"public_key\":\"$KEY\",\"name\":\"\"}"
+query_server "0" "peer name forgotten" "SELECT count(*) FROM wg_peers"
+post "peer name, bad key"      400 $WN '{"public_key":"abc=","name":"x"}'
+post "peer name, no key"       400 $WN '{"name":"x"}'
+post "peer name, no name"      400 $WN "{\"public_key\":\"$KEY\"}"
+post "peer name, control"      400 $WN "{\"public_key\":\"$KEY\",\"name\":\"a\\nb\"}"
+post "peer name, 100"          200 $WN "{\"public_key\":\"$KEY\",\"name\":\"$(printf '%0100d' 0)\"}"
+post "peer name, 101"          400 $WN "{\"public_key\":\"$KEY\",\"name\":\"$(printf '%0101d' 0)\"}"
+expect 415 "peer name needs json" -b "$JAR" -d "{\"public_key\":\"$KEY\",\"name\":\"x\"}" "$B$WN"
 
 # SMART, through the root action (not installed here: 502).
 expect_either 200 502 "smart"    -b "$JAR" "$B/api/server/smart"

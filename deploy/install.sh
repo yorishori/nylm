@@ -44,7 +44,7 @@ iface_cidr() {
 
 step "packages"
 pacman -S --needed --noconfirm gcc make openssl sqlite cjson taglib libjpeg-turbo libpng \
-    smartmontools \
+    smartmontools wireguard-tools \
     sudo curl iproute2 util-linux
 
 step "build and test"

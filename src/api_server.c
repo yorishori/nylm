@@ -37,8 +37,11 @@
 #define LOG_MAX    (2 * 1024 * 1024) /* a unit's log as unit-log prints it */
 #define SHOW_MAX   (256 * 1024)      /* systemctl show of the units */
 #define SHOW_TIMEOUT 10              /* seconds */
-#define SMART_MAX  (4 * 1024 * 1024) /* smartctl's reports of every disk */
+#define SMART_MAX  (1024 * 1024)     /* smartctl's reports of every disk */
 #define DOCKER_MAX (2 * 1024 * 1024) /* docker-list: every container */
+#define WG_MAX     (256 * 1024)      /* wg-show: interfaces and peers */
+#define PROC_NET_MAX (2 * 1024 * 1024) /* one of /proc/net/{tcp,udp}{,6} */
+#define PEER_NAME_MAX 100            /* bytes */
 
 #define BUSY_MESSAGE \
     "another job is running (disk usage, update or backup); try again when it is done"
@@ -501,6 +504,141 @@ void server_container_restart(struct request *req, struct response *res)
     audit_end(server_db, audit, ok ? "ok: restarted" : "failed: see the server log");
     if (!ok) {
         json_error(res, 502, "could not restart it; see the server log");
+        return;
+    }
+    json_reply(res, 200, cJSON_CreateObject());
+}
+
+/* ---- network ------------------------------------------------------------- */
+
+/*
+ * GET /api/server/ports: the listening TCP and unconnected UDP sockets
+ * (/proc/net, no root), and nylm's own port. -> {ports, nylm_port}
+ */
+void server_ports(struct request *req, struct response *res)
+{
+    (void)req;
+    static const struct {
+        const char *path, *proto;
+        int v6;
+    } files[] = {
+        { "/proc/net/tcp", "tcp", 0 }, { "/proc/net/tcp6", "tcp", 1 },
+        { "/proc/net/udp", "udp", 0 }, { "/proc/net/udp6", "udp", 1 },
+    };
+    cJSON *out = cJSON_CreateObject();
+    cJSON *list = out != NULL ? cJSON_AddArrayToObject(out, "ports") : NULL;
+    if (list == NULL) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    for (size_t i = 0; i < sizeof files / sizeof files[0]; i++) {
+        /* ~14000 sockets each; four of them fit the request's memory. */
+        char *text = sysinfo_read_file(files[i].path, PROC_NET_MAX);
+        if (text == NULL && access(files[i].path, F_OK) != 0)
+            continue; /* no IPv6 on this machine */
+        if (text == NULL || sysinfo_listening(text, files[i].proto, files[i].v6, list) != 0) {
+            fprintf(stderr, "server: can not read %s\n", files[i].path);
+            json_error(res, 500, "can not read the open ports; see the server log");
+            return;
+        }
+    }
+    /* main() refused to start with an invalid NYLM_PORT; 8080 when unset. */
+    const char *port = getenv("NYLM_PORT");
+    long nylm_port = 8080;
+    if (port != NULL && *port != '\0') {
+        char *end;
+        errno = 0;
+        nylm_port = strtol(port, &end, 10);
+        if (errno != 0 || *end != '\0' || nylm_port < 1 || nylm_port > 65535)
+            nylm_port = 0;
+    }
+    if (cJSON_AddNumberToObject(out, "nylm_port", (double)nylm_port) == NULL) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, out);
+}
+
+/* Adds each peer's name (null if it has none) from wg_peers. 0 or -1. */
+static int add_peer_names(cJSON *peers)
+{
+    sqlite3_stmt *st = db_prepare(server_db, "SELECT name FROM wg_peers WHERE public_key = ?");
+    if (st == NULL)
+        return -1;
+    cJSON *p;
+    int rc = 0;
+    cJSON_ArrayForEach(p, peers) {
+        const char *key = cJSON_GetObjectItemCaseSensitive(p, "public_key")->valuestring;
+        sqlite3_reset(st);
+        int step = sqlite3_bind_text(st, 1, key, -1, SQLITE_STATIC) == SQLITE_OK
+                       ? sqlite3_step(st)
+                       : SQLITE_ERROR;
+        if (step != SQLITE_ROW && step != SQLITE_DONE) {
+            db_log_error(server_db, "peer name");
+            rc = -1;
+            break;
+        }
+        if ((step == SQLITE_ROW
+                 ? cJSON_AddStringToObject(p, "name", (const char *)sqlite3_column_text(st, 0))
+                 : cJSON_AddNullToObject(p, "name")) == NULL) {
+            rc = -1;
+            break;
+        }
+    }
+    sqlite3_finalize(st);
+    return rc;
+}
+
+/* GET /api/server/wireguard: interfaces and peers (action wg-show). */
+void server_wireguard(struct request *req, struct response *res)
+{
+    (void)req;
+    char *text;
+    cJSON *wg = action_output("wg-show", NULL, WG_MAX, &text, NULL) == 0
+                    ? sysinfo_wireguard(text)
+                    : NULL;
+    if (wg == NULL) {
+        fprintf(stderr, "server: can not read WireGuard (action wg-show)\n");
+        json_error(res, 502, "could not read WireGuard; see the server log");
+        return;
+    }
+    if (add_peer_names(cJSON_GetObjectItemCaseSensitive(wg, "peers")) != 0) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, wg);
+}
+
+/*
+ * POST /api/server/wireguard/name {public_key, name}: names a peer ("" to
+ * forget its name). A label in nylm only: no password. -> 200
+ */
+void server_wireguard_name(struct request *req, struct response *res)
+{
+    cJSON *body = json_body(req, res);
+    const char *key, *name, *err;
+    if (body == NULL)
+        return;
+    if (json_get_string(body, "public_key", 44, 44, &key) != NULL || !sysinfo_wg_key_valid(key)) {
+        json_error(res, 400, "'public_key' must be a WireGuard public key");
+        return;
+    }
+    if ((err = json_get_text(body, "name", 0, PEER_NAME_MAX, 0, &name)) != NULL) {
+        json_error(res, 400, err);
+        return;
+    }
+    sqlite3_stmt *st = db_prepare(server_db, name[0] != '\0'
+        ? "INSERT INTO wg_peers (public_key, name) VALUES (?1, ?2)"
+          " ON CONFLICT (public_key) DO UPDATE SET name = ?2"
+        : "DELETE FROM wg_peers WHERE public_key = ?1");
+    int ok = st != NULL && sqlite3_bind_text(st, 1, key, -1, SQLITE_STATIC) == SQLITE_OK &&
+             (name[0] == '\0' || sqlite3_bind_text(st, 2, name, -1, SQLITE_STATIC) == SQLITE_OK) &&
+             sqlite3_step(st) == SQLITE_DONE;
+    if (!ok)
+        db_log_error(server_db, "peer name");
+    sqlite3_finalize(st);
+    if (!ok) {
+        json_error(res, 500, "internal error");
         return;
     }
     json_reply(res, 200, cJSON_CreateObject());

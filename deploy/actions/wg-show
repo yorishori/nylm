@@ -1,0 +1,15 @@
+#!/bin/sh
+# Prints every WireGuard interface and peer, one per line, tab-separated:
+#   interface NAME PUBLIC-KEY LISTEN-PORT
+#   peer INTERFACE PUBLIC-KEY ENDPOINT ALLOWED-IPS LATEST-HANDSHAKE RX TX KEEPALIVE
+# from `wg show all dump`, without the interfaces' private keys and the
+# peers' preshared keys: they never leave this script. Takes no arguments.
+set -eu
+if [ "$#" -ne 0 ]; then
+    echo "wg-show: takes no arguments" >&2
+    exit 2
+fi
+dump=$(/usr/bin/wg show all dump)
+printf '%s\n' "$dump" | /usr/bin/awk -F '\t' -v OFS='\t' '
+    NF == 5 { print "interface", $1, $3, $4 }
+    NF == 9 { print "peer", $1, $2, $4, $5, $6, $7, $8, $9 }'

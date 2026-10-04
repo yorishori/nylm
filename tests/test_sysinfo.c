@@ -535,6 +535,115 @@ static void test_containers(void)
     CHECK(sysinfo_containers("{\"containers\":[{\"name\":\"/x\"}],\"stats\":[]}") == NULL);
 }
 
+static void test_listening(void)
+{
+    static const char head[] =
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  "
+        "timeout inode\n";
+    char text[1024];
+    cJSON *list = cJSON_CreateArray();
+
+    snprintf(text, sizeof text, "%s"
+             "   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000 "
+             "       0 1 1 0000000000000000 100 0 0 10 0\n"
+             "   1: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0\n"
+             "   2: 0100007F:1F90 0100007F:D2A4 01 00000000:00000000 00:00000000 00000000  1000\n",
+             head);
+    CHECK(sysinfo_listening(text, "tcp", 0, list) == 0);
+    CHECK(cJSON_GetArraySize(list) == 2); /* the connected one is left out */
+    cJSON *a = cJSON_GetArrayItem(list, 0), *b = cJSON_GetArrayItem(list, 1);
+    CHECK_STR(str(a, "proto"), "tcp");
+    CHECK_STR(str(a, "address"), "127.0.0.1");
+    CHECK(num(a, "port") == 8080);
+    CHECK_STR(str(b, "address"), "0.0.0.0");
+    CHECK(num(b, "port") == 22);
+
+    snprintf(text, sizeof text, "%s"
+             "   0: 00000000000000000000000000000000:0016 00000000000000000000000000000000:0000 0A x\n"
+             "   1: 00000000000000000000000001000000:1F90 00000000000000000000000000000000:0000 0A x\n",
+             head);
+    CHECK(sysinfo_listening(text, "tcp", 1, list) == 0);
+    CHECK(cJSON_GetArraySize(list) == 4);
+    CHECK_STR(str(cJSON_GetArrayItem(list, 2), "address"), "::");
+    CHECK_STR(str(cJSON_GetArrayItem(list, 3), "address"), "::1");
+
+    snprintf(text, sizeof text, "%s"
+             "  10: 00000000:2328 00000000:0000 07 00000000:00000000 00:00000000 00000000     0\n"
+             "  11: 0100007F:0035 0100007F:9C40 01 00000000:00000000 00:00000000 00000000     0\n",
+             head);
+    CHECK(sysinfo_listening(text, "udp", 0, list) == 0);
+    CHECK(cJSON_GetArraySize(list) == 5);
+    CHECK_STR(str(cJSON_GetArrayItem(list, 4), "proto"), "udp");
+    CHECK(num(cJSON_GetArrayItem(list, 4), "port") == 9000);
+
+    /* Only the head: nothing. Malformed lines: an error. */
+    CHECK(sysinfo_listening(head, "tcp", 0, list) == 0);
+    CHECK(sysinfo_listening("", "tcp", 0, list) == -1);
+    snprintf(text, sizeof text, "%s   0: 0100007F 00000000:0000 0A\n", head);
+    CHECK(sysinfo_listening(text, "tcp", 0, list) == -1);
+    snprintf(text, sizeof text, "%s   0: 0100007G:1F90 00000000:0000 0A\n", head);
+    CHECK(sysinfo_listening(text, "tcp", 0, list) == -1);
+    snprintf(text, sizeof text, "%s   0: 0100007F:1F90 00000000:0000 0A\n", head);
+    CHECK(sysinfo_listening(text, "tcp", 1, list) == -1); /* v4 text, read as v6 */
+    snprintf(text, sizeof text, "%s   0: 0100007F:1F90\n", head);
+    CHECK(sysinfo_listening(text, "tcp", 0, list) == -1);
+}
+
+static void test_wireguard(void)
+{
+    static const char key_a[] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    static const char key_b[] = "bB+/0123456789abcdefghijklmnopqrstuvwxyzABC=";
+    CHECK(sysinfo_wg_key_valid(key_a));
+    CHECK(sysinfo_wg_key_valid(key_b));
+    CHECK(!sysinfo_wg_key_valid("AAAA="));
+    CHECK(!sysinfo_wg_key_valid("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"));  /* no = */
+    CHECK(!sysinfo_wg_key_valid("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA-A="));
+    CHECK(!sysinfo_wg_key_valid(NULL));
+
+    char text[1024];
+    snprintf(text, sizeof text,
+             "interface\twg0\t%s\t9000\n"
+             "peer\twg0\t%s\t203.0.113.7:51820\t10.0.0.2/32,fd00::2/128\t1791117000\t1024\t2048\t25\n"
+             "peer\twg0\t%s\t(none)\t(none)\t0\t0\t0\toff\n",
+             key_a, key_b, key_a);
+    cJSON *w = sysinfo_wireguard(text);
+    CHECK(w != NULL);
+    cJSON *ifaces = cJSON_GetObjectItemCaseSensitive(w, "interfaces");
+    cJSON *peers = cJSON_GetObjectItemCaseSensitive(w, "peers");
+    CHECK(cJSON_GetArraySize(ifaces) == 1 && cJSON_GetArraySize(peers) == 2);
+    cJSON *i = cJSON_GetArrayItem(ifaces, 0);
+    CHECK_STR(str(i, "name"), "wg0");
+    CHECK_STR(str(i, "public_key"), key_a);
+    CHECK(num(i, "port") == 9000);
+    cJSON *p = cJSON_GetArrayItem(peers, 0), *q = cJSON_GetArrayItem(peers, 1);
+    CHECK_STR(str(p, "interface"), "wg0");
+    CHECK_STR(str(p, "public_key"), key_b);
+    CHECK_STR(str(p, "endpoint"), "203.0.113.7:51820");
+    cJSON *ips = cJSON_GetObjectItemCaseSensitive(p, "allowed_ips");
+    CHECK(cJSON_GetArraySize(ips) == 2);
+    CHECK_STR(cJSON_GetArrayItem(ips, 1)->valuestring, "fd00::2/128");
+    CHECK(num(p, "handshake") == 1791117000);
+    CHECK(num(p, "rx") == 1024 && num(p, "tx") == 2048 && num(p, "keepalive") == 25);
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(q, "endpoint")));
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(q, "handshake")));
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(q, "keepalive")));
+    CHECK(cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(q, "allowed_ips")) == 0);
+
+    w = sysinfo_wireguard("\n");
+    CHECK(w != NULL && cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(w, "peers")) == 0);
+    /* A private key (wg's raw interface line has 5 fields) is never accepted. */
+    snprintf(text, sizeof text, "wg0\t%s\t%s\t9000\toff\n", key_a, key_b);
+    CHECK(sysinfo_wireguard(text) == NULL);
+    snprintf(text, sizeof text, "interface\twg0\t%s\tx\n", key_a);
+    CHECK(sysinfo_wireguard(text) == NULL);
+    snprintf(text, sizeof text, "interface\twg0\tnot-a-key\t9000\n");
+    CHECK(sysinfo_wireguard(text) == NULL);
+    snprintf(text, sizeof text, "peer\twg0\t%s\t(none)\t(none)\t-1\t0\t0\toff\n", key_a);
+    CHECK(sysinfo_wireguard(text) == NULL);
+    snprintf(text, sizeof text, "peer\twg0\t%s\t(none)\n", key_a);
+    CHECK(sysinfo_wireguard(text) == NULL);
+}
+
 int main(void)
 {
     if (arena_init(4 * 1024 * 1024) != 0 || mkdtemp(tmp) == NULL)
@@ -553,6 +662,8 @@ int main(void)
     test_locked();
     test_smart();
     test_containers();
+    test_listening();
+    test_wireguard();
     static const char *const made[] = {
         "hwmon0/name", "hwmon0/temp1_input", "hwmon0/temp1_label", "hwmon0/temp3_input",
         "hwmon0/temp4_input", "hwmon1/temp1_input", "four", "empty", "hwmon0", "hwmon1",
