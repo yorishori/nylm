@@ -1854,7 +1854,7 @@ static void start_action(struct request *req, struct response *res, int lock, in
     }
     /* The service waits a moment for this lock, so it starts after we
      * release it. */
-    int started = action_run(action) == 0;
+    int started = action_run(action, NULL) == 0;
     audit_end(audit, started ? "ok: started" : "failed: the action did not start the service");
     music_unlock(lock);
     if (!started) {

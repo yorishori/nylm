@@ -88,8 +88,10 @@ static int listen_on(uint32_t addr, int port)
     }
 
     /* Non-blocking, so accept() after poll() can't hang if the client already
-     * left. Accepted sockets do not inherit this on Linux. */
-    if (listen(fd, 16) < 0 || fcntl(fd, F_SETFL, O_NONBLOCK) < 0) {
+     * left. Accepted sockets do not inherit this on Linux. Close-on-exec, so
+     * the commands nylm runs do not hold the port. */
+    if (listen(fd, 16) < 0 || fcntl(fd, F_SETFL, O_NONBLOCK) < 0 ||
+        fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
         perror("listen");
         close(fd);
         return -1;
@@ -159,6 +161,12 @@ static void accept_one(int listen_fd)
     if (client < 0) {
         if (errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK)
             perror("accept");
+        return;
+    }
+    /* The commands a request runs must not hold the client's connection. */
+    if (fcntl(client, F_SETFD, FD_CLOEXEC) < 0) {
+        perror("fcntl");
+        close(client);
         return;
     }
     char ip[INET_ADDRSTRLEN] = "?";
