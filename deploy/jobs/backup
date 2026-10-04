@@ -116,7 +116,7 @@ echo "archiving $paths"
     else
         echo "$?" >"$status"
     fi
-} | /usr/bin/zstd -q -19 --long=27 -T0 -o "$partial"
+} | /usr/bin/zstd -q -3 -T0 -o "$partial"
 result=$(/usr/bin/cat "$status")
 /usr/bin/rm -f -- "$status"
 [ "$result" = 0 ] || die "tar failed (exit status $result): see above"
