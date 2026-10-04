@@ -7,6 +7,8 @@
  *   #/album/ID     the tracks of the album of track ID, every tag editable
  *   #/changes      the queued changes by album and track: search them,
  *                  discard them, write them
+ *   #/duplicates   possible duplicate tracks, albums and names: copy a
+ *                  path, open an album, merge spellings of a name
  *   #/files        where the move service puts each file (its plan, its
  *                  problems, what it did), and starting it
  *   #/qobuz        connect to Qobuz, download albums into the library
@@ -230,7 +232,8 @@ function changesLabel(pending) {
 function shell(active, overview, ...content) {
   musicRoot = overview.root || "";
   const tabs = [["albums", "Albums"], ["changes", changesLabel(overview.pending)],
-                ["files", "Files"], ["qobuz", "Qobuz"], ["info", "Info"]];
+                ["duplicates", "Duplicates"], ["files", "Files"], ["qobuz", "Qobuz"],
+                ["info", "Info"]];
   return el("section", { class: "page" },
     el("header", { class: "app-head" },
       el("h1", {}, "Music"),
@@ -1565,6 +1568,199 @@ async function qobuzPage() {
         : el("p", { class: "empty" }, "Nothing downloaded yet.")));
 }
 
+/* ---- duplicates ---------------------------------------------------------- */
+
+/* The lists of GET /api/music/duplicates: group, list, label, what a row is
+ * (a track, an album, or a name of that field). */
+const DUPLICATE_LISTS = [
+  ["tracks", "trackid", "Tracks: same MusicBrainz track ID", "track"],
+  ["tracks", "isrc", "Tracks: same ISRC", "track"],
+  ["tracks", "title", "Tracks: same artist and title", "track"],
+  ["albums", "albumid", "Albums: same MusicBrainz album ID", "album"],
+  ["albums", "barcode", "Albums: same barcode", "album"],
+  ["albums", "name", "Albums: same album and album artist", "album"],
+  ["albums", "title", "Albums: same album, other album artist", "album"],
+  ["names", "artist", "Artists", "artist"],
+  ["names", "albumartist", "Album artists", "albumartist"],
+  ["names", "composer", "Composers", "composer"],
+  ["names", "genre", "Genres", "genre"],
+];
+
+/* The list shown; kept while the page is drawn again. */
+let duplicateList = null;
+
+/* Copies text to the clipboard (what: what it is, for the status line).
+ * Over plain HTTP the browser has no clipboard API: a selected text area
+ * is copied instead. If that fails too, the status line shows the text. */
+async function copyText(text, what) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const back = document.activeElement;
+      const area = el("textarea", { class: "offscreen", readonly: true, "aria-hidden": "true" });
+      area.value = text;
+      document.body.append(area);
+      area.select();
+      const ok = document.execCommand("copy");
+      area.remove();
+      if (back) back.focus();
+      if (!ok) throw new Error("copy refused");
+    }
+    setStatus(`Copied the ${what}: ${text}`);
+  } catch {
+    setStatus(`Could not copy; the ${what} is: ${text}`, true);
+  }
+}
+
+/* A list's rows as groups (rows that share a key are together). When the
+ * list was cut its last group may be too: it is left out. */
+function duplicateGroups(section) {
+  const groups = [];
+  for (const r of section.rows) {
+    const last = groups[groups.length - 1];
+    if (last && last[0].key === r.key) last.push(r);
+    else groups.push([r]);
+  }
+  if (section.more && groups.length > 1) groups.pop();
+  return groups;
+}
+
+/* One possible duplicate (a track or an album): what it is, where it is,
+ * Copy and Open album. */
+function duplicateItem(title, facts, path, what, id) {
+  return el("div", { class: "dupe" },
+    el("div", { class: "dupe-text" },
+      el("strong", {}, title),
+      el("p", { class: "muted" }, facts),
+      el("p", { class: "path small" }, relative(path))),
+    el("div", { class: "actions" },
+      el("button", { class: "btn", type: "button", onclick: () => copyText(path, what) },
+         `Copy ${what}`),
+      navButton("Open album", `#/album/${id}`)));
+}
+
+function trackGroup(group) {
+  return el("li", { class: "card stack" },
+    group.map((t) => duplicateItem(t.title ?? "No title",
+      `${t.artist ?? "No artist"} · ${t.album ?? "No album"} · ${t.albumartist ?? "No album artist"}`,
+      t.path, "path", t.id)));
+}
+
+function albumGroup(group) {
+  return el("li", { class: "card stack" },
+    group.map((a) => duplicateItem(a.album ?? "No album name",
+      `${a.albumartist ?? "No album artist"} · ${plural(a.tracks, "track", "tracks")}`,
+      a.folder, "folder", a.id)));
+}
+
+/* The result of a merge for the status line. */
+function mergeText(r) {
+  const parts = [];
+  if (r.queued) parts.push(`Queued: ${plural(r.queued, "change", "changes")} (write them from Changes)`);
+  if (r.dropped) parts.push(`${plural(r.dropped, "track is", "tracks are")} back to the files' value`);
+  if (r.skipped) {
+    parts.push(`${plural(r.skipped, "track was", "tracks were")} left alone: another of its ` +
+               "values breaks the rules; fix it in the album");
+  }
+  return parts.length ? parts.join(". ") : "Nothing to change";
+}
+
+/* Changes every other name of the group to into, on every track. */
+function mergeButton(field, into, others, disabled) {
+  const names = others.map((v) => `"${v.value}"`).join(", ");
+  const tracks = others.reduce((n, v) => n + v.tracks, 0);
+  const button = el("button", {
+    class: "btn go", type: "button", disabled,
+    "aria-label": `Change ${names} to "${into.value}"`,
+    onclick: async () => {
+      if (!sure(`Change ${names} to "${into.value}" on ${plural(tracks, "track", "tracks")}? ` +
+                "The changes are queued; nothing is written until you write them.")) return;
+      button.disabled = true;
+      try {
+        const r = await api("POST", "/api/music/merge",
+                            { field, from: others.map((v) => v.value), to: into.value });
+        valueCache.clear();
+        setStatus(mergeText(r));
+        refresh();
+      } catch (err) {
+        handleError(err);
+        button.disabled = false;
+      }
+    },
+  }, "Use this one");
+  return button;
+}
+
+/* A group of spellings of one name, each with its tracks and Use this one
+ * (unless the name breaks the rules, or a service runs). */
+function nameGroup(field, group, busy) {
+  return el("li", { class: "card stack" },
+    group.map((v) => {
+      const bad = problem(field, FIELDS[field].kind === "list" ? [v.value] : v.value);
+      return el("div", { class: "dupe" },
+        el("div", { class: "dupe-text" },
+          el("strong", { class: "path" }, v.value),
+          el("p", { class: bad ? "differs-text small" : "muted" },
+             bad ? `Breaks the rules: ${bad}` : plural(v.tracks, "track", "tracks"))),
+        el("div", { class: "actions" },
+          mergeButton(field, v, group.filter((x) => x !== v), busy || Boolean(bad))));
+    }));
+}
+
+async function duplicatesPage() {
+  const [o, d] = await Promise.all([api("GET", "/api/music"), api("GET", "/api/music/duplicates")]);
+  musicRoot = o.root || "";
+  const lists = DUPLICATE_LISTS.map(([group, name, label, kind]) => {
+    const section = d[group][name];
+    return { key: `${group}/${name}`, label, kind, more: section.more,
+             groups: duplicateGroups(section) };
+  });
+  if (!lists.some((l) => l.key === duplicateList)) {
+    duplicateList = (lists.find((l) => l.groups.length) || lists[0]).key;
+  }
+  const body = el("div", { class: "stack" });
+  const show = () => {
+    const l = lists.find((x) => x.key === duplicateList);
+    const card = (g) => (l.kind === "track" ? trackGroup(g)
+                         : l.kind === "album" ? albumGroup(g)
+                         : nameGroup(l.kind, g, Boolean(o.busy)));
+    body.replaceChildren(...[
+      l.more ? el("p", { class: "warn" },
+                  `Only the first ${plural(l.groups.length, "group is", "groups are")} listed: ` +
+                  "deal with these, then look again.") : null,
+      l.groups.length ? el("ul", { class: "list cols" }, l.groups.map(card))
+                      : el("p", { class: "empty" }, "None found."),
+    ].filter(Boolean));
+  };
+  const picker = dropdown({
+    label: "Duplicates to show",
+    options: lists.map((l) => ({ value: l.key,
+                                 label: `${l.label} (${l.groups.length}${l.more ? "+" : ""})` })),
+    value: duplicateList,
+    onchange: (v) => {
+      duplicateList = v;
+      show();
+    },
+  });
+  show();
+  return shell("duplicates", o,
+    el("section", { class: "card stack" },
+      el("h2", {}, "Duplicates"),
+      el("p", {}, "Possible duplicates, by the tags with the pending changes. Names are the " +
+                  "same when they differ only in case, accents, punctuation and spaces, a " +
+                  "leading \"The\", or & for \"and\". An album here is the tracks of one album " +
+                  "and album artist in one folder."),
+      el("p", { class: "muted" }, "Nothing here removes a file: copy a track's path or an " +
+                                  "album's folder and deal with the files yourself. Use this " +
+                                  "one queues the change of the other spellings on every track, " +
+                                  "like any edit."),
+      o.busy ? el("p", { class: "warn" }, `${busyText(o)} Names can be merged when it is done.`)
+             : null,
+      field("Show", picker)),
+    body);
+}
+
 /* ---- info ---------------------------------------------------------------- */
 
 const STATE_TEXT = { done: "Done", warning: "Done, with a warning", failed: "Failed" };
@@ -1745,6 +1941,7 @@ function route(parts) {
   if (section === "album" && Number.isInteger(id) && id > 0) return albumPage(id);
   if (section === "albums" && rawId === undefined) return albumsPage();
   if (section === "changes" && rawId === undefined) return changesPage();
+  if (section === "duplicates" && rawId === undefined) return duplicatesPage();
   if (section === "files" && rawId === undefined) return filesPage();
   if (section === "qobuz" && rawId === undefined) return qobuzPage();
   if (section === "info" && rawId === undefined) return infoPage();

@@ -304,3 +304,11 @@ td.col-cover.edited.differs .thumb { box-shadow: 0 0 0 2px var(--lavender), 0 0 
 .years .bar { fill: var(--sky); }
 .years .axis, .years .tick { stroke: var(--muted); stroke-width: 1; }
 .years .tick-label { fill: var(--muted); font: 10px var(--font); }
+
+/* Duplicates: one track, album or name of a group each, with its buttons. */
+.dupe { display: grid; gap: 0.5rem; }
+.dupe + .dupe { border-top: 1px solid var(--edge); padding-top: 0.75rem; }
+.dupe-text { display: grid; gap: 0.15rem; min-width: 0; }
+.dupe-text p { margin: 0; }
+/* The text area that copies to the clipboard over plain HTTP. */
+.offscreen { position: fixed; top: 0; left: -100vw; width: 1px; height: 1px; opacity: 0; }

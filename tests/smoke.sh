@@ -557,7 +557,8 @@ for route in "GET /api/music" "GET /api/music/albums" "GET /api/music/album?trac
              "POST /api/music/queue" "POST /api/music/discard" "POST /api/music/scan" \
              "POST /api/music/write" "GET /api/music/art?hash=$(printf '%064d' 0)&size=full" \
              "POST /api/music/cover" "GET /api/music/moves" "POST /api/music/move" \
-             "GET /api/music/qobuz" "POST /api/music/qobuz/start"; do
+             "GET /api/music/qobuz" "POST /api/music/qobuz/start" "GET /api/music/duplicates" \
+             "POST /api/music/merge"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
@@ -611,6 +612,82 @@ expect 400 "values, bad field" -b "$JAR" "$B/api/music/values?field=title"
 expect 400 "values, no field"  -b "$JAR" "$B/api/music/values"
 expect 200 "charts"            -b "$JAR" "$B/api/music/charts"
 expect_body '{"genres":[{"genre":"Pop","albums":1},{"genre":"Rock","albums":1}],"dates":[{"date":"2001","albums":1}]}' "charts: albums by genre and date"
+
+# Possible duplicates, by the planned tags; merging names queues changes.
+expect 200 "duplicates"        -b "$JAR" "$B/api/music/duplicates"
+expect_body "\"name\":{\"rows\":[{\"key\":\"somealbum someartist\",\"id\":$T2,\"album\":\"Some Album\",\"albumartist\":\"Some Artist\",\"folder\":\"$M/Artist/Album\",\"tracks\":2},{\"key\":\"somealbum someartist\",\"id\":$T3,\"album\":\"Some Album\",\"albumartist\":\"Some Artist\",\"folder\":\"$M/Artist/Multi\",\"tracks\":1}],\"more\":false}" "one album in two folders"
+expect_body '"names":{"artist":{"rows":[],"more":false},"albumartist":{"rows":[],"more":false},"composer":{"rows":[],"more":false},"genre":{"rows":[],"more":false}}' "no name duplicates yet"
+DQ="{\"edits\":[{\"track\":$T1,\"field\":\"isrc\",\"value\":\"USAAA0000001\"},{\"track\":$T2,\"field\":\"isrc\",\"value\":\"us-aaa-00-00001\"}"
+DQ="$DQ,{\"track\":$T1,\"field\":\"musicbrainz_trackid\",\"value\":\"ABC-1\"},{\"track\":$T3,\"field\":\"musicbrainz_trackid\",\"value\":\"abc1\"}"
+DQ="$DQ,{\"track\":$T1,\"field\":\"title\",\"value\":\"Song\"},{\"track\":$T2,\"field\":\"title\",\"value\":\"song!\"},{\"track\":$T2,\"field\":\"artist\",\"value\":\"some artist\"}"
+DQ="$DQ,{\"track\":$T1,\"field\":\"genre\",\"value\":[\"hiphop\",\"rock\"]},{\"track\":$T2,\"field\":\"genre\",\"value\":[\"hip-hop\"]}"
+DQ="$DQ,{\"track\":$T1,\"field\":\"composer\",\"value\":[\"Händel\"]},{\"track\":$T2,\"field\":\"composer\",\"value\":[\"Handel\"]}"
+DQ="$DQ,{\"track\":$T3,\"field\":\"albumartist\",\"value\":\"Other Artist\"},{\"track\":$T1,\"field\":\"barcode\",\"value\":\"0123\"},{\"track\":$T3,\"field\":\"barcode\",\"value\":\"0123\"}]}"
+post "queue duplicates"        200 /api/music/queue "$DQ"
+expect 200 "duplicates planned" -b "$JAR" "$B/api/music/duplicates"
+expect_body "\"trackid\":{\"rows\":[{\"key\":\"abc1\",\"id\":$T1,\"path\":\"$M/Artist/Album/01.mp3\",\"artist\":\"Some Artist\",\"title\":\"Song\",\"album\":\"Some Album\",\"albumartist\":\"Some Artist\"},{\"key\":\"abc1\",\"id\":$T3," "same MusicBrainz track id"
+expect_body "\"isrc\":{\"rows\":[{\"key\":\"usaaa0000001\",\"id\":$T1," "same ISRC"
+expect_body "\"key\":\"usaaa0000001\",\"id\":$T2,\"path\":\"$M/Artist/Album/02.FLAC\",\"artist\":\"some artist\",\"title\":\"song!\"" "ISRC with planned tags"
+expect_body "\"title\":{\"rows\":[{\"key\":\"someartist song\",\"id\":$T1," "same artist and title"
+expect_body "\"barcode\":{\"rows\":[{\"key\":\"0123\",\"id\":$T3,\"album\":\"Some Album\",\"albumartist\":\"Other Artist\",\"folder\":\"$M/Artist/Multi\",\"tracks\":1},{\"key\":\"0123\",\"id\":$T1,\"album\":\"Some Album\",\"albumartist\":\"Some Artist\"" "same barcode"
+expect_body '"name":{"rows":[],"more":false}' "album artists differ: not the same album"
+expect_body "\"title\":{\"rows\":[{\"key\":\"somealbum\",\"id\":$T3,\"album\":\"Some Album\",\"albumartist\":\"Other Artist\",\"folder\":\"$M/Artist/Multi\",\"tracks\":1},{\"key\":\"somealbum\",\"id\":$T2,\"album\":\"Some Album\",\"albumartist\":\"Some Artist\",\"folder\":\"$M/Artist/Album\",\"tracks\":2}],\"more\":false}" "same album, other album artist"
+expect_body '"artist":{"rows":[{"key":"someartist","value":"Some Artist","tracks":1},{"key":"someartist","value":"some artist","tracks":1}],"more":false}' "artist spellings"
+expect_body '"composer":{"rows":[{"key":"handel","value":"Handel","tracks":1},{"key":"handel","value":"Händel","tracks":1}],"more":false}' "composer spellings"
+expect_body '"genre":{"rows":[{"key":"hiphop","value":"hip-hop","tracks":1},{"key":"hiphop","value":"hiphop","tracks":1},{"key":"rock","value":"Rock","tracks":1},{"key":"rock","value":"rock","tracks":1}],"more":false}' "genre spellings, a group each"
+
+MG=/api/music/merge
+cp "$M/Artist/Album/01.mp3" "$TMP/before.mp3"
+post "merge artist"            200 $MG '{"field":"artist","from":["some artist"],"to":"Some Artist"}'
+expect_body '"queued":0,"dropped":1,"skipped":0' "back to the file's artist drops the change"
+post "merge genre"             200 $MG '{"field":"genre","from":["hiphop"],"to":"hip-hop"}'
+expect_body '"queued":1,"dropped":0,"skipped":0' "genre merged in a list"
+post "merge composer"          200 $MG '{"field":"composer","from":["Handel"],"to":"Händel"}'
+expect_body '"queued":1,"dropped":0,"skipped":0' "composer merged"
+post "merge genre, invalid list" 200 $MG '{"field":"genre","from":["Pop"],"to":"pop"}'
+expect_body '"queued":0,"dropped":0,"skipped":1' "a list with another invalid genre is skipped"
+post "merge nothing to do"     200 $MG '{"field":"albumartist","from":["SOME ARTIST"],"to":"Some Artist"}'
+expect_body '"batch":-1,"queued":0,"dropped":0,"skipped":0' "no track has it"
+same_file "merging leaves the file alone" "$TMP/before.mp3" "$M/Artist/Album/01.mp3"
+query "[\"hip-hop\",\"rock\"]|[\"Händel\"]" "merged lists queued" \
+    "SELECT group_concat(value, '|') FROM (SELECT value FROM changes WHERE state = 'pending'
+     AND track_id = $T1 AND field IN ('genre', 'composer') ORDER BY field DESC)"
+expect 200 "duplicates merged" -b "$JAR" "$B/api/music/duplicates"
+expect_body '"names":{"artist":{"rows":[],"more":false},"albumartist":{"rows":[],"more":false},"composer":{"rows":[],"more":false},"genre":{"rows":[{"key":"rock","value":"Rock","tracks":1},{"key":"rock","value":"rock","tracks":1}],"more":false}}' "merged names are gone, the skipped one stays"
+
+expect 415 "merge needs json"  -b "$JAR" -d '{"field":"artist"}' "$B$MG"
+post "merge no field"          400 $MG '{"from":["a"],"to":"A"}'
+expect_body "'field' must be artist, albumartist, composer or genre" "merge field message"
+post "merge title"             400 $MG '{"field":"title","from":["a"],"to":"A"}'
+post "merge field number"      400 $MG '{"field":1,"from":["a"],"to":"A"}'
+post "merge no to"             400 $MG '{"field":"artist","from":["a"]}'
+expect_body "'to' must be a string" "merge to message"
+post "merge to list"           400 $MG '{"field":"genre","from":["a"],"to":["a"]}'
+post "merge to empty"          400 $MG '{"field":"artist","from":["a"],"to":""}'
+expect_body "'artist' is required" "merge to empty message"
+post "merge to breaks a rule"  400 $MG '{"field":"genre","from":["hip-hop"],"to":"Hip Hop"}'
+expect_body "'genre' may only use lowercase a-z, 0-9 and -" "merge to rule message"
+post "merge to too long"       400 $MG "{\"field\":\"artist\",\"from\":[\"a\"],\"to\":\"$(printf '%0501d' 0)\"}"
+post "merge no from"           400 $MG '{"field":"artist","to":"A"}'
+expect_body "'from' must be a list of 1 to 64 names" "merge from message"
+post "merge from string"       400 $MG '{"field":"artist","from":"a","to":"A"}'
+post "merge from empty"        400 $MG '{"field":"artist","from":[],"to":"A"}'
+post "merge from 65"           400 $MG "{\"field\":\"artist\",\"from\":[$(seq -s, 1 65 | sed 's/[0-9]*/"a"/g')],\"to\":\"A\"}"
+post "merge from 64"           200 $MG "{\"field\":\"artist\",\"from\":[$(seq 64 | while read -r i; do printf '"a%*s",' "$i" ''; done | sed 's/,$//')],\"to\":\"A\"}"
+post "merge from number"       400 $MG '{"field":"artist","from":[1],"to":"A"}'
+expect_body "each name in 'from' must be text of 1 to 4096 bytes" "merge name message"
+post "merge from empty name"   400 $MG '{"field":"artist","from":[""],"to":"A"}'
+post "merge from control"      400 $MG '{"field":"artist","from":["a\u0001"],"to":"A"}'
+post "merge from too long"     400 $MG "{\"field\":\"artist\",\"from\":[\"0$(printf '%4096s' '')\"],\"to\":\"0\"}"
+post "merge from longest"      200 $MG "{\"field\":\"artist\",\"from\":[\"0$(printf '%4095s' '')\"],\"to\":\"0\"}"
+post "merge from is to"        400 $MG '{"field":"artist","from":["A"],"to":"A"}'
+expect_body "each name in 'from' must be given once, and not be 'to'" "merge once message"
+post "merge from twice"        400 $MG '{"field":"artist","from":["a","a"],"to":"A"}'
+post "merge another name"      400 $MG '{"field":"artist","from":["Other Artist"],"to":"Some Artist"}'
+expect_body "'Other Artist' is not another spelling of 'Some Artist'" "merge spelling message"
+post "merge no letters"        400 $MG '{"field":"artist","from":["?"],"to":"!"}'
+post "discard the duplicates"  200 /api/music/discard '{"all":true}'
+query "0" "nothing pending after the duplicates" "SELECT count(*) FROM changes"
 
 # Queueing changes writes no file.
 Q=/api/music/queue
@@ -736,6 +813,7 @@ expect_body '"busy":"' "overview shows the library busy"
 post "queue while busy"        409 $Q "{\"album\":$T1,\"set\":{\"date\":\"2000\"}}"
 expect_body "the library is busy" "busy message"
 post "discard while busy"      409 $D "{\"track\":$T1}"
+post "merge while busy"        409 /api/music/merge '{"field":"artist","from":["some artist"],"to":"Some Artist"}'
 post "scan while busy"         409 $S "{$PW}"
 post "write while busy"        409 $W "{$PW}"
 post "move while busy"         409 /api/music/move "{$PW}"

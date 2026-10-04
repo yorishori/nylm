@@ -33,6 +33,7 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 | `src/care.c`      | plant care dates: when a care rule is next due           |
 | `src/music.c`     | music folder, lock, `nylm music-scan` and `music-write`  |
 | `src/move.c`      | the naming rule, `nylm music-move`                       |
+| `src/dupes.c`     | when two names are the same, for the duplicates          |
 | `src/qobuz.c`     | Qobuz without the network: links, login, bundle, tags    |
 | `src/qobuz_*.c`   | `nylm-qobuz`, the Qobuz service (its own binary)         |
 | `src/https.c`     | HTTPS client (libssl), only in `nylm-qobuz`              |
@@ -139,7 +140,7 @@ They never run together: each holds `$NYLM_DATA/music/library.lock`
 exclusively. The server holds it shared for its own writes to `music.db`,
 and refuses to queue or discard anything while a service runs (409).
 
-The web app has five tabs. Albums: the last scan and a button to scan
+The web app has six tabs. Albums: the last scan and a button to scan
 again, filters (search; a field each, with a switch for albums where a track
 has no value for it; and switches for albums with invalid tags, missing
 tags, invalid genres, genres that differ between tracks, several artists
@@ -162,7 +163,18 @@ missing X gets the lowest free number). Every edit is queued at once as
 one batch (`changes` table), and colours what will change. Changes: the
 pending changes by album, then track (those of tracks a scan removed in
 one group), a search over every field, Discard for an album, a track or
-all, and Write. Files: the naming rule, the tracks
+all, and Write. Duplicates (`GET /api/music/duplicates`, by the planned
+tags; at most 500 rows a list): tracks with the same MusicBrainz track
+id, ISRC, or artist and title; albums (the tracks of one album and album
+artist in one folder) with the same MusicBrainz album id, barcode, album
+and album artist, or album with other album artists; and the spellings of
+an artist, album artist, composer or genre. Names are the same when their
+keys are (`src/dupes.c`): lower case, without accents on Latin letters,
+punctuation, symbols and spaces, `&` read as "and", a leading "The "
+dropped. A track or album has Copy path (or folder) and Open album; nylm
+never removes a file. A spelling has Use this one (`POST
+/api/music/merge`), which queues, as one batch, the change of the other
+spellings to it on every track. Files: the naming rule, the tracks
 that move (from, to) and those that can not (why), Move files, and what
 the moves did (`GET /api/music/moves`). Qobuz: connect, download albums,
 and what came of each download. Info: library

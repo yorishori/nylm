@@ -28,6 +28,7 @@
 #include "art.h"
 #include "auth.h"
 #include "db.h"
+#include "dupes.h"
 #include "json.h"
 #include "move.h"
 #include "music.h"
@@ -1158,6 +1159,389 @@ void music_queue(struct request *req, struct response *res)
     if (rc != 0 || out == NULL || cJSON_AddNumberToObject(out, "batch", (double)batch) == NULL ||
         cJSON_AddNumberToObject(out, "queued", queued) == NULL ||
         cJSON_AddNumberToObject(out, "dropped", dropped) == NULL) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, out);
+}
+
+/* ---- duplicates --------------------------------------------------------- */
+
+#define MAX_DUPES      500  /* rows in one list of possible duplicates */
+#define MAX_MERGE_FROM 64   /* names merged into one at once */
+#define MAX_MERGE_NAME 4096 /* bytes in a name merged (files may hold long ones) */
+
+/*
+ * The planned values, as "p": every track (id, path) with the tags the
+ * duplicates use, pending changes applied (a removed tag is NULL); and as
+ * "pv" (track_id, field, value) the planned genres and composers.
+ */
+#define PLANNED_PC(f) " max(CASE field WHEN '" f "' THEN value END) AS " f
+#define PLANNED_P(f)  " nullif(coalesce(pc." f ", t." f "), '') AS " f
+#define PLANNED_CTE                                                                         \
+    "WITH pc AS (SELECT track_id," PLANNED_PC("title") "," PLANNED_PC("artist") ","         \
+    PLANNED_PC("album") "," PLANNED_PC("albumartist") "," PLANNED_PC("isrc") ","            \
+    PLANNED_PC("barcode") "," PLANNED_PC("musicbrainz_trackid") ","                         \
+    PLANNED_PC("musicbrainz_albumid")                                                       \
+    "  FROM changes WHERE state = 'pending' GROUP BY track_id),"                            \
+    " p AS (SELECT t.id, t.path," PLANNED_P("title") "," PLANNED_P("artist") ","            \
+    PLANNED_P("album") "," PLANNED_P("albumartist") "," PLANNED_P("isrc") ","               \
+    PLANNED_P("barcode") "," PLANNED_P("musicbrainz_trackid") ","                           \
+    PLANNED_P("musicbrainz_albumid")                                                        \
+    "  FROM tracks t LEFT JOIN pc ON pc.track_id = t.id),"                                  \
+    " pv AS (SELECT v.track_id, v.field, v.value FROM track_values v WHERE NOT EXISTS"      \
+    "  (SELECT 1 FROM changes c WHERE c.state = 'pending' AND c.track_id = v.track_id"      \
+    "   AND c.field = v.field)"                                                             \
+    "  UNION ALL SELECT c.track_id, c.field, j.value FROM changes c, json_each(c.value) j"  \
+    "  WHERE c.state = 'pending' AND c.field IN ('genre', 'composer'))"
+
+/* Tracks that share key (an SQL expression on p; NULL: none): key, id,
+ * path, artist, title, album, albumartist. ?1: at most this many rows. */
+#define TRACK_DUPES(key)                                                                     \
+    PLANNED_CTE ", keyed AS (SELECT " key " AS k, id FROM p),"                               \
+    " g AS (SELECT k FROM keyed WHERE k IS NOT NULL GROUP BY k HAVING count(*) > 1)"         \
+    " SELECT keyed.k AS key, p.id, p.path, p.artist, p.title, p.album, p.albumartist"        \
+    " FROM keyed JOIN g USING (k) JOIN p ON p.id = keyed.id ORDER BY keyed.k, p.path LIMIT ?1"
+
+/* Albums (the tracks of one album and album artist in one folder) that
+ * share key, in groups that pass having (on a, with ak: the album artist's
+ * key): key, id (a track), album, albumartist, folder, tracks. */
+#define ALBUM_DUPES(key, having)                                                             \
+    PLANNED_CTE ", u AS (SELECT " key " AS k, coalesce(dupe_key(albumartist), '') AS ak,"    \
+    "  album, albumartist, rtrim(rtrim(path, replace(path, '/', '')), '/') AS folder, id"    \
+    "  FROM p),"                                                                             \
+    " a AS (SELECT k, min(ak) AS ak, album, albumartist, folder, min(id) AS id,"             \
+    "  count(*) AS tracks FROM u WHERE k IS NOT NULL GROUP BY k, album, albumartist, folder)," \
+    " g AS (SELECT k FROM a GROUP BY k HAVING " having ")"                                   \
+    " SELECT a.k AS key, a.id, a.album, a.albumartist, a.folder, a.tracks FROM a JOIN g USING (k)" \
+    " ORDER BY a.k, a.album, a.albumartist, a.folder LIMIT ?1"
+
+/* Names (values: value, tracks) that share a key: key, value, tracks. */
+#define NAME_DUPES(values)                                                                   \
+    PLANNED_CTE ", v AS (" values "),"                                                       \
+    " keyed AS (SELECT dupe_key(value) AS k, value, tracks FROM v),"                         \
+    " g AS (SELECT k FROM keyed WHERE k IS NOT NULL GROUP BY k HAVING count(*) > 1)"         \
+    " SELECT keyed.k AS key, keyed.value, keyed.tracks FROM keyed JOIN g USING (k)"          \
+    " ORDER BY keyed.k, keyed.tracks DESC, keyed.value LIMIT ?1"
+#define ONE_NAME(c) \
+    "SELECT " c " AS value, count(*) AS tracks FROM p WHERE " c " IS NOT NULL GROUP BY " c
+#define LIST_NAME(f) \
+    "SELECT value, count(DISTINCT track_id) AS tracks FROM pv WHERE field = '" f "' GROUP BY value"
+
+/*
+ * Adds name: {"rows": [...], "more": bool} to obj, the first MAX_DUPES rows
+ * of sql (ncols columns); more if there were others. 0 or -1 (logged).
+ */
+static int add_dupes(cJSON *obj, const char *name, const char *sql, int ncols)
+{
+    cJSON *section = cJSON_AddObjectToObject(obj, name);
+    cJSON *rows = section != NULL ? cJSON_AddArrayToObject(section, "rows") : NULL;
+    sqlite3_stmt *st = rows != NULL ? db_prepare(music_db, sql) : NULL;
+    int rc = st != NULL && sqlite3_bind_int(st, 1, MAX_DUPES + 1) == SQLITE_OK &&
+                     add_rows(rows, st, ncols, MAX_DUPES) == 0
+                 ? 0
+                 : -1;
+    int more = 0;
+    if (rc == 0 && cJSON_GetArraySize(rows) == MAX_DUPES) {
+        int step = sqlite3_step(st);
+        more = step == SQLITE_ROW;
+        if (step != SQLITE_ROW && step != SQLITE_DONE) {
+            db_log_error(music_db, name);
+            rc = -1;
+        }
+    }
+    if (rc == 0 && cJSON_AddBoolToObject(section, "more", more) == NULL)
+        rc = -1;
+    if (rows == NULL)
+        fprintf(stderr, "music: out of memory listing duplicates\n");
+    sqlite3_finalize(st);
+    return rc;
+}
+
+/*
+ * GET /api/music/duplicates: possible duplicates, by the planned tags.
+ * Two names are the same when their keys are (src/dupes.h).
+ * -> 200 {"tracks": {"trackid", "isrc", "title"},
+ *         "albums": {"albumid", "barcode", "name", "title"},
+ *         "names": {"artist", "albumartist", "composer", "genre"}}
+ * each {"rows": [...], "more": bool}, the rows of a group together (key).
+ * tracks: the same MusicBrainz track id, ISRC, artist and title; albums:
+ * the same MusicBrainz album id, barcode, album and album artist, album
+ * with album artists that differ.
+ */
+void music_duplicates(struct request *req, struct response *res)
+{
+    (void)req;
+    static const struct {
+        const char *group, *name, *sql;
+        int ncols;
+    } lists[] = {
+        { "tracks", "trackid", TRACK_DUPES("dupe_key(musicbrainz_trackid)"), 7 },
+        { "tracks", "isrc", TRACK_DUPES("dupe_key(isrc)"), 7 },
+        { "tracks", "title", TRACK_DUPES("dupe_key(artist) || ' ' || dupe_key(title)"), 7 },
+        { "albums", "albumid", ALBUM_DUPES("dupe_key(musicbrainz_albumid)", "count(*) > 1"), 6 },
+        { "albums", "barcode", ALBUM_DUPES("dupe_key(barcode)", "count(*) > 1"), 6 },
+        { "albums", "name",
+          ALBUM_DUPES("dupe_key(album) || ' ' || coalesce(dupe_key(albumartist), '')",
+                      "count(*) > 1"), 6 },
+        { "albums", "title", ALBUM_DUPES("dupe_key(album)", "count(DISTINCT ak) > 1"), 6 },
+        { "names", "artist", NAME_DUPES(ONE_NAME("artist")), 3 },
+        { "names", "albumartist", NAME_DUPES(ONE_NAME("albumartist")), 3 },
+        { "names", "composer", NAME_DUPES(LIST_NAME("composer")), 3 },
+        { "names", "genre", NAME_DUPES(LIST_NAME("genre")), 3 },
+    };
+    int rc = dupes_register(music_db);
+    if (rc != SQLITE_OK) {
+        fprintf(stderr, "music: can not add dupe_key(): %s\n", sqlite3_errstr(rc));
+        json_error(res, 500, "internal error");
+        return;
+    }
+    cJSON *obj = cJSON_CreateObject();
+    cJSON *group = NULL;
+    int ok = obj != NULL;
+    for (size_t i = 0; ok && i < sizeof lists / sizeof lists[0]; i++) {
+        if (i == 0 || strcmp(lists[i].group, lists[i - 1].group) != 0)
+            ok = (group = cJSON_AddObjectToObject(obj, lists[i].group)) != NULL;
+        ok = ok && add_dupes(group, lists[i].name, lists[i].sql, lists[i].ncols) == 0;
+    }
+    if (!ok) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, obj);
+}
+
+/* The tracks with one of the values ?1 (a JSON array) in a field, in the
+ * file or in a pending change. */
+#define MERGE_ONE_SQL(f)                                                                   \
+    "SELECT t.id FROM tracks t WHERE t." f " IN (SELECT value FROM json_each(?1))"         \
+    " OR EXISTS (SELECT 1 FROM changes c WHERE c.state = 'pending' AND c.track_id = t.id"  \
+    "  AND c.field = '" f "' AND c.value IN (SELECT value FROM json_each(?1)))"
+#define MERGE_LIST_SQL(f)                                                                  \
+    "SELECT t.id FROM tracks t WHERE EXISTS (SELECT 1 FROM track_values v"                 \
+    "  WHERE v.track_id = t.id AND v.field = '" f "'"                                      \
+    "  AND v.value IN (SELECT value FROM json_each(?1)))"                                  \
+    " OR EXISTS (SELECT 1 FROM changes c, json_each(c.value) j WHERE c.state = 'pending'"  \
+    "  AND c.track_id = t.id AND c.field = '" f "'"                                        \
+    "  AND j.value IN (SELECT value FROM json_each(?1)))"
+
+/* 1 if s is one of from. */
+static int merged_name(const struct tag_values *from, const char *s)
+{
+    for (size_t i = 0; i < from->n; i++)
+        if (strcmp(from->v[i], s) == 0)
+            return 1;
+    return 0;
+}
+
+/*
+ * The edit that merges from into to in field f of a track's planned tags
+ * t: in a list each of from becomes to (once, where the first was). 1 and
+ * e filled, 0 if the track has none of from, -1 when out of memory.
+ */
+static int merge_edit(const struct tags *t, enum tag_field f, const struct tag_values *from,
+                      const char *to, struct edit *e)
+{
+    const struct tag_values *now = &t->value[f];
+    e->field = f;
+    if (!tags_is_multi(f)) {
+        if (now->n != 1 || !merged_name(from, now->v[0]))
+            return 0;
+        e->value.n = 1;
+        e->value.v = arena_alloc(sizeof *e->value.v);
+        if (e->value.v == NULL)
+            return -1;
+        e->value.v[0] = to;
+        e->stored = to;
+        return 1;
+    }
+    e->value.n = 0;
+    e->value.v = arena_alloc((now->n + 1) * sizeof *e->value.v);
+    if (e->value.v == NULL)
+        return -1;
+    int found = 0;
+    for (size_t i = 0; i < now->n; i++) {
+        int merged = merged_name(from, now->v[i]);
+        const char *s = merged ? to : now->v[i];
+        found |= merged;
+        int twice = 0;
+        for (size_t j = 0; j < e->value.n && !twice; j++)
+            twice = strcmp(e->value.v[j], s) == 0;
+        if (!twice)
+            e->value.v[e->value.n++] = s;
+    }
+    if (!found)
+        return 0;
+    e->stored = music_values_json(&e->value);
+    return e->stored != NULL ? 1 : -1;
+}
+
+/*
+ * {"field": f, "from": [names], "to": name}: reads and checks a merge into
+ * *f, from and *to. NULL or an error message.
+ */
+static const char *read_merge(const cJSON *body, enum tag_field *f, struct tag_values *from,
+                              const char **to)
+{
+    static const enum tag_field fields[] = {
+        TAG_ARTIST, TAG_ALBUMARTIST, TAG_COMPOSER, TAG_GENRE,
+    };
+    const char *name = NULL;
+    const char *err = json_get_string(body, "field", 1, 32, &name);
+    int found = 0;
+    for (size_t i = 0; err == NULL && i < sizeof fields / sizeof fields[0]; i++)
+        if (strcmp(name, tags_name[fields[i]]) == 0) {
+            *f = fields[i];
+            found = 1;
+        }
+    if (err != NULL || !found)
+        return "'field' must be artist, albumartist, composer or genre";
+
+    struct edit target;
+    cJSON *one = NULL;
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(body, "to");
+    if (!cJSON_IsString(item))
+        return "'to' must be a string";
+    if (tags_is_multi(*f)) { /* read_value() takes a list for these */
+        one = cJSON_CreateArray();
+        cJSON *s = one != NULL ? cJSON_CreateString(item->valuestring) : NULL;
+        if (s == NULL || !cJSON_AddItemToArray(one, s))
+            return "out of memory";
+        item = one;
+    }
+    if ((err = read_value(item, *f, &target)) != NULL)
+        return err;
+    if (target.value.n != 1)
+        return message("'%s' is required%s", "to", "");
+    *to = target.value.v[0];
+
+    char to_key[DUPES_KEY_MAX + 1], key[DUPES_KEY_MAX + 1];
+    dupes_key(*to, strlen(*to), to_key, sizeof to_key);
+    const cJSON *list = cJSON_GetObjectItemCaseSensitive(body, "from");
+    int size = cJSON_GetArraySize(list);
+    if (!cJSON_IsArray(list) || size < 1 || size > MAX_MERGE_FROM)
+        return "'from' must be a list of 1 to 64 names";
+    from->n = 0;
+    from->v = arena_alloc((size_t)size * sizeof *from->v);
+    if (from->v == NULL)
+        return "out of memory";
+    cJSON_ArrayForEach(item, list) {
+        const char *s = cJSON_IsString(item) ? item->valuestring : NULL;
+        size_t len = s != NULL ? strlen(s) : 0;
+        if (len < 1 || len > MAX_MERGE_NAME || !text_valid(s, 0))
+            return "each name in 'from' must be text of 1 to 4096 bytes";
+        if (strcmp(s, *to) == 0 || merged_name(from, s))
+            return "each name in 'from' must be given once, and not be 'to'";
+        dupes_key(s, len, key, sizeof key);
+        if (to_key[0] == '\0' || strcmp(key, to_key) != 0)
+            return message("'%.100s' is not another spelling of '%.100s'", s, *to);
+        from->v[from->n++] = s;
+    }
+    return NULL;
+}
+
+/*
+ * POST /api/music/merge {"field": f, "from": [names], "to": name}: queues,
+ * as one batch, the change of every track whose planned field has a name
+ * of from to name to (the duplicates: the same apart from case, accents,
+ * punctuation and spaces). field: artist, albumartist, composer or genre;
+ * to must pass the rules. A list that would then break the rules (another
+ * invalid value) is skipped.
+ * -> 200 {batch, queued, dropped, skipped}
+ */
+void music_merge(struct request *req, struct response *res)
+{
+    static const struct {
+        enum tag_field f;
+        const char *sql;
+    } tracks_sql[] = {
+        { TAG_ARTIST, MERGE_ONE_SQL("artist") },
+        { TAG_ALBUMARTIST, MERGE_ONE_SQL("albumartist") },
+        { TAG_COMPOSER, MERGE_LIST_SQL("composer") },
+        { TAG_GENRE, MERGE_LIST_SQL("genre") },
+    };
+    cJSON *body = json_body(req, res);
+    if (body == NULL)
+        return;
+    enum tag_field f = TAG_ARTIST;
+    struct tag_values from;
+    const char *to = NULL;
+    const char *err = read_merge(body, &f, &from, &to);
+    if (err != NULL) {
+        json_error(res, 400, err);
+        return;
+    }
+    const char *sql = NULL;
+    for (size_t i = 0; i < sizeof tracks_sql / sizeof tracks_sql[0]; i++)
+        if (tracks_sql[i].f == f)
+            sql = tracks_sql[i].sql;
+    const char *from_json = music_values_json(&from);
+    if (sql == NULL || from_json == NULL) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+
+    int lock = lock_for_write(res);
+    if (lock < 0)
+        return;
+    /* The tracks first: queueing changes what the query reads. */
+    long long *ids = NULL;
+    long long n = 0, batch = -1;
+    int queued = 0, dropped = 0, skipped = 0;
+    sqlite3_stmt *find = db_prepare(music_db, sql);
+    sqlite3_stmt *track = find != NULL ? db_prepare(music_db,
+        "SELECT " MUSIC_TAG_COLUMNS " FROM tracks t WHERE t.id = ?") : NULL;
+    sqlite3_stmt *pending = track != NULL ? db_prepare(music_db, PENDING_SQL) : NULL;
+    int rc = pending != NULL ? db_exec(music_db, "BEGIN IMMEDIATE") : -1;
+    long long count = rc == 0 ? single_number("SELECT count(*) FROM tracks", 0) : -1;
+    if (count < 0 || (ids = arena_alloc((size_t)(count + 1) * sizeof *ids)) == NULL ||
+        sqlite3_bind_text(find, 1, from_json, -1, SQLITE_STATIC) != SQLITE_OK)
+        rc = -1;
+    int step = SQLITE_ERROR;
+    while (rc == 0 && n < count && (step = sqlite3_step(find)) == SQLITE_ROW)
+        ids[n++] = sqlite3_column_int64(find, 0);
+    if (rc == 0 && step != SQLITE_DONE && step != SQLITE_ROW && n < count) {
+        db_log_error(music_db, "merge: tracks");
+        rc = -1;
+    }
+    if (rc == 0 && n > 0 &&
+        (batch = single_number("SELECT coalesce(max(batch), 0) + 1 FROM changes", 0)) < 0)
+        rc = -1;
+    for (long long i = 0; rc == 0 && i < n; i++) {
+        size_t mark = arena_mark();
+        struct tags t;
+        struct edit e;
+        unsigned changed;
+        int found = 0;
+        if (sqlite3_bind_int64(track, 1, ids[i]) != SQLITE_OK ||
+            sqlite3_step(track) != SQLITE_ROW ||
+            planned_tags(track, 0, ids[i], pending, &t, &changed) != 0 ||
+            (found = merge_edit(&t, f, &from, to, &e)) < 0)
+            rc = -1;
+        sqlite3_reset(track);
+        e.track = ids[i];
+        if (rc == 0 && found && tags_check(f, &e.value) != NULL)
+            skipped++;
+        else if (rc == 0 && found)
+            rc = queue_one(&e, batch, track, &queued, &dropped);
+        arena_rewind(mark);
+    }
+    if (rc != 0)
+        fprintf(stderr, "music: merge into '%.100s' failed\n", to);
+    sqlite3_finalize(find);
+    sqlite3_finalize(track);
+    sqlite3_finalize(pending);
+    if (rc == 0)
+        rc = db_exec(music_db, "COMMIT");
+    if (rc != 0 && sqlite3_get_autocommit(music_db) == 0)
+        db_exec(music_db, "ROLLBACK");
+    music_unlock(lock);
+
+    cJSON *out = cJSON_CreateObject();
+    if (rc != 0 || out == NULL || cJSON_AddNumberToObject(out, "batch", (double)batch) == NULL ||
+        cJSON_AddNumberToObject(out, "queued", queued) == NULL ||
+        cJSON_AddNumberToObject(out, "dropped", dropped) == NULL ||
+        cJSON_AddNumberToObject(out, "skipped", skipped) == NULL) {
         json_error(res, 500, "internal error");
         return;
     }
