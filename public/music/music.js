@@ -229,7 +229,7 @@ function shell(active, overview, ...content) {
   musicRoot = overview.root || "";
   const tabs = [["albums", "Albums"], ["changes", changesLabel(overview.pending)],
                 ["files", "Files"], ["qobuz", "Qobuz"], ["info", "Info"]];
-  return el("section", {},
+  return el("section", { class: "page" },
     el("header", { class: "app-head" },
       el("h1", {}, "Music"),
       el("nav", { class: "tabs", "aria-label": "Music sections" },
@@ -846,7 +846,7 @@ function legend() {
 async function albumsPage() {
   const o = await api("GET", "/api/music");
   if (!o.configured) {
-    return el("section", {},
+    return el("section", { class: "page" },
       el("header", { class: "app-head" }, el("h1", {}, "Music")),
       el("div", { class: "empty" },
         el("p", {}, "Music is not set up. Set NYLM_MUSIC in /etc/nylm.conf to the music " +

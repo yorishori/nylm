@@ -72,7 +72,7 @@ const TABS = [
 ];
 
 function shell(active, ...content) {
-  return el("section", {},
+  return el("section", { class: "page" },
     el("header", { class: "app-head" },
       el("h1", {}, "Plants"),
       el("nav", { class: "tabs", "aria-label": "Plants sections" },
