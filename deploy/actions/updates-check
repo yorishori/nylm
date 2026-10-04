@@ -1,0 +1,9 @@
+#!/bin/sh
+# Starts the check for package updates (nylm-updates-check.service, which
+# runs checkupdates as user nylm) and returns at once. Takes no arguments.
+set -eu
+if [ "$#" -ne 0 ]; then
+    echo "updates-check: takes no arguments" >&2
+    exit 2
+fi
+exec /usr/bin/systemctl start --no-block nylm-updates-check.service

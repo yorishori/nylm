@@ -615,10 +615,11 @@ function showTime(ts) {
 
 /*
  * A hidden password form that starts something on the server (POST path
- * with extra and the password), then shows the page again; node.open()
- * shows it. intro says what it starts, started goes to the status line.
+ * with extra and the password), then runs then() (default: shows the page
+ * again); node.open() shows it. intro says what it starts, started goes to
+ * the status line.
  */
-function passwordForm(path, extra, intro, submitLabel, started) {
+function passwordForm(path, extra, intro, submitLabel, started, then = refresh) {
   const password = el("input", { type: "password", name: "password", required: true,
                                  autocomplete: "current-password" });
   const node = form({ class: "raised", hidden: true }, async () => {
@@ -628,7 +629,7 @@ function passwordForm(path, extra, intro, submitLabel, started) {
       password.value = "";
     }
     setStatus(started);
-    refresh();
+    then();
   },
     el("p", {}, intro),
     field("Password", password, "Starting it needs your password again."),

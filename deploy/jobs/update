@@ -1,0 +1,12 @@
+#!/bin/sh
+# Updates the system: first the keyring (so new packages' signatures are
+# known), then every package. Both are full upgrades from the same synced
+# databases, so the system is never left half-upgraded. Run by
+# nylm-update.service (root). Takes no arguments.
+set -eu
+. /usr/local/lib/nylm/lib.sh
+[ "$#" -eq 0 ] || die "takes no arguments"
+take_lock
+/usr/bin/pacman -Sy --needed --noconfirm --noprogressbar archlinux-keyring
+/usr/bin/pacman -Su --noconfirm --noprogressbar
+echo "done"

@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "arena.h"
@@ -1150,4 +1151,128 @@ cJSON *sysinfo_wireguard(const char *text)
         }
     }
     return out;
+}
+
+/* ---- updates ------------------------------------------------------------- */
+
+char *sysinfo_read_tail(const char *path, size_t max)
+{
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        fprintf(stderr, "sysinfo: %s: %s\n", path, strerror(errno));
+        return NULL;
+    }
+    struct stat sb;
+    char *buf = NULL;
+    if (fstat(fd, &sb) != 0 || sb.st_size < 0) {
+        fprintf(stderr, "sysinfo: %s: %s\n", path, strerror(errno));
+    } else {
+        off_t start = (size_t)sb.st_size > max ? sb.st_size - (off_t)max : 0;
+        if (lseek(fd, start, SEEK_SET) < 0) {
+            fprintf(stderr, "sysinfo: %s: %s\n", path, strerror(errno));
+        } else if ((buf = arena_alloc(max + 1)) != NULL) {
+            size_t used = 0;
+            for (;;) {
+                ssize_t n = read(fd, buf + used, max - used);
+                if (n < 0 && errno == EINTR)
+                    continue;
+                if (n < 0) {
+                    fprintf(stderr, "sysinfo: %s: %s\n", path, strerror(errno));
+                    buf = NULL;
+                    break;
+                }
+                used += (size_t)n;
+                if (n == 0 || used == max)
+                    break;
+            }
+            if (buf != NULL)
+                buf[used] = '\0';
+        }
+    }
+    close(fd);
+    return buf;
+}
+
+/* A package name or version: 1..256 of the characters pacman uses. */
+static int package_word(const char *s, size_t len)
+{
+    if (len == 0 || len > 256)
+        return 0;
+    for (size_t i = 0; i < len; i++)
+        if (!(is_alnum(s[i]) || strchr("@._+-:~", s[i]) != NULL))
+            return 0;
+    return 1;
+}
+
+cJSON *sysinfo_updates(const char *log)
+{
+    cJSON *list = cJSON_CreateArray();
+    if (list == NULL)
+        return NULL;
+    int count = 0;
+    for (const char *line = log; *line != '\0';) {
+        const char *nl = strchr(line, '\n');
+        size_t len = nl != NULL ? (size_t)(nl - line) : strlen(line);
+        const char *end = line + len;
+        const char *arrow = NULL;
+        for (const char *p = line; p + 4 <= end; p++)
+            if (memcmp(p, " -> ", 4) == 0)
+                arrow = p;
+        const char *start = line;
+        line = nl != NULL ? nl + 1 : end;
+        if (arrow == NULL)
+            continue;
+        /* "... name old -> new": new after the arrow, old and name before. */
+        const char *new_v = arrow + 4;
+        const char *old_end = arrow, *old_v = old_end;
+        while (old_v > start && old_v[-1] != ' ')
+            old_v--;
+        if (old_v == start)
+            continue;
+        const char *name_end = old_v - 1, *name = name_end;
+        while (name > start && name[-1] != ' ')
+            name--;
+        if (!package_word(name, (size_t)(name_end - name)) ||
+            !package_word(old_v, (size_t)(old_end - old_v)) ||
+            !package_word(new_v, (size_t)(end - new_v)))
+            continue;
+        if (count++ == SYSINFO_MAX_UPDATES)
+            break;
+        char *n = arena_strndup(name, (size_t)(name_end - name));
+        char *o = arena_strndup(old_v, (size_t)(old_end - old_v));
+        char *w = arena_strndup(new_v, (size_t)(end - new_v));
+        cJSON *u = cJSON_CreateObject();
+        if (n == NULL || o == NULL || w == NULL || u == NULL ||
+            cJSON_AddStringToObject(u, "name", n) == NULL ||
+            cJSON_AddStringToObject(u, "old", o) == NULL ||
+            cJSON_AddStringToObject(u, "new", w) == NULL || !cJSON_AddItemToArray(list, u))
+            return NULL;
+    }
+    return list;
+}
+
+long long sysinfo_last_upgrade(const char *text)
+{
+    static const char marker[] = "] [PACMAN] starting full system upgrade";
+    const char *found = NULL;
+    for (const char *p = strstr(text, marker); p != NULL; p = strstr(p + 1, marker))
+        found = p;
+    if (found == NULL)
+        return -1;
+    /* "[YYYY-MM-DDTHH:MM:SS+HHMM" before the marker. */
+    const char *t = found - 25;
+    if (found - text < 25 || t[0] != '[')
+        return -1;
+    t++;
+    if (t[4] != '-' || t[7] != '-' || t[10] != 'T' || t[13] != ':' || t[16] != ':' ||
+        (t[19] != '+' && t[19] != '-'))
+        return -1;
+    long long y = digits(t, 4), mo = digits(t + 5, 2), d = digits(t + 8, 2),
+              h = digits(t + 11, 2), mi = digits(t + 14, 2), se = digits(t + 17, 2),
+              oh = digits(t + 20, 2), om = digits(t + 22, 2);
+    if (y < 1970 || mo < 1 || mo > 12 || d < 1 || d > 31 || h < 0 || h > 23 || mi < 0 ||
+        mi > 59 || se < 0 || se > 60 || oh < 0 || oh > 23 || om < 0 || om > 59)
+        return -1;
+    long long offset = (oh * 3600 + om * 60) * (t[19] == '+' ? 1 : -1);
+    return days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + se - offset;
 }

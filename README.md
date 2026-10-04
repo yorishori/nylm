@@ -323,6 +323,19 @@ ports: the listening TCP and unconnected UDP sockets of
 `/proc/net/{tcp,udp}{,6}` (no root), each with what it is: nylm,
 WireGuard, the container that publishes it, or a well-known service.
 
+Updates: Check (password; `nylm-updates-check.service` runs
+`checkupdates` as user nylm, which syncs a copy of the package databases,
+never the system's own, so nothing is ever half-upgraded) lists each
+package with an update, read back from the journal. Update now
+(password; `nylm-update.service`, a root job) runs `pacman -Sy
+archlinux-keyring` and then `pacman -Su`, unattended (`--noconfirm`), on
+its own: closing the page or restarting nylm does not stop it, and it is
+never stopped halfway. Read the Arch news first: an update that needs
+steps by hand fails or needs them after. The page shows the last full
+upgrade (from `/var/log/pacman.log`), the update's log, and whether a
+reboot is needed. Reboot (password, action `reboot`) is refused while a
+job runs; the page comes back when the server is up again.
+
 Settings in `/etc/nylm.conf` (restart nylm after changing them):
 
 ```sh
@@ -352,6 +365,9 @@ sudo -u nylm env NYLM_DATA=/mnt/data/nylm NYLM_MUSIC=/mnt/data/music \
 journalctl -u nylm-music-scan -u nylm-music-write -u nylm-music-move -u nylm-qobuz
 sudo systemctl start nylm-disk-usage    # measure the folders (see the System tab)
 journalctl -u nylm-disk-usage
+sudo systemctl start nylm-updates-check # list the package updates
+sudo systemctl start nylm-update       # update every package (what Update now does)
+journalctl -u nylm-updates-check -u nylm-update
 ```
 
 In a checkout (a debug build with sanitizers, data in `./dev-data`):
@@ -373,5 +389,6 @@ Build needs `gcc`, `make` and the system libraries `sqlite` (3.44+), `cjson`,
 `openssl` (3.2+; libssl only for `nylm-qobuz`), `taglib` (2.0+),
 `libjpeg-turbo` and `libpng`, linked dynamically: `pacman -Syu` brings their
 fixes. `make` builds `nylm` and `nylm-qobuz`. The server app's root
-actions also use `smartmontools` and `wireguard-tools` (`install.sh` installs
+actions also use `smartmontools`, `wireguard-tools`, `pacman-contrib` and
+`fakeroot` (`install.sh` installs
 what they need).

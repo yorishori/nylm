@@ -1210,7 +1210,8 @@ for route in "GET /api/server" "GET /api/server/audit" "GET /api/server/log?unit
              "GET /api/server/disk-usage" "POST /api/server/disk-usage" "GET /api/server/smart" \
              "GET /api/server/containers" "GET /api/server/containers/log?name=web" \
              "POST /api/server/containers/restart" "GET /api/server/units" "GET /api/server/ports" \
-             "GET /api/server/wireguard" "POST /api/server/wireguard/name"; do
+             "GET /api/server/wireguard" "POST /api/server/wireguard/name" "GET /api/server/updates" \
+             "POST /api/server/updates/check" "POST /api/server/update" "POST /api/server/reboot"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
@@ -1295,6 +1296,23 @@ post "peer name, control"      400 $WN "{\"public_key\":\"$KEY\",\"name\":\"a\\n
 post "peer name, 100"          200 $WN "{\"public_key\":\"$KEY\",\"name\":\"$(printf '%0100d' 0)\"}"
 post "peer name, 101"          400 $WN "{\"public_key\":\"$KEY\",\"name\":\"$(printf '%0101d' 0)\"}"
 expect 415 "peer name needs json" -b "$JAR" -d "{\"public_key\":\"$KEY\",\"name\":\"x\"}" "$B$WN"
+
+# Updates: the jobs' state, the last upgrade, whether a reboot is needed.
+# Starting anything needs the password; the right one is never tried here
+# (on a server it would update or reboot it).
+expect 200 "updates"             -b "$JAR" "$B/api/server/updates"
+expect_body '"check":{"unit":"nylm-updates-check.service"' "update check state"
+expect_body '"update":{"unit":"nylm-update.service"' "update job state"
+for key in '"packages":' '"last_upgrade":' '"reboot_needed":' '"busy":'; do
+    expect_body "$key" "updates has $key"
+done
+for path in /api/server/updates/check /api/server/update /api/server/reboot; do
+    post "$path, no password"    400 "$path" '{}'
+    post "$path, wrong password" 403 "$path" '{"password":"nope"}'
+    post "$path, password not text" 400 "$path" '{"password":1}'
+    expect 415 "$path needs json" -b "$JAR" -d '{"password":"x"}' "$B$path"
+    expect 405 "$path is POST only" -b "$JAR" "$B$path"
+done
 
 # SMART, through the root action (not installed here: 502).
 expect_either 200 502 "smart"    -b "$JAR" "$B/api/server/smart"

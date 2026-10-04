@@ -50,6 +50,7 @@
 static const char *const nylm_units[] = {
     "nylm.service", "nylm-music-scan.service", "nylm-music-write.service",
     "nylm-music-move.service", "nylm-qobuz.service", "nylm-disk-usage.service",
+    "nylm-updates-check.service", "nylm-update.service",
 };
 #define NNYLM_UNITS (sizeof nylm_units / sizeof nylm_units[0])
 
@@ -179,23 +180,28 @@ static char *unit_log(const char *unit)
 }
 
 /*
- * Starts a root job with the password: unless another job runs (409), or
- * unit (the job's own) is still running, records it in the audit log and
- * runs the action (arg: NULL or checked by the caller). -> 202
+ * Starts a job with the password: unless unit (the job's own) is still
+ * running or, for a root job (exclusive), another job runs (409), records
+ * it in the audit log and runs the action (arg: NULL or checked by the
+ * caller). -> 202
  */
 static void start_job(struct request *req, struct response *res, const char *action,
-                      const char *arg, const char *unit)
+                      const char *arg, const char *unit, int exclusive)
 {
     cJSON *body = json_body(req, res);
     if (body == NULL || !audit_password_ok(body, res))
         return;
     cJSON *state = unit_state(unit);
-    int busy = sysinfo_locked(JOBS_LOCK);
+    int busy = exclusive ? sysinfo_locked(JOBS_LOCK) : 0;
     if (state == NULL || busy < 0) {
         json_error(res, 500, "can not tell whether a job is running; see the server log");
         return;
     }
-    if (busy || unit_running(state)) {
+    if (unit_running(state)) {
+        json_error(res, 409, "it is already running");
+        return;
+    }
+    if (busy) {
         json_error(res, 409, BUSY_MESSAGE);
         return;
     }
@@ -398,7 +404,90 @@ void server_disk_usage(struct request *req, struct response *res)
 /* POST /api/server/disk-usage {password}: measures the folders. -> 202 */
 void server_disk_usage_start(struct request *req, struct response *res)
 {
-    start_job(req, res, "disk-usage", NULL, "nylm-disk-usage.service");
+    start_job(req, res, "disk-usage", NULL, "nylm-disk-usage.service", 1);
+}
+
+/* ---- updates ------------------------------------------------------------- */
+
+/*
+ * GET /api/server/updates: the update check (its job, and the packages it
+ * found: null unless it ran and succeeded), the update job, the last full
+ * upgrade (pacman.log), whether a reboot is needed and a job runs.
+ */
+void server_updates(struct request *req, struct response *res)
+{
+    (void)req;
+    static const char *const units[] = { "nylm-updates-check.service", "nylm-update.service" };
+    cJSON *jobs = units_state(units, 2);
+    int busy = sysinfo_locked(JOBS_LOCK);
+    struct utsname u;
+    if (jobs == NULL || busy < 0 || uname(&u) != 0) {
+        json_error(res, 500, "can not read the jobs' state; see the server log");
+        return;
+    }
+    cJSON *check = cJSON_DetachItemFromArray(jobs, 0);
+    cJSON *update = cJSON_DetachItemFromArray(jobs, 0);
+    const cJSON *result = cJSON_GetObjectItemCaseSensitive(check, "result");
+    cJSON *packages = NULL;
+    if (unit_ran(check) && cJSON_IsString(result) && strcmp(result->valuestring, "success") == 0) {
+        char *log = unit_log(units[0]);
+        packages = log != NULL ? sysinfo_updates(log) : NULL;
+    }
+    /* The end of the log has the latest upgrade (one is many lines). */
+    const char *pacman_log = sysinfo_read_tail("/var/log/pacman.log", 1024 * 1024);
+    long long last = pacman_log != NULL ? sysinfo_last_upgrade(pacman_log) : -1;
+
+    cJSON *out = cJSON_CreateObject();
+    if (out == NULL || !cJSON_AddItemToObject(out, "check", check) ||
+        !cJSON_AddItemToObject(out, "packages", packages != NULL ? packages : cJSON_CreateNull()) ||
+        !cJSON_AddItemToObject(out, "update", update) ||
+        (last >= 0 ? cJSON_AddNumberToObject(out, "last_upgrade", (double)last)
+                   : cJSON_AddNullToObject(out, "last_upgrade")) == NULL ||
+        cJSON_AddBoolToObject(out, "reboot_needed", reboot_needed(u.release)) == NULL ||
+        cJSON_AddBoolToObject(out, "busy", busy) == NULL) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, out);
+}
+
+/* POST /api/server/updates/check {password}: looks for updates. -> 202 */
+void server_updates_check(struct request *req, struct response *res)
+{
+    start_job(req, res, "updates-check", NULL, "nylm-updates-check.service", 0);
+}
+
+/* POST /api/server/update {password}: updates every package. -> 202 */
+void server_update(struct request *req, struct response *res)
+{
+    start_job(req, res, "update", NULL, "nylm-update.service", 1);
+}
+
+/* POST /api/server/reboot {password}: reboots, unless a job runs. -> 202 */
+void server_reboot(struct request *req, struct response *res)
+{
+    cJSON *body = json_body(req, res);
+    if (body == NULL || !audit_password_ok(body, res))
+        return;
+    int busy = sysinfo_locked(JOBS_LOCK);
+    if (busy != 0) {
+        json_error(res, busy < 0 ? 500 : 409,
+                   busy < 0 ? "can not tell whether a job is running; see the server log"
+                            : BUSY_MESSAGE);
+        return;
+    }
+    long long audit = audit_begin(server_db, req, "reboot", "");
+    if (audit < 0) {
+        json_error(res, 500, "can not write the audit log; nothing was done");
+        return;
+    }
+    int ok = action_run("reboot", NULL) == 0;
+    audit_end(server_db, audit, ok ? "ok: rebooting" : "failed: see the server log");
+    if (!ok) {
+        json_error(res, 502, "could not reboot; see the server log");
+        return;
+    }
+    json_reply(res, 202, cJSON_CreateObject());
 }
 
 /* ---- services ------------------------------------------------------------ */

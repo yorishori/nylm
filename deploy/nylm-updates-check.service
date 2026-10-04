@@ -1,0 +1,20 @@
+[Unit]
+Description=nylm check for package updates
+Documentation=file:///usr/local/share/nylm/README.md
+Wants=network-online.target
+After=network-online.target
+
+# Started from the web app (action updates-check) or by hand:
+#   sudo systemctl start nylm-updates-check
+# checkupdates syncs a copy of the package databases (never the system's
+# own, so nothing is half-upgraded) and prints "name old -> new" for each
+# package that has an update; the web app reads that from the journal.
+[Service]
+Type=oneshot
+User=nylm
+Group=nylm
+ExecStart=/usr/bin/checkupdates
+# 2: there are no updates.
+SuccessExitStatus=2
+WorkingDirectory=/var/lib/nylm
+Nice=10

@@ -1,0 +1,9 @@
+#!/bin/sh
+# Starts the system update job (nylm-update.service, root) and returns at
+# once. Takes no arguments.
+set -eu
+if [ "$#" -ne 0 ]; then
+    echo "update: takes no arguments" >&2
+    exit 2
+fi
+exec /usr/bin/systemctl start --no-block nylm-update.service

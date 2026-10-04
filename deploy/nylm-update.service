@@ -1,0 +1,16 @@
+[Unit]
+Description=nylm system update (pacman -Syu)
+Documentation=file:///usr/local/share/nylm/README.md
+Wants=network-online.target
+After=network-online.target
+
+# Started from the web app (action update, password) or by hand:
+#   sudo systemctl start nylm-update
+# Updates the keyring, then every package. Runs on its own: closing the
+# web page or restarting nylm does not stop it. Never runs together with
+# another nylm job (disk usage, backup).
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/nylm/jobs/update
+# Never stop pacman halfway through.
+TimeoutStartSec=infinity

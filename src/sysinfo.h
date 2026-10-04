@@ -160,4 +160,19 @@ cJSON *sysinfo_wireguard(const char *text);
 /* A WireGuard public key: 44 characters of base64 ending in '='. */
 int sysinfo_wg_key_valid(const char *s);
 
+/* ---- updates ------------------------------------------------------------- */
+
+/* The end of a file (its last max bytes at most), NUL-terminated in the
+ * arena; NULL if it can not be read (logged). */
+char *sysinfo_read_tail(const char *path, size_t max);
+
+/* The update check's log (checkupdates: "name old -> new" lines, after the
+ * journal's prefix) -> [{name, old, new}], at most SYSINFO_MAX_UPDATES. */
+#define SYSINFO_MAX_UPDATES 5000
+cJSON *sysinfo_updates(const char *log);
+
+/* The time of the last "starting full system upgrade" in pacman.log text
+ * ("[2026-10-04T12:00:00+0200] [PACMAN] ..."), unix seconds; -1 if none. */
+long long sysinfo_last_upgrade(const char *text);
+
 #endif

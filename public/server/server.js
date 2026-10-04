@@ -10,6 +10,8 @@
  *              it, read its log
  *   #/network  WireGuard: each peer, where it connects from, its last
  *              handshake and traffic, a name for it; the open ports
+ *   #/updates  the packages that have an update (checkupdates), the system
+ *              update (pacman -Syu) and its log, reboot
  *
  * Reads never ask for anything; every button that changes the machine
  * asks for the password again, and the server records it (latest actions).
@@ -17,12 +19,16 @@
  * back while it runs, and shows its log.
  */
 
-const TABS = [["system", "System"], ["containers", "Containers"], ["network", "Network"]];
+const TABS = [["system", "System"], ["containers", "Containers"], ["network", "Network"],
+              ["updates", "Updates"]];
 
 /* What each recorded action was, by its name in the audit log. */
 const ACTION_TEXT = {
   "disk-usage": "Measure disk usage",
   "docker-restart": "Restart container",
+  "updates-check": "Check for updates",
+  update: "System update",
+  reboot: "Reboot",
 };
 
 function shell(active, ...content) {
@@ -361,6 +367,109 @@ async function systemPage() {
     actionsSection(audit.actions));
 }
 
+/* ---- updates ------------------------------------------------------------- */
+
+function packagesCard(u) {
+  const check = passwordForm("/api/server/updates/check", {},
+    "Looks for updates in a copy of the package databases (the system's own are not touched).",
+    "Check", "Checking for updates…");
+  const log = unitLog(u.check.unit);
+  const list = u.packages;
+  let content = null;
+  if (!running(u.check) && list) {
+    content = list.length
+      ? table([["Package"], ["Installed"], ["New"]], list.map((p) => el("tr", {},
+          el("td", {}, p.name), el("td", { class: "muted" }, p.old), el("td", {}, p.new))))
+      : el("p", { class: "ok" }, "Everything is up to date.");
+  }
+  const card = el("section", { class: "card stack" },
+    el("h2", {}, "Updates ", list && !running(u.check)
+      ? el("span", { class: "count" }, plural(list.length, "package", "packages")) : null),
+    jobState(u.check),
+    content,
+    el("div", { class: "actions" },
+      el("button", { class: "btn go", type: "button", disabled: running(u.check),
+                     onclick: () => check.open() }, "Check for updates"),
+      u.check.started ? log.button : null),
+    check,
+    log.panel);
+  watchJob(u.check, card, async () => (await api("GET", "/api/server/updates")).check,
+           "Update check finished");
+  return card;
+}
+
+function updateCard(u) {
+  const start = passwordForm("/api/server/update", {},
+    "Updates the keyring, then every package (pacman -Syu). It runs on its own: you can close " +
+    "this page. Containers restart if Docker is updated.",
+    "Update now", "Updating…");
+  const log = unitLog(u.update.unit);
+  const card = el("section", { class: "card stack" },
+    el("h2", {}, "System update"),
+    facts([["Last full upgrade", u.last_upgrade ? showTime(u.last_upgrade) : "not found"]]),
+    jobState(u.update),
+    el("p", { class: "muted" }, "Some updates need steps by hand: read the Arch news first."),
+    el("div", { class: "actions" },
+      el("a", { class: "btn", href: "https://archlinux.org/news/", target: "_blank",
+                rel: "noopener noreferrer" }, "Arch news"),
+      el("button", { class: "btn go", type: "button", disabled: running(u.update) || u.busy,
+                     onclick: () => start.open() }, "Update now"),
+      u.update.started ? log.button : null),
+    u.busy && !running(u.update) ? el("p", { class: "muted" }, "Another job is running.") : null,
+    start,
+    log.panel);
+  watchJob(u.update, card, async () => (await api("GET", "/api/server/updates")).update,
+           "Update finished: see its log");
+  return card;
+}
+
+/* After a reboot: checks every few seconds until the server is back up
+ * (it answers, up for less than its uptime before), then shows the page. */
+function waitForReboot(uptimeBefore) {
+  const poll = async () => {
+    try {
+      const h = await api("GET", "/api/server");
+      if (h.uptime < uptimeBefore) {
+        setStatus("The server is back");
+        refresh();
+        return;
+      }
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        handleError(err);
+        return;
+      }
+      /* not up yet */
+    }
+    setTimeout(poll, 5000);
+  };
+  setTimeout(poll, 5000);
+}
+
+function rebootCard(u, uptime) {
+  const reboot = passwordForm("/api/server/reboot", {},
+    "Reboots the server now: every service and container stops and starts again. " +
+    "This page comes back when the server is up.",
+    "Reboot", "Rebooting… this page comes back when the server is up.",
+    () => waitForReboot(uptime));
+  return el("section", { class: "card stack" },
+    el("h2", {}, "Reboot"),
+    u.reboot_needed ? el("p", { class: "warn" }, "A newer kernel is installed: reboot to use it.")
+                    : el("p", { class: "muted" }, "No reboot is needed."),
+    el("div", { class: "actions" },
+      el("button", { class: "btn danger", type: "button", disabled: u.busy,
+                     onclick: () => reboot.open() }, "Reboot")),
+    u.busy ? el("p", { class: "muted" }, "Not while a job is running.") : null,
+    reboot);
+}
+
+async function updatesPage() {
+  const [u, h] = await Promise.all([api("GET", "/api/server/updates"), api("GET", "/api/server")]);
+  return shell("updates",
+    packagesCard(u),
+    el("div", { class: "columns" }, updateCard(u), rebootCard(u, h.uptime)));
+}
+
 /* ---- containers ---------------------------------------------------------- */
 
 const STATE_CLASS = { running: "ok", restarting: "warn", paused: "warn", created: "muted",
@@ -541,6 +650,7 @@ function route(parts) {
   if (section === "system" && rest === undefined) return systemPage();
   if (section === "containers" && rest === undefined) return containersPage();
   if (section === "network" && rest === undefined) return networkPage();
+  if (section === "updates" && rest === undefined) return updatesPage();
   go("#/system");
   return null;
 }

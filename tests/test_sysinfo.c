@@ -644,6 +644,50 @@ static void test_wireguard(void)
     CHECK(sysinfo_wireguard(text) == NULL);
 }
 
+static void test_updates(void)
+{
+    cJSON *u = sysinfo_updates(
+        "2026-10-04T12:00:00+0200 koi systemd[1]: Starting nylm check for package updates...\n"
+        "2026-10-04T12:00:05+0200 koi checkupdates[42]: linux 6.10.1.arch1-1 -> 6.10.2.arch1-1\n"
+        "2026-10-04T12:00:05+0200 koi checkupdates[42]: python-foo 1:2.0-1 -> 1:2.1-1\n"
+        "2026-10-04T12:00:05+0200 koi checkupdates[42]: gtk3 1:3.24.43-4 -> 1:3.24.43-5\n"
+        "2026-10-04T12:00:05+0200 koi checkupdates[42]: bad name; 1 -> 2\n"
+        "2026-10-04T12:00:05+0200 koi checkupdates[42]: ==> ERROR: something\n"
+        "x -> y\n"
+        "linux-firmware 20240909-1 -> 20241010-1");
+    CHECK(cJSON_GetArraySize(u) == 4);
+    cJSON *a = cJSON_GetArrayItem(u, 0);
+    CHECK_STR(str(a, "name"), "linux");
+    CHECK_STR(str(a, "old"), "6.10.1.arch1-1");
+    CHECK_STR(str(a, "new"), "6.10.2.arch1-1");
+    CHECK_STR(str(cJSON_GetArrayItem(u, 1), "old"), "1:2.0-1");
+    CHECK_STR(str(cJSON_GetArrayItem(u, 3), "name"), "linux-firmware");
+    u = sysinfo_updates("");
+    CHECK(u != NULL && cJSON_GetArraySize(u) == 0);
+
+    CHECK(sysinfo_last_upgrade(
+              "[2026-10-01T10:00:00+0200] [PACMAN] starting full system upgrade\n"
+              "[2026-10-01T10:00:09+0200] [ALPM] upgraded linux (1 -> 2)\n"
+              "[2026-10-03T12:30:15+0200] [PACMAN] starting full system upgrade\n"
+              "[2026-10-03T12:31:00+0200] [ALPM] transaction completed\n") ==
+          1791117015 - 86400 - 7200); /* 12:30:15 at +02:00 is 10:30:15 UTC */
+    CHECK(sysinfo_last_upgrade("[2026-10-04T12:30:15-0130] [PACMAN] starting full system upgrade") ==
+          1791117015 + 5400);
+    CHECK(sysinfo_last_upgrade("[2026-10-04T12:30:15+0000] [PACMAN] Running 'pacman -S x'\n") == -1);
+    CHECK(sysinfo_last_upgrade("") == -1);
+    CHECK(sysinfo_last_upgrade("] [PACMAN] starting full system upgrade") == -1);
+    CHECK(sysinfo_last_upgrade("[2026-10-04 12:30:15+0000] [PACMAN] starting full system upgrade") == -1);
+
+    char path[512];
+    snprintf(path, sizeof path, "%s/tail", tmp);
+    write_file(tmp, "tail", "0123456789");
+    CHECK_STR(sysinfo_read_tail(path, 4), "6789");
+    CHECK_STR(sysinfo_read_tail(path, 10), "0123456789");
+    CHECK_STR(sysinfo_read_tail(path, 100), "0123456789");
+    CHECK(remove(path) == 0);
+    CHECK(sysinfo_read_tail(path, 4) == NULL);
+}
+
 int main(void)
 {
     if (arena_init(4 * 1024 * 1024) != 0 || mkdtemp(tmp) == NULL)
@@ -664,6 +708,7 @@ int main(void)
     test_containers();
     test_listening();
     test_wireguard();
+    test_updates();
     static const char *const made[] = {
         "hwmon0/name", "hwmon0/temp1_input", "hwmon0/temp1_label", "hwmon0/temp3_input",
         "hwmon0/temp4_input", "hwmon1/temp1_input", "four", "empty", "hwmon0", "hwmon1",

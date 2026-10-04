@@ -1,0 +1,8 @@
+#!/bin/sh
+# Reboots the machine, unless a nylm job (update, backup, disk usage) is
+# running. Takes no arguments.
+set -eu
+. /usr/local/lib/nylm/lib.sh
+[ "$#" -eq 0 ] || die "takes no arguments"
+take_lock
+exec /usr/bin/systemctl reboot
