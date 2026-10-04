@@ -479,8 +479,8 @@ static int album_end(const struct album_sum *a)
     return cJSON_AddNumberToObject(row, "tracks", a->tracks) != NULL &&
                    add_field_names(row, "mixed", a->mixed) != NULL &&
                    add_field_names(row, "changed", a->changed) != NULL &&
-                   cJSON_AddBoolToObject(row, "missing", a->missing != 0) != NULL &&
-                   cJSON_AddBoolToObject(row, "invalid", a->invalid != 0) != NULL &&
+                   add_field_names(row, "missing", a->missing) != NULL &&
+                   add_field_names(row, "invalid", a->invalid) != NULL &&
                    cJSON_AddBoolToObject(row, "several_artists",
                                          a->several_artists && !a->all_compilation) != NULL &&
                    cJSON_AddBoolToObject(row, "no_art", a->no_art) != NULL &&
@@ -505,9 +505,10 @@ static int new_album(sqlite3_stmt *st, const char **album, const char **artist, 
  * GET /api/music/albums[?track=N]: every album (or the album of track N),
  * one row each: track (one of its tracks), the planned album fields
  * (null if absent or mixed), tracks, mixed and changed (fields;
- * "picture" for a new cover), and whether a track misses a required tag,
- * has an invalid one, the tracks have several artists without being a
- * compilation, or a track has no picture; cover (the hash of the planned
+ * "picture" for a new cover), missing and invalid (the required tags a
+ * track has no value for, the tags a track has an invalid value in),
+ * whether the tracks have several artists without being a compilation,
+ * and whether a track has no picture; cover (the hash of the planned
  * front cover, else of the first picture; null if none) and whether the
  * tracks' pictures differ (mixed_art).
  */

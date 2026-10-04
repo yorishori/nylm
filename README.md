@@ -121,9 +121,11 @@ exclusively. The server holds it shared for its own writes to `music.db`,
 and refuses to queue or discard anything while a service runs (409).
 
 The web app has three tabs. Albums: the last scan and a button to scan
-again, filters (search, a field each, and switches for albums with
-invalid tags, missing tags, several artists without being a compilation,
-tracks without art, art that differs between tracks), and a table of
+again, filters (search; a field each, with a switch for albums where a track
+has no value for it; and switches for albums with invalid tags, missing
+tags, invalid genres, genres that differ between tracks, several artists
+without being a compilation, tracks without art, art that differs between
+tracks), and a table of
 albums edited in place: the cover, album, album artist, date, composers,
 genres, compilation, for every track at once. The tracks count opens the
 album: its pictures (each once: type, size, on how many tracks, full

@@ -762,7 +762,11 @@ function refocus(container, key) {
 /* The albums table's filters; kept while the page is drawn again. */
 const filters = { q: "", album: "", albumartist: "", date: "", composer: "", genre: "",
                   invalid: false, missing: false, artists: false, noArt: false,
-                  mixedArt: false };
+                  mixedArt: false, mixedGenres: false, invalidGenres: false,
+                  none: { album: false, albumartist: false, date: false, composer: false,
+                          genre: false } };
+/* The fields with a text filter and a "no value" switch. */
+const FILTER_FIELDS = ["album", "albumartist", "date", "composer", "genre"];
 
 /* Composers in the albums table: the first, and how many more. */
 function composerSummary(v) {
@@ -777,13 +781,16 @@ function albumText(a, f) {
 function albumMatches(a) {
   const q = filters.q.trim().toLowerCase();
   if (q && !ALBUM_COLUMNS.some((f) => albumText(a, f).includes(q))) return false;
-  for (const f of ["album", "albumartist", "date", "composer", "genre"]) {
+  for (const f of FILTER_FIELDS) {
     const v = filters[f].trim().toLowerCase();
     if (v && !albumText(a, f).includes(v)) return false;
+    if (filters.none[f] && !a.missing.includes(f)) return false;
   }
-  return !(filters.invalid && !a.invalid) && !(filters.missing && !a.missing) &&
+  return !(filters.invalid && !a.invalid.length) && !(filters.missing && !a.missing.length) &&
          !(filters.artists && !a.several_artists) && !(filters.noArt && !a.no_art) &&
-         !(filters.mixedArt && !a.mixed_art);
+         !(filters.mixedArt && !a.mixed_art) &&
+         !(filters.mixedGenres && !a.mixed.includes("genre")) &&
+         !(filters.invalidGenres && !a.invalid.includes("genre"));
 }
 
 /* One album as a table row, editable unless readOnly. */
@@ -829,23 +836,28 @@ function filterBar(show) {
     });
     return input;
   };
-  const toggle = (key, label) => switchButton({ label, on: filters[key], showLabel: true,
-                                                onToggle: (on) => {
-                                                  filters[key] = on;
-                                                  show();
-                                                  return true;
-                                                } });
+  const toggle = (set, key, label) => switchButton({ label, on: set[key], showLabel: true,
+                                                     onToggle: (on) => {
+                                                       set[key] = on;
+                                                       show();
+                                                       return true;
+                                                     } });
+  const LABELS = { album: "Album", albumartist: "Album artist", date: "Date",
+                   composer: "Composer", genre: "Genre" };
   return el("div", { class: "filters stack" },
     text("q", "Search every column"),
     el("div", { class: "filter-fields" },
-      text("album", "Album"), text("albumartist", "Album artist"), text("date", "Date"),
-      text("composer", "Composer"), text("genre", "Genre")),
+      FILTER_FIELDS.map((f) => el("div", { class: "filter-field" },
+        text(f, LABELS[f]),
+        toggle(filters.none, f, `No ${LABELS[f].toLowerCase()}`)))),
     el("div", { class: "filter-switches" },
-      toggle("invalid", "Invalid tags"),
-      toggle("missing", "Missing tags"),
-      toggle("artists", "Several artists, not a compilation"),
-      toggle("noArt", "Tracks without art"),
-      toggle("mixedArt", "Art differs between tracks")));
+      toggle(filters, "invalid", "Invalid tags"),
+      toggle(filters, "missing", "Missing tags"),
+      toggle(filters, "invalidGenres", "Invalid genres"),
+      toggle(filters, "mixedGenres", "Genres differ between tracks"),
+      toggle(filters, "artists", "Several artists, not a compilation"),
+      toggle(filters, "noArt", "Tracks without art"),
+      toggle(filters, "mixedArt", "Art differs between tracks")));
 }
 
 function legend() {
