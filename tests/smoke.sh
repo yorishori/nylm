@@ -265,7 +265,9 @@ for route in "GET /api/plants" "GET /api/plants/due" "GET /api/plants/plant?id=1
              "POST /api/plants/types/add" "POST /api/plants/types/update" \
              "POST /api/plants/types/archive" "POST /api/plants/rules/save" \
              "POST /api/plants/rules/delete" "POST /api/plants/log/add" \
-             "POST /api/plants/log/update" "POST /api/plants/log/delete"; do
+             "POST /api/plants/log/update" "POST /api/plants/log/delete" \
+             "GET /api/plants/photo?hash=$(printf '%064d' 0)&size=full" \
+             "POST /api/plants/photos/add" "POST /api/plants/photos/delete"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
@@ -414,7 +416,7 @@ post "log update to archived"  400 /api/plants/log/update "{\"id\":2,\"care_type
 post "log update future"       400 /api/plants/log/update "{\"id\":2,\"care_type_id\":null,\"date\":\"$TOMORROW\",\"note\":\"\"}"
 
 expect 200 "log list"          -b "$JAR" "$B/api/plants/log?plant_id=1"
-expect_body "{\"entries\":[{\"id\":1,\"care_type_id\":1,\"date\":\"$TODAY\",\"note\":\"\"},{\"id\":2,\"care_type_id\":null,\"date\":\"2026-01-01\",\"note\":\"edited\"}],\"more\":false}" "log list newest first"
+expect_body "{\"entries\":[{\"id\":1,\"care_type_id\":1,\"date\":\"$TODAY\",\"note\":\"\",\"photos\":[]},{\"id\":2,\"care_type_id\":null,\"date\":\"2026-01-01\",\"note\":\"edited\",\"photos\":[]}],\"more\":false}" "log list newest first"
 expect 200 "log list before"   -b "$JAR" "$B/api/plants/log?plant_id=1&before=1"
 expect_body '{"entries":[{"id":2,' "log list pages"
 expect 404 "log before other plant" -b "$JAR" "$B/api/plants/log?plant_id=1&before=3"
@@ -437,7 +439,96 @@ done
 expect 200 "log list 51"       -b "$JAR" "$B/api/plants/log?plant_id=3"
 expect_body '"more":true' "log list has more"
 
-post "log delete"              204 /api/plants/log/delete '{"id":1}'
+# Photos of log entries: a JPEG and its thumbnail, both from the browser.
+PH=/api/plants/photos/add
+PHOTOS="$TMP/data/plants/photos"
+# photo LOG IMAGE THUMB: the body that adds IMAGE (thumbnail THUMB) to LOG.
+photo() {
+    printf '{"log_id":%s,"image":"%s","thumb":"%s"}' "$1" "$(base64 -w0 "$2")" \
+        "$(base64 -w0 "$3")" > "$TMP/photo.json"
+}
+# has_file DESCRIPTION WANT PATH: PATH exists (WANT 1) or not (0).
+has_file() {
+    if [ -e "$3" ]; then got=1; else got=0; fi
+    if [ "$got" = "$2" ]; then PASSED=$((PASSED + 1)); else
+        FAILED=$((FAILED + 1)); echo "FAIL: $1: $3 exists: $got"; fi
+}
+for n in 1 2 3 4 5; do
+    { cat tests/data/cover.jpg; printf '%s' "$n"; } > "$TMP/p$n.jpg"
+done
+H1=$(sha256sum "$TMP/p1.jpg" | cut -c1-64)
+photo 1 "$TMP/p1.jpg" tests/data/cover.jpg
+expect 201 "photo add"         -b "$JAR" -H "$J" --data-binary "@$TMP/photo.json" "$B$PH"
+expect_body "{\"hash\":\"$H1\"}" "photo add answers its hash"
+has_file "the photo is stored" 1 "$PHOTOS/$H1"
+has_file "its thumbnail is stored" 1 "$PHOTOS/$H1.thumb"
+expect 409 "photo twice"       -b "$JAR" -H "$J" --data-binary "@$TMP/photo.json" "$B$PH"
+expect_body "this photo is already in the entry" "twice message"
+for n in 2 3 4; do
+    photo 1 "$TMP/p$n.jpg" tests/data/cover.jpg
+    expect 201 "photo add $n"  -b "$JAR" -H "$J" --data-binary "@$TMP/photo.json" "$B$PH"
+done
+photo 1 "$TMP/p5.jpg" tests/data/cover.jpg
+expect 409 "photo 5"           -b "$JAR" -H "$J" --data-binary "@$TMP/photo.json" "$B$PH"
+expect_body "an entry has at most 4 photos" "photo limit message"
+expect 200 "log with photos"   -b "$JAR" "$B/api/plants/log?plant_id=1"
+expect_body "\"note\":\"\",\"photos\":[\"$H1\",\"$(sha256sum "$TMP/p2.jpg" | cut -c1-64)\"," "photos in order"
+expect 200 "photo full"        -b "$JAR" "$B/api/plants/photo?hash=$H1&size=full"
+if cmp -s "$TMP/body" "$TMP/p1.jpg"; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: the photo is not sent as stored"; fi
+expect_header "content-type: image/jpeg" "photo type" -b "$JAR" "$B/api/plants/photo?hash=$H1&size=thumb"
+expect_header "cache-control: private, max-age=31536000, immutable" "photo cached" -b "$JAR" "$B/api/plants/photo?hash=$H1&size=thumb"
+expect 200 "photo thumb"       -b "$JAR" "$B/api/plants/photo?hash=$H1&size=thumb"
+if cmp -s "$TMP/body" tests/data/cover.jpg; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: the thumbnail is not sent as stored"; fi
+expect 404 "photo not listed"  -b "$JAR" "$B/api/plants/photo?hash=$(printf '%064d' 0)&size=full"
+expect 400 "photo bad hash"    -b "$JAR" "$B/api/plants/photo?hash=../x&size=full"
+expect 400 "photo upper hash"  -b "$JAR" "$B/api/plants/photo?hash=$(echo "$H1" | tr a-f A-F)&size=full"
+expect 400 "photo bad size"    -b "$JAR" "$B/api/plants/photo?hash=$H1&size=big"
+expect 400 "photo no size"     -b "$JAR" "$B/api/plants/photo?hash=$H1"
+# The checks of an upload.
+post "photo no log"            400 $PH '{"image":"","thumb":""}'
+photo 999 "$TMP/p5.jpg" tests/data/cover.jpg
+expect 404 "photo log missing" -b "$JAR" -H "$J" --data-binary "@$TMP/photo.json" "$B$PH"
+post "photo no image"          400 $PH '{"log_id":2,"thumb":"/9j/"}'
+expect_body "'image' must be a JPEG picture in base64" "no image message"
+post "photo no thumb"          400 $PH '{"log_id":2,"image":"/9j/"}'
+post "photo not base64"        400 $PH '{"log_id":2,"image":"!!!!","thumb":"/9j/"}'
+expect_body "'image' must be base64" "base64 message"
+post "photo not a JPEG"        400 $PH "{\"log_id\":2,\"image\":\"$(printf 'GIF89a' | base64)\",\"thumb\":\"/9j/\"}"
+expect_body "'image' must be a JPEG picture" "not JPEG message"
+post "photo thumb not a JPEG"  400 $PH "{\"log_id\":2,\"image\":\"/9j/\",\"thumb\":\"$(printf 'GIF89a' | base64)\"}"
+{ printf '\377\330\377'; head -c 655357 /dev/zero; } > "$TMP/max.jpg"
+{ printf '\377\330\377'; head -c 65533 /dev/zero; } > "$TMP/maxthumb.jpg"
+photo 2 "$TMP/max.jpg" "$TMP/maxthumb.jpg"
+expect 201 "photo of 640 KiB, thumbnail of 64 KiB" -b "$JAR" -H "$J" --data-binary "@$TMP/photo.json" "$B$PH"
+printf '\0' >> "$TMP/max.jpg"
+photo 2 "$TMP/max.jpg" tests/data/cover.jpg
+expect 413 "photo too big"     -b "$JAR" -H "$J" --data-binary "@$TMP/photo.json" "$B$PH"
+expect_body "'image' is bigger than 640 KiB" "too big message"
+printf '\0' >> "$TMP/maxthumb.jpg"
+photo 2 "$TMP/p5.jpg" "$TMP/maxthumb.jpg"
+expect 413 "thumbnail too big" -b "$JAR" -H "$J" --data-binary "@$TMP/photo.json" "$B$PH"
+# A photo in two entries: its files stay until neither has it.
+photo 2 "$TMP/p1.jpg" tests/data/cover.jpg
+expect 201 "same photo, other entry" -b "$JAR" -H "$J" --data-binary "@$TMP/photo.json" "$B$PH"
+PD=/api/plants/photos/delete
+post "photo delete"            204 $PD "{\"log_id\":1,\"hash\":\"$H1\"}"
+post "photo delete again"      404 $PD "{\"log_id\":1,\"hash\":\"$H1\"}"
+post "photo delete bad hash"   400 $PD '{"log_id":1,"hash":"x"}'
+post "photo delete no log"     400 $PD "{\"hash\":\"$H1\"}"
+has_file "a photo another entry has stays" 1 "$PHOTOS/$H1"
+post "photo delete, the other" 204 $PD "{\"log_id\":2,\"hash\":\"$H1\"}"
+has_file "an unused photo goes" 0 "$PHOTOS/$H1"
+has_file "and its thumbnail" 0 "$PHOTOS/$H1.thumb"
+H2=$(sha256sum "$TMP/p2.jpg" | cut -c1-64)
+has_file "the entry's other photos stay" 1 "$PHOTOS/$H2"
+
+post "log delete"              204 /api/plants/log/delete '{"id":1}\'
+has_file "deleting an entry removes its photos" 0 "$PHOTOS/$H2"
+query_plants() { sqlite3 "$TMP/data/plants/plants.db" "$1"; }
+if [ "$(query_plants "SELECT count(*) FROM care_photos WHERE log_id = 1")" = 0 ]; then
+    PASSED=$((PASSED + 1)); else FAILED=$((FAILED + 1)); echo "FAIL: photo rows left"; fi
 post "log delete again"        404 /api/plants/log/delete '{"id":1}'
 post "log delete bad id"       400 /api/plants/log/delete '{"id":-1}'
 expect 200 "due after delete"  -b "$JAR" "$B/api/plants/plant?id=1"

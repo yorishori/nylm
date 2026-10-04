@@ -1,5 +1,5 @@
 /*
- * Album art files (see art.h): one folder, a file per picture and per
+ * Picture files (see art.h): a folder per store, a file per picture and per
  * thumbnail, named by the SHA-256 of the picture. Every file is opened
  * relative to the folder with O_NOFOLLOW, and written whole under a
  * temporary name first, so a reader never sees half a picture.
@@ -25,15 +25,18 @@
 #define NAME_LEN     (ART_HASH_LEN + sizeof THUMB_SUFFIX)  /* a file name, with its NUL */
 #define TMP_LEN      (sizeof TMP_PREFIX - 1 + NAME_LEN)    /* its temporary name */
 
-static char dir_path[DB_MAX_PATH];
+static char dir_paths[ART_STORES][DB_MAX_PATH];
 
 int art_configure(const char *data_dir)
 {
-    int n = snprintf(dir_path, sizeof dir_path, "%s/music/art", data_dir);
-    if (n < 0 || (size_t)n >= sizeof dir_path) {
-        fprintf(stderr, "art: data folder path is too long\n");
-        dir_path[0] = '\0';
-        return -1;
+    static const char *const folders[ART_STORES] = { "music/art", "plants/photos" };
+    for (int i = 0; i < ART_STORES; i++) {
+        int n = snprintf(dir_paths[i], sizeof dir_paths[i], "%s/%s", data_dir, folders[i]);
+        if (n < 0 || (size_t)n >= sizeof dir_paths[i]) {
+            fprintf(stderr, "art: data folder path is too long\n");
+            dir_paths[i][0] = '\0';
+            return -1;
+        }
     }
     return 0;
 }
@@ -120,9 +123,10 @@ long art_base64_decode(const char *s, size_t len, unsigned char *out, size_t max
     return (long)at;
 }
 
-/* Opens the folder, making it first if needed: an fd, or -1 (logged). */
-static int open_dir(void)
+/* Opens store's folder, making it first if needed: an fd, or -1 (logged). */
+static int open_dir(enum art_store store)
 {
+    const char *dir_path = dir_paths[store];
     if (dir_path[0] == '\0') {
         fprintf(stderr, "art: not configured\n");
         return -1;
@@ -158,13 +162,15 @@ static int write_all(int fd, const unsigned char *data, size_t size)
     return 0;
 }
 
-int art_save(const char *hash, int thumb, const unsigned char *data, size_t size)
+int art_save(enum art_store store, const char *hash, int thumb, const unsigned char *data,
+             size_t size)
 {
+    const char *dir_path = dir_paths[store];
     if (!art_hash_valid(hash)) {
         fprintf(stderr, "art: invalid hash\n");
         return -1;
     }
-    int dir = open_dir();
+    int dir = open_dir(store);
     if (dir < 0)
         return -1;
     char name[NAME_LEN], tmp[TMP_LEN];
@@ -190,13 +196,14 @@ int art_save(const char *hash, int thumb, const unsigned char *data, size_t size
     return rc;
 }
 
-int art_open(const char *hash, int thumb)
+int art_open(enum art_store store, const char *hash, int thumb)
 {
+    const char *dir_path = dir_paths[store];
     if (!art_hash_valid(hash)) {
         errno = ENOENT;
         return -1;
     }
-    int dir = open_dir();
+    int dir = open_dir(store);
     if (dir < 0)
         return -1;
     char name[NAME_LEN];
@@ -216,9 +223,9 @@ int art_open(const char *hash, int thumb)
     return fd;
 }
 
-long art_load(const char *hash, unsigned char *out, size_t max)
+long art_load(enum art_store store, const char *hash, unsigned char *out, size_t max)
 {
-    int fd = art_open(hash, 0);
+    int fd = art_open(store, hash, 0);
     if (fd < 0) {
         if (errno == ENOENT)
             fprintf(stderr, "art: %s is not stored\n", hash);
@@ -249,9 +256,10 @@ long art_load(const char *hash, unsigned char *out, size_t max)
     return rc;
 }
 
-long art_sweep(int (*keep)(const char *hash, void *ctx), void *ctx)
+long art_sweep(enum art_store store, int (*keep)(const char *hash, void *ctx), void *ctx)
 {
-    int dir = open_dir();
+    const char *dir_path = dir_paths[store];
+    int dir = open_dir(store);
     if (dir < 0)
         return -1;
     int fd = dup(dir);

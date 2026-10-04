@@ -89,6 +89,17 @@ const char *const plants_migrations[] = {
     "ALTER TABLE care_types ADD COLUMN color TEXT NOT NULL DEFAULT 'sky'"
     "    CHECK (color IN ('butter', 'lime', 'mint', 'teal', 'sky', 'periwinkle',"
     "                     'lavender', 'orchid'));",
+
+    /* 3: up to 4 photos per log entry, in order. A photo is a JPEG (and
+     * its thumbnail) in <NYLM_DATA>/plants/photos/, named by its SHA-256
+     * (src/art.h, ART_PLANTS); a file no row names is removed. */
+    "CREATE TABLE care_photos ("
+    "    log_id   INTEGER NOT NULL REFERENCES care_log(id) ON DELETE CASCADE,"
+    "    hash     TEXT    NOT NULL CHECK (length(hash) = 64 AND hash NOT GLOB '*[^0-9a-f]*'),"
+    "    position INTEGER NOT NULL,"
+    "    PRIMARY KEY (log_id, hash)"
+    ") STRICT, WITHOUT ROWID;"
+    "CREATE INDEX care_photos_by_hash ON care_photos (hash);",
 };
 
 const int plants_migration_count = sizeof plants_migrations / sizeof plants_migrations[0];

@@ -4,7 +4,7 @@
  * Plants app (/plants/). Sections by URL hash:
  *   #/due            what to do, soonest first
  *   #/plants[/ID]    plants, or one plant with its care rules
- *   #/journal[/ID]   a plant's care log and notes
+ *   #/journal[/ID]   a plant's care log, notes and photos
  *   #/types          care types
  *
  * Colour has three jobs, each with its own shape:
@@ -517,6 +517,92 @@ async function plantPage(id) {
 
 /* ---- journal ----------------------------------------------------------- */
 
+const PHOTOS_MAX = 4;
+const PHOTO_SIDE = 1600;             /* pixels: a photo's longer side, at most */
+const PHOTO_BYTES = 640 * 1024;      /* its JPEG, at most (the server's limit) */
+const THUMB_SIDE = 320;
+const THUMB_BYTES = 64 * 1024;
+
+function photoUrl(hash, size) {
+  return `/api/plants/photo?hash=${encodeURIComponent(hash)}&size=${size}`;
+}
+
+/* Adds a photo file to entry id: a JPEG and its thumbnail, both made here. */
+async function addPhoto(id, file) {
+  setStatus("Adding the photo…");
+  const bitmap = await loadBitmap(file);
+  let image, thumb;
+  try {
+    image = await scaledJpeg(bitmap, PHOTO_SIDE, PHOTO_BYTES);
+    thumb = await scaledJpeg(bitmap, THUMB_SIDE, THUMB_BYTES);
+  } finally {
+    bitmap.close();
+  }
+  await api("POST", "/api/plants/photos/add", {
+    log_id: id, image: await base64Of(image.blob), thumb: await base64Of(thumb.blob),
+  });
+  setStatus("Added the photo");
+}
+
+/*
+ * An entry's photos as thumbnails; pressing one shows it full size in
+ * place of the entry (viewer), with Close and Remove photo.
+ */
+function photoStrip(entry, view, viewer) {
+  if (!entry.photos.length) return null;
+  return el("div", { class: "photos" }, entry.photos.map((hash, i) =>
+    el("button", { class: "photo-thumb", type: "button",
+                   "aria-label": `Photo ${i + 1} of ${entry.photos.length}: show it full size`,
+                   onclick: () => {
+      const remove = el("button", { class: "btn danger", type: "button", onclick: async () => {
+        if (!sure("Remove this photo from the entry?")) return;
+        remove.disabled = true;
+        try {
+          await api("POST", "/api/plants/photos/delete", { log_id: entry.id, hash });
+          setStatus("Removed the photo");
+          refresh();
+        } catch (err) {
+          handleError(err);
+          remove.disabled = false;
+        }
+      } }, "Remove photo");
+      viewer.replaceChildren(
+        el("img", { class: "photo-full", src: photoUrl(hash, "full"),
+                    alt: `Photo ${i + 1} of the entry of ${showDate(entry.date)}` }),
+        el("div", { class: "actions" },
+          el("button", { class: "btn", type: "button", onclick: () => {
+            viewer.hidden = true;
+            view.hidden = false;
+          } }, "Close"),
+          remove));
+      view.hidden = true;
+      viewer.hidden = false;
+    } }, el("img", { src: photoUrl(hash, "thumb"), alt: "" }))));
+}
+
+/* A button that adds a photo (from a file, or the camera on a phone). */
+function addPhotoButton(entry) {
+  if (entry.photos.length >= PHOTOS_MAX) return null;
+  const input = el("input", { type: "file", accept: "image/*", hidden: true });
+  const button = el("button", { class: "btn", type: "button", onclick: () => input.click() },
+                    "Add photo…");
+  input.addEventListener("change", async () => {
+    const file = input.files[0];
+    if (!file) return;
+    button.disabled = true;
+    try {
+      await addPhoto(entry.id, file);
+      refresh();
+    } catch (err) {
+      handleError(err);
+      button.disabled = false;
+    } finally {
+      input.value = "";
+    }
+  });
+  return [button, input];
+}
+
 /* Inputs for a log entry, filled from entry (or today / note only). */
 function entryInputs(entry, types) {
   const e = entry || { date: today(), care_type_id: null, note: "" };
@@ -547,11 +633,14 @@ function entryCard(entry, typeById, types) {
   /* An entry may keep an archived type, so offer it while editing. */
   const editTypes = types.filter((t) => !t.archived || t.id === entry.care_type_id);
   const editor = el("div", { hidden: true });
-  const view = el("div", { class: "entry" },
+  const viewer = el("div", { class: "photo-viewer stack", hidden: true });
+  const view = el("div", { class: "entry" });
+  view.append(
     el("header", {},
       el("strong", {}, showDate(entry.date)),
       type ? careChip(type.name, type.color) : careChip(null)),
     entry.note ? el("p", { class: "note" }, entry.note) : null,
+    photoStrip(entry, view, viewer) || "",
     el("div", { class: "actions" },
       el("button", { class: "btn", type: "button", onclick: () => {
         const inputs = entryInputs(entry, editTypes);
@@ -570,8 +659,11 @@ function entryCard(entry, typeById, types) {
         view.hidden = true;
         editor.hidden = false;
       } }, "Edit"),
+      addPhotoButton(entry),
       el("button", { class: "btn danger", type: "button", onclick: async () => {
-        if (!sure(`Delete the entry of ${showDate(entry.date)}?`)) return;
+        if (!sure(`Delete the entry of ${showDate(entry.date)}` +
+                  (entry.photos.length ? ` and its ${plural(entry.photos.length, "photo", "photos")}?`
+                                       : "?"))) return;
         try {
           await api("POST", "/api/plants/log/delete", { id: entry.id });
           setStatus("Deleted the entry");
@@ -580,7 +672,7 @@ function entryCard(entry, typeById, types) {
           handleError(err);
         }
       } }, "Delete")));
-  const li = el("li", { class: "card" }, view, editor);
+  const li = el("li", { class: "card" }, view, viewer, editor);
   li.entryId = entry.id; /* for paging */
   return li;
 }

@@ -875,7 +875,7 @@ void music_art(struct request *req, struct response *res)
                                               : "picture not found");
         return;
     }
-    int fd = art_open(hash, thumb);
+    int fd = art_open(ART_MUSIC, hash, thumb);
     struct stat sb;
     if (fd < 0 || fstat(fd, &sb) != 0) {
         int missing = fd < 0 && errno == ENOENT;
@@ -1292,7 +1292,7 @@ void music_cover(struct request *req, struct response *res)
         " ON CONFLICT (hash) DO NOTHING");
     /* The file first: a row never names a missing file. If what follows
      * fails, the scan of the whole library removes the file. */
-    int rc = add != NULL && art_save(hash, 0, data, (size_t)size) == 0 &&
+    int rc = add != NULL && art_save(ART_MUSIC, hash, 0, data, (size_t)size) == 0 &&
                      sqlite3_bind_text(add, 1, hash, -1, SQLITE_STATIC) == SQLITE_OK &&
                      sqlite3_bind_int64(add, 2, size) == SQLITE_OK
                  ? db_exec(music_db, "BEGIN IMMEDIATE")

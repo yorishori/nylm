@@ -64,7 +64,6 @@ const WHOLE_RE = /^(?!0+$)\d{1,4}$/; /* a positive whole number, at most 9999 */
 const encoder = new TextEncoder();
 const COVER_SIDE = 1200;            /* pixels: the longer side of a new cover, at most */
 const COVER_BYTES = 700 * 1024;     /* a new cover's JPEG, at most (the server's limit) */
-const COVER_QUALITIES = [0.9, 0.8, 0.7, 0.6];
 const COVER_FIELD = "picture";      /* the change that sets the cover */
 
 /* ---- values -------------------------------------------------------------- */
@@ -194,62 +193,20 @@ function pictureFacts(p) {
   return `${size}${type} · ${showSize(p.size)}`;
 }
 
-/* Reads a picture file into a bitmap, or rejects with a message. */
-async function loadBitmap(file) {
-  try {
-    return await createImageBitmap(file);
-  } catch (err) {
-    throw new Error("That file is not a picture this browser can read.");
-  }
-}
-
-/* The canvas as a JPEG blob of the given quality. */
-function jpegBlob(canvas, quality) {
-  return new Promise((resolve, reject) => {
-    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("The picture could not be made."))),
-                  "image/jpeg", quality);
-  });
-}
-
 /*
- * A new cover from a picture file: scaled to at most COVER_SIDE pixels (never
- * up) and made a JPEG of at most COVER_BYTES, lowering the quality, then the
- * size, until it fits. Resolves to {canvas, blob}.
+ * A new cover from a picture file: scaled to at most COVER_SIDE pixels and
+ * made a JPEG of at most COVER_BYTES (scaledJpeg()). Resolves to
+ * {canvas, blob}.
  */
 async function makeCover(file) {
   const bitmap = await loadBitmap(file);
-  let scale = Math.min(1, COVER_SIDE / Math.max(bitmap.width, bitmap.height));
-  for (;;) {
-    const canvas = el("canvas", { class: "cover-preview" });
-    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
-    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
-    const ctx = canvas.getContext("2d");
-    ctx.fillStyle = "#000"; /* transparency becomes black, as in the thumbnails */
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-    for (const q of COVER_QUALITIES) {
-      const blob = await jpegBlob(canvas, q);
-      if (blob.size <= COVER_BYTES) {
-        bitmap.close();
-        return { canvas, blob };
-      }
-    }
-    if (canvas.width <= 1 && canvas.height <= 1) {
-      bitmap.close();
-      throw new Error("The picture could not be made small enough.");
-    }
-    scale *= 0.75;
+  try {
+    const made = await scaledJpeg(bitmap, COVER_SIDE, COVER_BYTES);
+    made.canvas.classList.add("cover-preview");
+    return made;
+  } finally {
+    bitmap.close();
   }
-}
-
-/* A blob as base64 (what the server takes). */
-function base64Of(blob) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.addEventListener("load", () => resolve(String(reader.result).split(",")[1] || ""));
-    reader.addEventListener("error", () => reject(new Error("The picture could not be read.")));
-    reader.readAsDataURL(blob);
-  });
 }
 
 /* A path relative to the music folder. */

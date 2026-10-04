@@ -144,64 +144,78 @@ static void test_files(void)
     snprintf(art_dir, sizeof art_dir, "%s/music/art", dir);
 
     /* not configured yet: nothing works */
-    CHECK(art_save(H1, 0, (const unsigned char *)"abc", 3) == -1);
+    CHECK(art_save(ART_MUSIC, H1, 0, (const unsigned char *)"abc", 3) == -1);
     static char longest[5000];
     memset(longest, 'a', sizeof longest - 1);
     CHECK(art_configure(longest) == -1);
     CHECK(art_configure(dir) == 0);
 
     /* save makes the folder (700), then the file; saving again keeps it */
-    CHECK(art_save(H1, 0, (const unsigned char *)"abc", 3) == 0);
+    CHECK(art_save(ART_MUSIC, H1, 0, (const unsigned char *)"abc", 3) == 0);
     struct stat sb;
     CHECK(stat(art_dir, &sb) == 0 && (sb.st_mode & 0777) == 0700);
     CHECK(file_bytes(H1, buf, sizeof buf) == 3 && memcmp(buf, "abc", 3) == 0);
-    CHECK(art_save(H1, 0, (const unsigned char *)"xyz", 3) == 0);
+    CHECK(art_save(ART_MUSIC, H1, 0, (const unsigned char *)"xyz", 3) == 0);
     CHECK(file_bytes(H1, buf, sizeof buf) == 3 && memcmp(buf, "abc", 3) == 0);
-    CHECK(art_save(H1, 1, (const unsigned char *)"thumb", 5) == 0);
+    CHECK(art_save(ART_MUSIC, H1, 1, (const unsigned char *)"thumb", 5) == 0);
     CHECK(file_bytes(H1 ".thumb", buf, sizeof buf) == 5);
-    CHECK(art_save(H2, 0, (const unsigned char *)"", 0) == 0);
+    CHECK(art_save(ART_MUSIC, H2, 0, (const unsigned char *)"", 0) == 0);
     CHECK(file_bytes(H2, buf, sizeof buf) == 0);
-    CHECK(art_save("../x", 0, (const unsigned char *)"abc", 3) == -1);
+    CHECK(art_save(ART_MUSIC, "../x", 0, (const unsigned char *)"abc", 3) == -1);
     CHECK(!exists(".tmp-" H1));
 
+    /* Each store has its own folder: the plants' photos are not album art. */
+    char plants[64], photo[160];
+    snprintf(plants, sizeof plants, "%s/plants", dir);
+    CHECK(mkdir(plants, 0700) == 0);
+    CHECK(art_open(ART_PLANTS, H1, 0) == -1 && errno == ENOENT);
+    CHECK(art_save(ART_PLANTS, H3, 0, (const unsigned char *)"leaf", 4) == 0);
+    snprintf(photo, sizeof photo, "%s/plants/photos/%s", dir, H3);
+    CHECK(stat(photo, &sb) == 0 && sb.st_size == 4);
+    CHECK(!exists(H3));
+    CHECK(art_load(ART_PLANTS, H3, got, sizeof got) == 4);
+    CHECK(unlink(photo) == 0);
+    *strrchr(photo, '/') = '\0';
+    CHECK(rmdir(photo) == 0 && rmdir(plants) == 0);
+
     /* open: the file or its thumbnail; missing ENOENT */
-    int fd = art_open(H1, 0);
+    int fd = art_open(ART_MUSIC, H1, 0);
     CHECK(fd >= 0 && read(fd, buf, sizeof buf) == 3);
     if (fd >= 0)
         close(fd);
-    fd = art_open(H1, 1);
+    fd = art_open(ART_MUSIC, H1, 1);
     CHECK(fd >= 0 && read(fd, buf, sizeof buf) == 5 && memcmp(buf, "thumb", 5) == 0);
     if (fd >= 0)
         close(fd);
     errno = 0;
-    CHECK(art_open(H2, 1) == -1 && errno == ENOENT);
-    CHECK(art_open(H3, 0) == -1 && errno == ENOENT);
-    CHECK(art_open("../../etc/passwd", 0) == -1 && errno == ENOENT);
-    CHECK(art_open(H1 "0", 0) == -1);
+    CHECK(art_open(ART_MUSIC, H2, 1) == -1 && errno == ENOENT);
+    CHECK(art_open(ART_MUSIC, H3, 0) == -1 && errno == ENOENT);
+    CHECK(art_open(ART_MUSIC, "../../etc/passwd", 0) == -1 && errno == ENOENT);
+    CHECK(art_open(ART_MUSIC, H1 "0", 0) == -1);
 
     /* a symlink is never followed */
     char link[256];
     snprintf(link, sizeof link, "%s/%s", art_dir, H3);
     CHECK(symlink("/etc/passwd", link) == 0);
-    CHECK(art_open(H3, 0) == -1);
-    CHECK(art_load(H3, got, sizeof got) == -1);
+    CHECK(art_open(ART_MUSIC, H3, 0) == -1);
+    CHECK(art_load(ART_MUSIC, H3, got, sizeof got) == -1);
 
     /* load: the whole file, at most max bytes */
-    CHECK(art_load(H1, got, 3) == 3 && memcmp(got, "abc", 3) == 0); /* max */
-    CHECK(art_load(H1, got, 2) == -2);                               /* max + 1 */
-    CHECK(art_load(H2, got, sizeof got) == 0);
-    CHECK(art_load(H2, got, 0) == 0);
-    CHECK(art_load("ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", got,
+    CHECK(art_load(ART_MUSIC, H1, got, 3) == 3 && memcmp(got, "abc", 3) == 0); /* max */
+    CHECK(art_load(ART_MUSIC, H1, got, 2) == -2);                               /* max + 1 */
+    CHECK(art_load(ART_MUSIC, H2, got, sizeof got) == 0);
+    CHECK(art_load(ART_MUSIC, H2, got, 0) == 0);
+    CHECK(art_load(ART_MUSIC, "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", got,
                    sizeof got) == -1);
 
     /* sweep: drops what keep() refuses and temporary files, leaves other
      * names (and the symlink, which is not a picture: H3 is refused) */
     touch("notes.txt");
     touch(H1 ".jpg");
-    CHECK(art_sweep(keep_error, NULL) == -1);
+    CHECK(art_sweep(ART_MUSIC, keep_error, NULL) == -1);
     touch(".tmp-" H2);
     int asked = 0;
-    CHECK(art_sweep(keep_h1, &asked) == 3); /* H2, H3 (the link), .tmp-H2 */
+    CHECK(art_sweep(ART_MUSIC, keep_h1, &asked) == 3); /* H2, H3 (the link), .tmp-H2 */
     CHECK(asked == 4);                      /* H1, H1.thumb, H2, H3 */
     CHECK(exists(H1) && exists(H1 ".thumb") && exists("notes.txt") && exists(H1 ".jpg"));
     CHECK(!exists(H2) && !exists(H3) && !exists(".tmp-" H2));

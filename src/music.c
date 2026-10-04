@@ -363,7 +363,7 @@ static int make_thumbnail(const char *hash, const unsigned char *data, size_t si
     arena_rewind(mark);
     if (rc != 0)
         return -1;
-    rc = art_save(hash, 1, thumb, len);
+    rc = art_save(ART_MUSIC, hash, 1, thumb, len);
     free(thumb);
     if (rc != 0)
         snprintf(err, errlen, "the thumbnail could not be saved");
@@ -388,7 +388,7 @@ static int store_picture(void *ctx, const struct tag_picture *p, const unsigned 
     sqlite3_clear_bindings(s->find_art);
     if (rc == SQLITE_ROW)
         return 0;
-    if (rc != SQLITE_DONE || art_save(p->hash, 0, data, size) != 0) {
+    if (rc != SQLITE_DONE || art_save(ART_MUSIC, p->hash, 0, data, size) != 0) {
         s->store_failed = 1;
         return -1;
     }
@@ -720,7 +720,7 @@ static int art_listed(const char *hash, void *ctx)
 static void sweep_art(void)
 {
     sqlite3_stmt *st = db_prepare(music_db, "SELECT 1 FROM art WHERE hash = ?");
-    long n = st != NULL ? art_sweep(art_listed, st) : -1;
+    long n = st != NULL ? art_sweep(ART_MUSIC, art_listed, st) : -1;
     sqlite3_finalize(st);
     if (n < 0)
         fprintf(stderr, "music: unused picture files could not all be removed\n");
@@ -1129,7 +1129,7 @@ static int load_cover(struct tags *want, char *note, size_t size)
         return -1;
     }
     unsigned char *data = arena_alloc(ART_MAX_UPLOAD);
-    long n = data != NULL ? art_load(hash, data, ART_MAX_UPLOAD) : -1;
+    long n = data != NULL ? art_load(ART_MUSIC, hash, data, ART_MAX_UPLOAD) : -1;
     char check[ART_HASH_LEN + 1];
     if (n < 0 || art_hash(data, (size_t)n, check) != 0 || strcmp(check, hash) != 0) {
         snprintf(note, size, "not written: the stored picture is missing or damaged");

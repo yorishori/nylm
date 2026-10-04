@@ -26,6 +26,9 @@ void plants_log(struct request *req, struct response *res);
 void plants_log_add(struct request *req, struct response *res);
 void plants_log_update(struct request *req, struct response *res);
 void plants_log_delete(struct request *req, struct response *res);
+void plants_photo(struct request *req, struct response *res);
+void plants_photo_add(struct request *req, struct response *res);
+void plants_photo_delete(struct request *req, struct response *res);
 
 /* api_music.c */
 void music_overview(struct request *req, struct response *res);

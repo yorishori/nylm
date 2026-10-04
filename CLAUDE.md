@@ -42,8 +42,9 @@ If a rule blocks the task, stop and ask the user; do not work around it.
 ## 3. Architecture
 
 1. Data flows one way. The backend serves files from `public/` unchanged and
-   answers JSON. The one exception (approved): `GET /api/music/art` sends a
-   stored album art picture as it is. The backend NEVER generates HTML.
+   answers JSON. The two exceptions (approved): `GET /api/music/art` sends a
+   stored album art picture as it is, and `GET /api/plants/photo` a stored
+   journal photo. The backend NEVER generates HTML.
 2. The frontend builds all UI in JavaScript. Each app is a page:
    `public/<app>/index.html` with its own `<app>.js` (and `<app>.css`);
    the home page is `public/index.html` + `home.js`. Anything more than one

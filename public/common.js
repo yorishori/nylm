@@ -110,6 +110,64 @@ function invalid(message) {
   return new Error(message);
 }
 
+/* ---- pictures --------------------------------------------------------- */
+
+const JPEG_QUALITIES = [0.9, 0.8, 0.7, 0.6];
+
+/* Reads a picture file into a bitmap, or rejects with a message. */
+async function loadBitmap(file) {
+  try {
+    return await createImageBitmap(file);
+  } catch (err) {
+    throw new Error("That file is not a picture this browser can read.");
+  }
+}
+
+/* The canvas as a JPEG blob of the given quality. */
+function jpegBlob(canvas, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("The picture could not be made."))),
+                  "image/jpeg", quality);
+  });
+}
+
+/*
+ * The bitmap scaled to at most side pixels (never up) as a JPEG of at most
+ * maxBytes, lowering the quality, then the size, until it fits. The
+ * picture is made in the browser: the server never decodes one. Resolves
+ * to {canvas, blob}.
+ */
+async function scaledJpeg(bitmap, side, maxBytes) {
+  let scale = Math.min(1, side / Math.max(bitmap.width, bitmap.height));
+  for (;;) {
+    const canvas = el("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#000"; /* transparency becomes black */
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    for (const q of JPEG_QUALITIES) {
+      const blob = await jpegBlob(canvas, q);
+      if (blob.size <= maxBytes) return { canvas, blob };
+    }
+    if (canvas.width <= 1 && canvas.height <= 1) {
+      throw new Error("The picture could not be made small enough.");
+    }
+    scale *= 0.75;
+  }
+}
+
+/* A blob as base64 (what the server takes). */
+function base64Of(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener("load", () => resolve(String(reader.result).split(",")[1] || ""));
+    reader.addEventListener("error", () => reject(new Error("The picture could not be read.")));
+    reader.readAsDataURL(blob);
+  });
+}
+
 /* Asks before something that cannot be undone. */
 function sure(question) {
   return window.confirm(question);

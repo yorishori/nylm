@@ -13,9 +13,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "api.h"
 #include "arena.h"
+#include "art.h"
 #include "care.h"
 #include "db.h"
 #include "json.h"
@@ -26,6 +29,9 @@
 #define NOTES_MAX        4000 /* plant notes, log notes */
 #define TYPE_NAME_MAX    50
 #define LOG_PAGE         50   /* log entries per GET */
+#define PHOTOS_MAX       4    /* photos of one log entry */
+#define PHOTO_MAX_BYTES  (640 * 1024) /* a photo's JPEG; with its thumbnail it fits a body */
+#define THUMB_MAX_BYTES  (64 * 1024)  /* a photo's thumbnail JPEG */
 
 /* ---- database helpers --------------------------------------------------- */
 
@@ -905,8 +911,8 @@ void plants_rule_delete(struct request *req, struct response *res)
 
 /*
  * GET /api/plants/log?plant_id=N[&before=ID]: the newest LOG_PAGE entries,
- * or those older than entry ID. {entries: [{id, care_type_id, date, note}],
- * more: whether older entries exist}
+ * or those older than entry ID. {entries: [{id, care_type_id, date, note,
+ * photos: [hash, ...]}], more: whether older entries exist}
  */
 void plants_log(struct request *req, struct response *res)
 {
@@ -930,7 +936,9 @@ void plants_log(struct request *req, struct response *res)
     }
 
     sqlite3_stmt *st = prepare(
-        "SELECT id, care_type_id, date, note FROM care_log WHERE plant_id = ?1"
+        "SELECT id, care_type_id, date, note, (SELECT json_group_array(hash ORDER BY position)"
+        " FROM care_photos p WHERE p.log_id = care_log.id) AS photos FROM care_log"
+        " WHERE plant_id = ?1"
         " AND (?2 IS NULL OR (date, id) < (SELECT date, id FROM care_log WHERE id = ?2))"
         " ORDER BY date DESC, id DESC LIMIT ?3",
         "izi", plant_id, before, (long)LOG_PAGE + 1);
@@ -938,6 +946,14 @@ void plants_log(struct request *req, struct response *res)
     cJSON *entries = obj != NULL ? cJSON_AddArrayToObject(obj, "entries") : NULL;
     int rc = st != NULL && entries != NULL ? add_rows(entries, st) : -1;
     sqlite3_finalize(st);
+    /* photos comes as JSON text: made a list. */
+    cJSON *e, *listed = rc == 0 ? entries : NULL;
+    cJSON_ArrayForEach(e, listed) {
+        const cJSON *text = cJSON_GetObjectItemCaseSensitive(e, "photos");
+        cJSON *list = cJSON_IsString(text) ? cJSON_Parse(text->valuestring) : NULL;
+        if (list == NULL || !cJSON_ReplaceItemInObjectCaseSensitive(e, "photos", list))
+            rc = -1;
+    }
     if (rc != 0) {
         json_error(res, 500, "internal error");
         return;
@@ -1016,7 +1032,28 @@ void plants_log_update(struct request *req, struct response *res)
     res->status = 204;
 }
 
-/* POST /api/plants/log/delete {id} */
+/* art_sweep()'s keep for the photos: 1 if a log entry has hash, 0 if
+ * not, -1 on error. */
+static int photo_listed(const char *hash, void *ctx)
+{
+    (void)ctx;
+    sqlite3_stmt *st = prepare("SELECT 1 FROM care_photos WHERE hash = ?", "t", hash);
+    int rc = st != NULL ? sqlite3_step(st) : SQLITE_ERROR;
+    sqlite3_finalize(st);
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE)
+        db_log_error(plants_db, "photo_listed");
+    return rc == SQLITE_ROW ? 1 : rc == SQLITE_DONE ? 0 : -1;
+}
+
+/* Removes the photo files no log entry has (logged if it fails: the
+ * entry is gone either way, a later removal tries again). */
+static void sweep_photos(void)
+{
+    if (art_sweep(ART_PLANTS, photo_listed, NULL) < 0)
+        fprintf(stderr, "plants: could not remove unused photos\n");
+}
+
+/* POST /api/plants/log/delete {id}: the entry and its photos. */
 void plants_log_delete(struct request *req, struct response *res)
 {
     cJSON *obj = json_body(req, res);
@@ -1031,5 +1068,172 @@ void plants_log_delete(struct request *req, struct response *res)
         json_error(res, 404, "log entry not found");
         return;
     }
+    sweep_photos();
     res->status = 204;
+}
+
+/* ---- photos ------------------------------------------------------------- */
+
+/*
+ * Decodes obj[key]: base64 of a JPEG of at most max bytes, into the arena.
+ * NULL with *data and *size set; else the error, and *status 400 or 413.
+ */
+static const char *get_jpeg(const cJSON *obj, const char *key, size_t max, unsigned char **data,
+                            size_t *size, int *status)
+{
+    static char msg[96];
+    const char *text;
+    *status = 400;
+    if (json_get_string(obj, key, 1, HTTP_MAX_BODY, &text) != NULL) {
+        snprintf(msg, sizeof msg, "'%s' must be a JPEG picture in base64", key);
+        return msg;
+    }
+    *data = arena_alloc(max);
+    if (*data == NULL)
+        return "out of memory";
+    long n = art_base64_decode(text, strlen(text), *data, max);
+    const char *mime = n > 0 ? art_mime(*data, (size_t)n) : NULL;
+    if (n == -2) {
+        *status = 413;
+        snprintf(msg, sizeof msg, "'%s' is bigger than %zu KiB", key, max / 1024);
+    } else if (n < 0) {
+        snprintf(msg, sizeof msg, "'%s' must be base64 (A-Z a-z 0-9 + /, padded with =)", key);
+    } else if (mime == NULL || strcmp(mime, "image/jpeg") != 0) {
+        snprintf(msg, sizeof msg, "'%s' must be a JPEG picture", key);
+    } else {
+        *size = (size_t)n;
+        return NULL;
+    }
+    return msg;
+}
+
+/*
+ * POST /api/plants/photos/add {log_id, image, thumb}: a photo for a log
+ * entry (at most 4): image a JPEG of at most 640 KiB, thumb its thumbnail,
+ * a JPEG of at most 64 KiB, both base64 and both made by the browser (the
+ * server never decodes a picture). -> 201 {hash}
+ */
+void plants_photo_add(struct request *req, struct response *res)
+{
+    cJSON *obj = json_body(req, res);
+    long log_id;
+    unsigned char *image, *thumb;
+    size_t image_size, thumb_size;
+    int status = 400;
+    if (obj == NULL || bad_request(res, get_id(obj, "log_id", 0, &log_id)))
+        return;
+    const char *err = get_jpeg(obj, "image", PHOTO_MAX_BYTES, &image, &image_size, &status);
+    if (err == NULL)
+        err = get_jpeg(obj, "thumb", THUMB_MAX_BYTES, &thumb, &thumb_size, &status);
+    if (err != NULL) {
+        json_error(res, strcmp(err, "out of memory") == 0 ? 500 : status,
+                   strcmp(err, "out of memory") == 0 ? "internal error" : err);
+        return;
+    }
+    char hash[ART_HASH_LEN + 1];
+    if (art_hash(image, image_size, hash) != 0) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    sqlite3_stmt *st = prepare("SELECT (SELECT count(*) FROM care_photos WHERE log_id = ?1),"
+                               " (SELECT count(*) FROM care_photos WHERE log_id = ?1 AND hash = ?2)"
+                               " FROM care_log WHERE id = ?1", "it", log_id, hash);
+    if (st == NULL) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    int rc = sqlite3_step(st);
+    int count = rc == SQLITE_ROW ? sqlite3_column_int(st, 0) : 0;
+    int twice = rc == SQLITE_ROW && sqlite3_column_int(st, 1) > 0;
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE)
+        db_log_error(plants_db, "plants_photo_add");
+    sqlite3_finalize(st);
+    if (rc != SQLITE_ROW || count >= PHOTOS_MAX || twice) {
+        json_error(res, rc == SQLITE_DONE ? 404 : rc != SQLITE_ROW ? 500 : 409,
+                   rc == SQLITE_DONE    ? "log entry not found"
+                   : rc != SQLITE_ROW   ? "internal error"
+                   : twice              ? "this photo is already in the entry"
+                                        : "an entry has at most 4 photos");
+        return;
+    }
+    /* The files first: a row never names a missing photo. */
+    if (art_save(ART_PLANTS, hash, 0, image, image_size) != 0 ||
+        art_save(ART_PLANTS, hash, 1, thumb, thumb_size) != 0 ||
+        run("INSERT INTO care_photos (log_id, hash, position) VALUES (?1, ?2,"
+            " (SELECT ifnull(max(position) + 1, 0) FROM care_photos WHERE log_id = ?1))",
+            "it", log_id, hash) != 0) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    cJSON *out = cJSON_CreateObject();
+    if (out == NULL || cJSON_AddStringToObject(out, "hash", hash) == NULL) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 201, out);
+}
+
+/* POST /api/plants/photos/delete {log_id, hash}: takes a photo out of an
+ * entry; its files go when no entry has it. */
+void plants_photo_delete(struct request *req, struct response *res)
+{
+    cJSON *obj = json_body(req, res);
+    long log_id;
+    const char *hash;
+    if (obj == NULL || bad_request(res, get_id(obj, "log_id", 0, &log_id)))
+        return;
+    if (json_get_string(obj, "hash", ART_HASH_LEN, ART_HASH_LEN, &hash) != NULL ||
+        !art_hash_valid(hash)) {
+        json_error(res, 400, "'hash' must be 64 lowercase hex characters");
+        return;
+    }
+    if (run("DELETE FROM care_photos WHERE log_id = ? AND hash = ?", "it", log_id, hash) != 0) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    if (sqlite3_changes(plants_db) == 0) {
+        json_error(res, 404, "photo not found");
+        return;
+    }
+    sweep_photos();
+    res->status = 204;
+}
+
+/*
+ * GET /api/plants/photo?hash=H&size=full|thumb: a photo of the journal, a
+ * JPEG (not JSON, like the music's album art), cached by the browser for a
+ * year (a hash always names the same bytes). 404 unless an entry has it.
+ */
+void plants_photo(struct request *req, struct response *res)
+{
+    const char *hash = NULL, *size = NULL;
+    if (http_query(req, "hash", &hash) != 0 || !art_hash_valid(hash)) {
+        json_error(res, 400, "query parameter 'hash' must be 64 lowercase hex characters");
+        return;
+    }
+    if (http_query(req, "size", &size) != 0 ||
+        (strcmp(size, "full") != 0 && strcmp(size, "thumb") != 0)) {
+        json_error(res, 400, "query parameter 'size' must be full or thumb");
+        return;
+    }
+    int listed = photo_listed(hash, NULL);
+    if (listed != 1) {
+        json_error(res, listed == 0 ? 404 : 500, listed == 0 ? "photo not found" : "internal error");
+        return;
+    }
+    int fd = art_open(ART_PLANTS, hash, strcmp(size, "thumb") == 0);
+    struct stat sb;
+    if (fd < 0 || fstat(fd, &sb) != 0) {
+        int missing = fd < 0 && errno == ENOENT;
+        if (fd >= 0)
+            close(fd);
+        fprintf(stderr, "plants: photo %s: %s\n", hash, strerror(errno));
+        json_error(res, missing ? 404 : 500, missing ? "photo not found" : "internal error");
+        return;
+    }
+    res->status = 200;
+    res->content_type = "image/jpeg";
+    res->cache_control = "private, max-age=31536000, immutable";
+    res->file_fd = fd;
+    res->file_size = (size_t)sb.st_size;
 }

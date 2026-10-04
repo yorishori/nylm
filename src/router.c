@@ -37,6 +37,9 @@ static const struct route routes[] = {
     { "POST",   "/api/plants/log/add",        plants_log_add,      0 },
     { "POST",   "/api/plants/log/update",     plants_log_update,   0 },
     { "POST",   "/api/plants/log/delete",     plants_log_delete,   0 },
+    { "GET",    "/api/plants/photo",          plants_photo,        0 },
+    { "POST",   "/api/plants/photos/add",     plants_photo_add,    0 },
+    { "POST",   "/api/plants/photos/delete",  plants_photo_delete, 0 },
 
     { "GET",    "/api/music",                 music_overview,      0 },
     { "GET",    "/api/music/albums",          music_albums,        0 },
