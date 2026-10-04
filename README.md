@@ -137,7 +137,9 @@ saving numbers the whole album again (Y per disc for track numbers; a
 missing X gets the lowest free number). Every edit is queued at once as
 one batch (`changes` table), and colours what will change. Changes: the
 pending changes by batch, Discard per batch, and Write. Info: library
-counts, the rules, and the written changes with their results.
+counts, albums by genre (a donut of the 12 largest, the rest as "other",
+and every genre in a table) and by year (`GET /api/music/charts`, from the
+files' tags), the rules, and the written changes with their results.
 
 The rules for a value: required are title, album, artist, album artist,
 track and disc number, date, genre, composer and compilation; text is

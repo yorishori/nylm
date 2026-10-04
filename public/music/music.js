@@ -6,7 +6,8 @@
  *                  editable table with filters, and the library scan
  *   #/album/ID     the tracks of the album of track ID, every tag editable
  *   #/changes      the queued changes by batch: discard them, write them
- *   #/info         library counts, the rules, the written changes
+ *   #/info         library counts, genres and years charts, the rules,
+ *                  the written changes
  *
  * The server never touches the files: it keeps a cache of their tags and a
  * queue of changes. Every edit here is queued as soon as it is made (no
@@ -52,6 +53,8 @@ const MAX_VALUES = 64;
 const MAX_SUGGESTIONS = 50;
 const SHOW_STEP = 200; /* albums shown at a time */
 const POLL_MS = 3000;
+const GENRE_SLICES = 12;  /* genres in the donut; the rest are "other" */
+const YEAR_BAR = 6;       /* pixels per year in the years chart */
 const GENRE_RE = /^[a-z0-9-]+$/;
 const WHOLE_RE = /^(?!0+$)\d{1,4}$/; /* a positive whole number, at most 9999 */
 const encoder = new TextEncoder();
@@ -1298,8 +1301,107 @@ const RULES = [
     "picture, as the front cover.",
 ];
 
+/* An SVG element, like el(). */
+function svg(tag, attrs, ...children) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [key, value] of Object.entries(attrs || {})) node.setAttribute(key, value);
+  node.append(...children.flat().filter((c) => c != null)
+                 .map((c) => (c instanceof Node ? c : document.createTextNode(String(c)))));
+  return node;
+}
+
+function percent(n, total) {
+  const p = (100 * n) / total;
+  return p < 1 ? "<1%" : `${Math.round(p)}%`;
+}
+
+/* The genres as a donut: the largest GENRE_SLICES, the rest as "other";
+ * a legend beside it, and every genre in a table on demand. */
+function genreChart(genres) {
+  if (!genres.length) return el("p", { class: "muted" }, "No genres yet.");
+  const total = genres.reduce((n, g) => n + g.albums, 0);
+  const slices = genres.slice(0, GENRE_SLICES).map((g, i) => ({ ...g, color: `c${i}` }));
+  const rest = genres.slice(GENRE_SLICES).reduce((n, g) => n + g.albums, 0);
+  if (rest) slices.push({ genre: `other (${genres.length - GENRE_SLICES})`, albums: rest, color: "other" });
+  let start = 0;
+  const rings = slices.map((s) => {
+    const share = (100 * s.albums) / total;
+    const ring = svg("circle", { class: `slice ${s.color}`, cx: 50, cy: 50, r: 38, pathLength: 100,
+                                 "stroke-dasharray": `${share} ${100 - share}`,
+                                 "stroke-dashoffset": String(-start) },
+                     svg("title", {}, `${s.genre}: ${plural(s.albums, "album", "albums")}`));
+    start += share;
+    return ring;
+  });
+  const table = el("div", { class: "grid-wrap", hidden: true },
+    el("table", { class: "grid" },
+      el("thead", {}, el("tr", {},
+        el("th", { scope: "col" }, "Genre"), el("th", { scope: "col", class: "num" }, "Albums"))),
+      el("tbody", {}, genres.map((g) => el("tr", {},
+        el("td", {}, g.genre), el("td", { class: "num" }, String(g.albums)))))));
+  const toggle = el("button", { class: "btn", type: "button", onclick: () => {
+    table.hidden = !table.hidden;
+    toggle.textContent = table.hidden ? `Show all ${genres.length} genres` : "Hide the genres";
+  } }, `Show all ${genres.length} genres`);
+  return el("div", { class: "stack" },
+    el("p", { class: "muted small" },
+       "Albums by genre; an album with several genres counts for each."),
+    el("div", { class: "donut-chart" },
+      svg("svg", { viewBox: "0 0 100 100", class: "donut", role: "img",
+                   "aria-label": "Albums by genre" },
+        svg("g", { transform: "rotate(-90 50 50)" }, rings)),
+      el("ul", { class: "chart-legend" }, slices.map((s) => el("li", {},
+        el("span", { class: `swatch ${s.color}` }),
+        el("span", { class: "legend-name" }, s.genre),
+        el("span", { class: "muted nowrap" }, `${s.albums} · ${percent(s.albums, total)}`))))),
+    el("div", { class: "actions" }, toggle),
+    table);
+}
+
+/* Albums per year: a bar for every year from the first to the last (a
+ * date counts by its first four digits), scrolling sideways. */
+function yearChart(dates) {
+  const years = new Map();
+  let undated = 0;
+  for (const d of dates) {
+    const m = /^(\d{4})/.exec(d.date);
+    if (m) years.set(Number(m[1]), (years.get(Number(m[1])) || 0) + d.albums);
+    else undated += d.albums;
+  }
+  if (!years.size) return el("p", { class: "muted" }, "No years yet.");
+  const first = Math.min(...years.keys());
+  const last = Math.max(...years.keys());
+  const most = Math.max(...years.values());
+  const W = YEAR_BAR, H = 120, AXIS = 16;
+  const bars = [], labels = [];
+  for (let y = first; y <= last; y++) {
+    const x = (y - first) * W;
+    const n = years.get(y) || 0;
+    if (n) {
+      const h = Math.max(1, Math.round((H * n) / most));
+      bars.push(svg("rect", { class: "bar", x: x + 1, y: H - h, width: W - 2, height: h },
+                    svg("title", {}, `${y}: ${plural(n, "album", "albums")}`)));
+    }
+    if (y % 10 === 0) {
+      labels.push(svg("line", { class: "tick", x1: x, x2: x, y1: H, y2: H + 4 }),
+                  svg("text", { class: "tick-label", x, y: H + AXIS - 2 }, String(y)));
+    }
+  }
+  const width = (last - first + 1) * W;
+  return el("div", { class: "stack" },
+    el("p", { class: "muted small" },
+       `Albums by year, ${first} to ${last}; the most in one year: ${most}.` +
+       (undated ? ` ${plural(undated, "album has", "albums have")} a date that is not a year.` : "")),
+    el("div", { class: "chart-scroll" },
+      svg("svg", { class: "years", width: width + 30, height: H + AXIS, role: "img",
+                   viewBox: `0 0 ${width + 30} ${H + AXIS}`, "aria-label": "Albums by year" },
+        svg("line", { class: "axis", x1: 0, x2: width, y1: H, y2: H }), bars, labels)));
+}
+
 async function infoPage() {
-  const [o, ch] = await Promise.all([api("GET", "/api/music"), api("GET", "/api/music/changes")]);
+  const [o, ch, charts] = await Promise.all([api("GET", "/api/music"),
+                                             api("GET", "/api/music/changes"),
+                                             api("GET", "/api/music/charts")]);
   musicRoot = o.root || "";
   const s = o.stats;
   return shell("info", o,
@@ -1320,6 +1422,8 @@ async function infoPage() {
         : null,
       el("p", {}, scanSummary(o.scan)),
       el("p", { class: "muted" }, othersText(o.scan))),
+    el("section", { class: "card stack" }, el("h2", {}, "Genres"), genreChart(charts.genres)),
+    el("section", { class: "card stack" }, el("h2", {}, "Years"), yearChart(charts.dates)),
     el("section", { class: "card stack" },
       el("h2", {}, "Rules"),
       el("ul", { class: "rules" }, RULES.map((r) => el("li", {}, r))),

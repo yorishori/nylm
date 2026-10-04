@@ -737,6 +737,39 @@ void music_values(struct request *req, struct response *res)
     json_reply(res, 200, list);
 }
 
+/* An album in a count: its album and album artist (either may be NULL). */
+#define ALBUM_KEY(t) "json_array(" t ".album, " t ".albumartist)"
+
+/*
+ * GET /api/music/charts: from the files' tags, how many albums have each
+ * genre (most first) and each date (in order). An album whose tracks have
+ * several genres or dates counts once for each.
+ */
+void music_charts(struct request *req, struct response *res)
+{
+    (void)req;
+    cJSON *obj = cJSON_CreateObject();
+    cJSON *genres = obj != NULL ? cJSON_AddArrayToObject(obj, "genres") : NULL;
+    cJSON *dates = genres != NULL ? cJSON_AddArrayToObject(obj, "dates") : NULL;
+    sqlite3_stmt *st = dates != NULL ? db_prepare(music_db,
+        "SELECT v.value AS genre, count(DISTINCT " ALBUM_KEY("t") ") AS albums"
+        " FROM track_values v JOIN tracks t ON t.id = v.track_id WHERE v.field = 'genre'"
+        " GROUP BY v.value ORDER BY albums DESC, v.value") : NULL;
+    int ok = st != NULL && add_rows(genres, st, 2, MAX_LIST) == 0;
+    sqlite3_finalize(st);
+    st = ok ? db_prepare(music_db,
+        "SELECT t.date, count(DISTINCT " ALBUM_KEY("t") ") AS albums"
+        " FROM tracks t WHERE t.date IS NOT NULL GROUP BY t.date ORDER BY t.date") : NULL;
+    ok = st != NULL && add_rows(dates, st, 2, MAX_LIST) == 0;
+    sqlite3_finalize(st);
+    if (!ok) {
+        fprintf(stderr, "music: charts failed\n");
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, obj);
+}
+
 /* A change's tag as the file has it now (genre and composer: JSON; the
  * cover: the hashes of the track's pictures, JSON). */
 #define NOW_VALUE                                                                      \

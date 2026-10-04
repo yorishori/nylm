@@ -462,7 +462,7 @@ else PASSED=$((PASSED + 1)); fi
 # ---- music -------------------------------------------------------------------
 
 for route in "GET /api/music" "GET /api/music/albums" "GET /api/music/album?track=1" \
-             "GET /api/music/values?field=artist" "GET /api/music/changes" \
+             "GET /api/music/values?field=artist" "GET /api/music/changes" "GET /api/music/charts" \
              "POST /api/music/queue" "POST /api/music/discard" "POST /api/music/scan" \
              "POST /api/music/write" "GET /api/music/art?hash=$(printf '%064d' 0)&size=full" \
              "POST /api/music/cover"; do
@@ -517,6 +517,8 @@ expect 200 "composer values"   -b "$JAR" "$B/api/music/values?field=composer"
 expect_body '[]' "no composers yet"
 expect 400 "values, bad field" -b "$JAR" "$B/api/music/values?field=title"
 expect 400 "values, no field"  -b "$JAR" "$B/api/music/values"
+expect 200 "charts"            -b "$JAR" "$B/api/music/charts"
+expect_body '{"genres":[{"genre":"Pop","albums":1},{"genre":"Rock","albums":1}],"dates":[{"date":"2001","albums":1}]}' "charts: albums by genre and date"
 
 # Queueing changes writes no file.
 Q=/api/music/queue

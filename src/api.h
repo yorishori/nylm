@@ -32,6 +32,7 @@ void music_overview(struct request *req, struct response *res);
 void music_albums(struct request *req, struct response *res);
 void music_album(struct request *req, struct response *res);
 void music_values(struct request *req, struct response *res);
+void music_charts(struct request *req, struct response *res);
 void music_changes(struct request *req, struct response *res);
 void music_art(struct request *req, struct response *res);
 void music_queue(struct request *req, struct response *res);

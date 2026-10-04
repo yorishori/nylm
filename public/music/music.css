@@ -249,3 +249,51 @@ td.col-cover.edited.differs .thumb { box-shadow: 0 0 0 2px var(--lavender), 0 0 
   .grid { font-size: 0.8rem; }
   .grid .col-album, .grid .col-title { min-width: 9rem; }
 }
+
+/* ---- charts (Info) -------------------------------------------------------- */
+
+/* Twelve slice colours: the eight pastels in an order that keeps
+ * neighbours apart, then four more; never rose or peach. "other" is grey. */
+.donut-chart, .chart-legend { --c0: var(--sky); --c1: var(--butter); --c2: var(--orchid);
+  --c3: var(--mint); --c4: var(--periwinkle); --c5: var(--lime); --c6: var(--lavender);
+  --c7: var(--teal); --c8: #d8c3a5; --c9: #9fb59a; --c10: #b7a0c9; --c11: #8fa9c0; }
+.donut-chart {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem 2rem;
+}
+.donut { width: min(15rem, 100%); flex: none; }
+.slice { fill: none; stroke-width: 18; }
+.chart-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.3rem;
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+.chart-legend li { display: flex; align-items: center; gap: 0.5rem; }
+.legend-name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.swatch { flex: none; width: 0.8rem; height: 0.8rem; border-radius: 3px; }
+.slice.c0 { stroke: var(--c0); }   .swatch.c0 { background: var(--c0); }
+.slice.c1 { stroke: var(--c1); }   .swatch.c1 { background: var(--c1); }
+.slice.c2 { stroke: var(--c2); }   .swatch.c2 { background: var(--c2); }
+.slice.c3 { stroke: var(--c3); }   .swatch.c3 { background: var(--c3); }
+.slice.c4 { stroke: var(--c4); }   .swatch.c4 { background: var(--c4); }
+.slice.c5 { stroke: var(--c5); }   .swatch.c5 { background: var(--c5); }
+.slice.c6 { stroke: var(--c6); }   .swatch.c6 { background: var(--c6); }
+.slice.c7 { stroke: var(--c7); }   .swatch.c7 { background: var(--c7); }
+.slice.c8 { stroke: var(--c8); }   .swatch.c8 { background: var(--c8); }
+.slice.c9 { stroke: var(--c9); }   .swatch.c9 { background: var(--c9); }
+.slice.c10 { stroke: var(--c10); } .swatch.c10 { background: var(--c10); }
+.slice.c11 { stroke: var(--c11); } .swatch.c11 { background: var(--c11); }
+.slice.other { stroke: var(--edge); } .swatch.other { background: var(--edge); }
+
+/* The years chart is as wide as it needs and scrolls inside the card. */
+.chart-scroll { overflow-x: auto; padding-bottom: 0.3rem; }
+.years { display: block; }
+.years .bar { fill: var(--sky); }
+.years .axis, .years .tick { stroke: var(--muted); stroke-width: 1; }
+.years .tick-label { fill: var(--muted); font: 10px var(--font); }
