@@ -33,6 +33,9 @@ If a rule blocks the task, stop and ask the user; do not work around it.
    libjpeg-turbo and libpng, all linked dynamically from the distro packages
    (`sqlite`, `cjson`, `openssl`, `taglib`, `libjpeg-turbo`, `libpng`), and
    (approved) OpenSSL libssl, linked only into `nylm-qobuz`, never the server.
+   (approved) The server app's actions and jobs run these distro tools:
+   `pacman-contrib` (checkupdates, which needs `fakeroot`), `smartmontools`,
+   `wireguard-tools`, `zstd`, and `rsync` for copying backups to a PC.
    NEVER add another library, tool, framework, package manager or build step,
    and NEVER copy library source into the repo, without the user's explicit
    approval.
