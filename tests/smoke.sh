@@ -1207,7 +1207,9 @@ logged "NYLM_MUSIC is not set" "nylm-qobuz says why"
 
 # Every route of the server app needs a login.
 for route in "GET /api/server" "GET /api/server/audit" "GET /api/server/log?unit=nylm.service" \
-             "GET /api/server/disk-usage" "POST /api/server/disk-usage" "GET /api/server/smart"; do
+             "GET /api/server/disk-usage" "POST /api/server/disk-usage" "GET /api/server/smart" \
+             "GET /api/server/containers" "GET /api/server/containers/log?name=web" \
+             "POST /api/server/containers/restart"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
@@ -1262,6 +1264,28 @@ expect 415 "disk usage needs json" -b "$JAR" -d '{"password":"x"}' "$B$DU"
 # SMART, through the root action (not installed here: 502).
 expect_either 200 502 "smart"    -b "$JAR" "$B/api/server/smart"
 expect 405 "smart is GET only"   -b "$JAR" -X POST -H "$J" "$B/api/server/smart"
+
+# Containers, through the root actions (not installed here: 502).
+expect_either 200 502 "containers" -b "$JAR" "$B/api/server/containers"
+CL="$B/api/server/containers/log"
+expect 400 "container log, no name"   -b "$JAR" "$CL"
+expect 400 "container log, option"    -b "$JAR" "$CL?name=-f"
+expect 400 "container log, slash"     -b "$JAR" "$CL?name=a%2Fb"
+expect 400 "container log, space"     -b "$JAR" "$CL?name=a%20b"
+expect 400 "container log, too long"  -b "$JAR" "$CL?name=$(printf '%0129d' 0)"
+expect 502 "container log, none such" -b "$JAR" "$CL?name=nylm-smoke-none"
+CR=/api/server/containers/restart
+post "restart, no name"        400 $CR "{$PW}"
+post "restart, bad name"       400 $CR "{$PW,\"name\":\"a b\"}"
+post "restart, name not text"  400 $CR "{$PW,\"name\":1}"
+post "restart, no password"    400 $CR '{"name":"web"}'
+post "restart, wrong password" 403 $CR '{"name":"web","password":"nope"}'
+expect 415 "restart needs json" -b "$JAR" -d '{"name":"web"}' "$B$CR"
+# The right password, a container that does not exist: the action refuses.
+post "restart, none such"      502 $CR "{$PW,\"name\":\"nylm-smoke-none\"}"
+expect 200 "restart recorded"  -b "$JAR" "$B/api/server/audit"
+expect_body '"action":"docker-restart","detail":"nylm-smoke-none","result":"failed: see the server log"' \
+    "a failed restart is recorded"
 
 expect 200 "audit after refusals" -b "$JAR" "$B/api/server/audit"
 if grep -q '"action":"disk-usage"' "$TMP/body"; then
@@ -1329,6 +1353,13 @@ lib no "unit, slash"        'valid_unit a/b'
 lib no "unit, empty"        'valid_unit ""'
 lib ok "unit, 128"          "valid_unit $(printf '%0128d' 0)"
 lib no "unit, 129"          "valid_unit $(printf '%0129d' 0)"
+lib ok "container"          'valid_container immich_server-1.x'
+lib no "container, option"  'valid_container -f'
+lib no "container, _ first" 'valid_container _x'
+lib no "container, slash"   'valid_container a/b'
+lib no "container, colon"   'valid_container a:b'
+lib ok "container, 128"     "valid_container $(printf '%0128d' 0)"
+lib no "container, 129"     "valid_container $(printf '%0129d' 0)"
 lib ok "entry"              'valid_entry immich-db2'
 lib no "entry, upper case"  'valid_entry Davis'
 lib no "entry, dash first"  'valid_entry -a'

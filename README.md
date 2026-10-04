@@ -300,6 +300,14 @@ Disk usage (`nylm-disk-usage.service`): Measure (password) sizes nylm's
 data, the music, the backups, `/var/lib/docker` and each backup entry
 with `du -sxb`, one line each in the journal, which the page reads back.
 
+Containers: every Docker container (action `docker-list`, which prints
+only the fields shown, never a container's environment): state, health,
+up since or exit code, restarts, published ports, CPU and memory; Log
+(action `docker-logs NAME`: its last 500 lines) and Restart (password,
+action `docker-restart NAME`: `docker restart`, not while a job runs).
+A name is checked by Docker's rule in nylm and in the action, which also
+checks that the container exists. nylm is never in the `docker` group.
+
 Settings in `/etc/nylm.conf` (restart nylm after changing them):
 
 ```sh

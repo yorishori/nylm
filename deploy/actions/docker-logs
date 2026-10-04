@@ -1,0 +1,9 @@
+#!/bin/sh
+# Prints the last 500 lines of one container's log (its stdout and
+# stderr), with their times. Argument: the container's name.
+set -eu
+. /usr/local/lib/nylm/lib.sh
+[ "$#" -eq 1 ] || die "takes one container name"
+valid_container "$1" || die "not a container name: $1"
+/usr/bin/docker inspect --type container "$1" >/dev/null 2>&1 || die "no such container: $1"
+exec /usr/bin/docker logs --tail 500 --timestamps "$1" 2>&1

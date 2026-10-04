@@ -710,3 +710,237 @@ cJSON *sysinfo_smart(const char *text)
     }
     return list;
 }
+
+/* ---- containers ---------------------------------------------------------- */
+
+int sysinfo_container_valid(const char *s)
+{
+    if (s == NULL || !is_alnum(s[0]))
+        return 0;
+    size_t n = 0;
+    for (; s[n] != '\0'; n++)
+        if (n >= 128 || !(is_alnum(s[n]) || strchr("_.-", s[n]) != NULL))
+            return 0;
+    return 1;
+}
+
+/* Days from 1970-01-01 to y-m-d (proleptic Gregorian; Howard Hinnant's
+ * days_from_civil). */
+static long long days_from_civil(long long y, long long m, long long d)
+{
+    y -= m <= 2;
+    long long era = (y >= 0 ? y : y - 399) / 400;
+    long long yoe = y - era * 400;
+    long long doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    long long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+/* n digits at s as a number, or -1. */
+static long long digits(const char *s, int n)
+{
+    long long v = 0;
+    for (int i = 0; i < n; i++) {
+        if (s[i] < '0' || s[i] > '9')
+            return -1;
+        v = v * 10 + (s[i] - '0');
+    }
+    return v;
+}
+
+long long sysinfo_docker_time(const char *s)
+{
+    /* YYYY-MM-DDTHH:MM:SS[.fraction]Z */
+    if (s == NULL || strlen(s) < 20 || s[4] != '-' || s[7] != '-' || s[10] != 'T' ||
+        s[13] != ':' || s[16] != ':')
+        return -1;
+    long long y = digits(s, 4), mo = digits(s + 5, 2), d = digits(s + 8, 2),
+              h = digits(s + 11, 2), mi = digits(s + 14, 2), se = digits(s + 17, 2);
+    const char *p = s + 19;
+    if (*p == '.')
+        for (p++; *p >= '0' && *p <= '9'; p++)
+            ;
+    if (y < 1970 || mo < 1 || mo > 12 || d < 1 || d > 31 || h < 0 || h > 23 || mi < 0 ||
+        mi > 59 || se < 0 || se > 60 || strcmp(p, "Z") != 0)
+        return -1;
+    return days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + se;
+}
+
+double sysinfo_docker_size(const char *s)
+{
+    static const struct {
+        const char *unit;
+        double factor;
+    } units[] = {
+        { "B", 1 },          { "kB", 1e3 },           { "KB", 1e3 },
+        { "MB", 1e6 },       { "GB", 1e9 },           { "TB", 1e12 },
+        { "KiB", 1024.0 },   { "MiB", 1048576.0 },    { "GiB", 1073741824.0 },
+        { "TiB", 1099511627776.0 },
+    };
+    char *end;
+    errno = 0;
+    double v = strtod(s, &end);
+    if (errno != 0 || end == s || !(v >= 0 && v < 1e15))
+        return -1;
+    for (size_t i = 0; i < sizeof units / sizeof units[0]; i++)
+        if (strcmp(end, units[i].unit) == 0)
+            return v * units[i].factor;
+    return -1;
+}
+
+/* "12.34%" -> 12.34; -1 if not a percentage (e.g. "--"). */
+static double docker_percent(const char *s)
+{
+    char *end;
+    errno = 0;
+    double v = strtod(s, &end);
+    if (errno != 0 || end == s || strcmp(end, "%") != 0 || !(v >= 0 && v < 1e6))
+        return -1;
+    return v;
+}
+
+/* Adds key: n, or null when n < 0. 0, or -1 if out of memory. */
+static int number_or_null(cJSON *o, const char *key, double n)
+{
+    return (n >= 0 ? cJSON_AddNumberToObject(o, key, n) : cJSON_AddNullToObject(o, key)) != NULL
+               ? 0
+               : -1;
+}
+
+/* Adds key: the string item of c (or null; "" counts as null). */
+static int string_or_null(cJSON *o, const char *key, const cJSON *c)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(c, key);
+    return (cJSON_IsString(v) && v->valuestring[0] != '\0'
+                ? cJSON_AddStringToObject(o, key, v->valuestring)
+                : cJSON_AddNullToObject(o, key)) != NULL
+               ? 0
+               : -1;
+}
+
+/* Docker's NetworkSettings.Ports ({"80/tcp": [{"HostIp", "HostPort"}] or
+ * null}) -> [{container: "80/tcp", host: "0.0.0.0:9000" or null}]. */
+static cJSON *ports(const cJSON *map)
+{
+    cJSON *list = cJSON_CreateArray();
+    const cJSON *port;
+    if (list == NULL)
+        return NULL;
+    cJSON_ArrayForEach(port, map) {
+        const cJSON *binding;
+        int bound = 0;
+        cJSON_ArrayForEach(binding, port) {
+            const cJSON *ip = cJSON_GetObjectItemCaseSensitive(binding, "HostIp");
+            const cJSON *hp = cJSON_GetObjectItemCaseSensitive(binding, "HostPort");
+            if (!cJSON_IsString(ip) || !cJSON_IsString(hp))
+                continue;
+            char host[128];
+            snprintf(host, sizeof host, strchr(ip->valuestring, ':') ? "[%s]:%s" : "%s:%s",
+                     ip->valuestring[0] != '\0' ? ip->valuestring : "0.0.0.0", hp->valuestring);
+            cJSON *p = cJSON_CreateObject();
+            if (p == NULL || cJSON_AddStringToObject(p, "container", port->string) == NULL ||
+                cJSON_AddStringToObject(p, "host", host) == NULL || !cJSON_AddItemToArray(list, p))
+                return NULL;
+            bound = 1;
+        }
+        if (!bound) { /* exposed, not published */
+            cJSON *p = cJSON_CreateObject();
+            if (p == NULL || cJSON_AddStringToObject(p, "container", port->string) == NULL ||
+                cJSON_AddNullToObject(p, "host") == NULL || !cJSON_AddItemToArray(list, p))
+                return NULL;
+        }
+    }
+    return list;
+}
+
+/* The stats of the container named name ("/name" in inspect), or NULL. */
+static const cJSON *stats_of(const cJSON *stats, const char *name)
+{
+    const cJSON *s;
+    if (name[0] == '/')
+        name++;
+    cJSON_ArrayForEach(s, stats) {
+        const cJSON *n = cJSON_GetObjectItemCaseSensitive(s, "name");
+        if (cJSON_IsString(n) && strcmp(n->valuestring, name) == 0)
+            return s;
+    }
+    return NULL;
+}
+
+/* One container of docker-list -> what the page shows; NULL if invalid. */
+static cJSON *container(const cJSON *c, const cJSON *stats)
+{
+    const cJSON *name = cJSON_GetObjectItemCaseSensitive(c, "name");
+    const cJSON *state = cJSON_GetObjectItemCaseSensitive(c, "state");
+    const cJSON *started = cJSON_GetObjectItemCaseSensitive(c, "started");
+    const cJSON *finished = cJSON_GetObjectItemCaseSensitive(c, "finished");
+    const cJSON *code = cJSON_GetObjectItemCaseSensitive(c, "exit_code");
+    const cJSON *restarts = cJSON_GetObjectItemCaseSensitive(c, "restarts");
+    if (!cJSON_IsString(name) || !cJSON_IsString(state) || !cJSON_IsString(started) ||
+        !cJSON_IsString(finished) || !cJSON_IsNumber(code) || !cJSON_IsNumber(restarts))
+        return NULL;
+    const char *shown = name->valuestring[0] == '/' ? name->valuestring + 1 : name->valuestring;
+    const cJSON *s = strcmp(state->valuestring, "running") == 0 ? stats_of(stats, shown) : NULL;
+    const cJSON *cpu = cJSON_GetObjectItemCaseSensitive(s, "cpu");
+    const cJSON *mem = cJSON_GetObjectItemCaseSensitive(s, "memory");
+    const cJSON *mem_pct = cJSON_GetObjectItemCaseSensitive(s, "memory_percent");
+    double mem_bytes = -1;
+    if (cJSON_IsString(mem)) {
+        /* "12.5MiB / 31.3GiB": what it uses, then its limit. */
+        char *used = arena_strndup(mem->valuestring, strcspn(mem->valuestring, " "));
+        if (used == NULL)
+            return NULL;
+        mem_bytes = sysinfo_docker_size(used);
+    }
+    cJSON *list = ports(cJSON_GetObjectItemCaseSensitive(c, "ports"));
+    cJSON *o = cJSON_CreateObject();
+    if (list == NULL || o == NULL || cJSON_AddStringToObject(o, "name", shown) == NULL ||
+        string_or_null(o, "image", c) != 0 ||
+        cJSON_AddStringToObject(o, "state", state->valuestring) == NULL ||
+        string_or_null(o, "health", c) != 0 ||
+        number_or_null(o, "started", (double)sysinfo_docker_time(started->valuestring)) != 0 ||
+        number_or_null(o, "finished", (double)sysinfo_docker_time(finished->valuestring)) != 0 ||
+        cJSON_AddNumberToObject(o, "exit_code", code->valuedouble) == NULL ||
+        cJSON_AddNumberToObject(o, "restarts", restarts->valuedouble) == NULL ||
+        !cJSON_AddItemToObject(o, "ports", list) || string_or_null(o, "project", c) != 0 ||
+        string_or_null(o, "service", c) != 0 ||
+        number_or_null(o, "cpu", cJSON_IsString(cpu) ? docker_percent(cpu->valuestring) : -1) !=
+            0 ||
+        number_or_null(o, "memory", mem_bytes) != 0 ||
+        number_or_null(o, "memory_percent",
+                       cJSON_IsString(mem_pct) ? docker_percent(mem_pct->valuestring) : -1) != 0)
+        return NULL;
+    return o;
+}
+
+/* qsort: containers by name. */
+static int by_name(const void *a, const void *b)
+{
+    const cJSON *x = *(const cJSON *const *)a, *y = *(const cJSON *const *)b;
+    return strcmp(cJSON_GetObjectItemCaseSensitive(x, "name")->valuestring,
+                  cJSON_GetObjectItemCaseSensitive(y, "name")->valuestring);
+}
+
+cJSON *sysinfo_containers(const char *text)
+{
+    cJSON *all = cJSON_Parse(text);
+    const cJSON *list = cJSON_GetObjectItemCaseSensitive(all, "containers");
+    const cJSON *stats = cJSON_GetObjectItemCaseSensitive(all, "stats");
+    if (!cJSON_IsArray(list) || !cJSON_IsArray(stats))
+        return NULL;
+    cJSON *items[SYSINFO_MAX_CONTAINERS];
+    size_t n = 0;
+    const cJSON *c;
+    cJSON_ArrayForEach(c, list) {
+        if (n == SYSINFO_MAX_CONTAINERS)
+            break;
+        if ((items[n++] = container(c, stats)) == NULL)
+            return NULL;
+    }
+    qsort(items, n, sizeof items[0], by_name);
+    cJSON *out = cJSON_CreateArray();
+    for (size_t i = 0; out != NULL && i < n; i++)
+        if (!cJSON_AddItemToArray(out, items[i]))
+            return NULL;
+    return out;
+}

@@ -1,0 +1,31 @@
+#!/bin/sh
+# Prints every container (running or not) and the running ones' CPU and
+# memory use as one JSON object {"containers": [...], "stats": [...]}.
+# Only the fields below leave this script: never a container's
+# environment, which holds its secrets. Takes no arguments.
+set -eu
+if [ "$#" -ne 0 ]; then
+    echo "docker-list: takes no arguments" >&2
+    exit 2
+fi
+
+container='{"name":{{json .Name}},"image":{{json .Config.Image}},'\
+'"state":{{json .State.Status}},'\
+'"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}},'\
+'"started":{{json .State.StartedAt}},"finished":{{json .State.FinishedAt}},'\
+'"exit_code":{{json .State.ExitCode}},"restarts":{{json .RestartCount}},'\
+'"ports":{{json .NetworkSettings.Ports}},'\
+'"project":{{json (index .Config.Labels "com.docker.compose.project")}},'\
+'"service":{{json (index .Config.Labels "com.docker.compose.service")}}}'
+stats='{"name":{{json .Name}},"cpu":{{json .CPUPerc}},"memory":{{json .MemUsage}},'\
+'"memory_percent":{{json .MemPerc}}}'
+
+ids=$(/usr/bin/docker ps -aq)
+printf '{"containers":['
+if [ -n "$ids" ]; then
+    # shellcheck disable=SC2086 # one argument per id
+    /usr/bin/docker inspect --type container --format "$container" $ids | /usr/bin/paste -sd, -
+fi
+printf '],"stats":['
+/usr/bin/docker stats --no-stream --format "$stats" | /usr/bin/paste -sd, -
+printf ']}\n'

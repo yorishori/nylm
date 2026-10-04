@@ -431,6 +431,93 @@ static void test_smart(void)
     CHECK(cJSON_GetArraySize(sysinfo_smart(many)) == SYSINFO_MAX_DISKS);
 }
 
+static void test_containers(void)
+{
+    CHECK(sysinfo_container_valid("davis"));
+    CHECK(sysinfo_container_valid("immich_server-1.x"));
+    CHECK(!sysinfo_container_valid(""));
+    CHECK(!sysinfo_container_valid("-x"));
+    CHECK(!sysinfo_container_valid("_x"));
+    CHECK(!sysinfo_container_valid("a b"));
+    CHECK(!sysinfo_container_valid("a/b"));
+    CHECK(!sysinfo_container_valid("a:b"));
+    char s[131];
+    memset(s, 'c', sizeof s);
+    s[128] = '\0';
+    CHECK(sysinfo_container_valid(s));
+    s[128] = 'c';
+    s[129] = '\0';
+    CHECK(!sysinfo_container_valid(s));
+
+    CHECK(sysinfo_docker_time("1970-01-01T00:00:00Z") == 0);
+    CHECK(sysinfo_docker_time("2026-10-04T12:30:15.123456789Z") == 1791117015);
+    CHECK(sysinfo_docker_time("2024-02-29T00:00:00Z") == 1709164800);
+    CHECK(sysinfo_docker_time("0001-01-01T00:00:00Z") == -1); /* never */
+    CHECK(sysinfo_docker_time("2026-10-04T12:30:15+02:00") == -1);
+    CHECK(sysinfo_docker_time("2026-13-04T12:30:15Z") == -1);
+    CHECK(sysinfo_docker_time("2026-10-04 12:30:15Z") == -1);
+    CHECK(sysinfo_docker_time("") == -1);
+    CHECK(sysinfo_docker_time("2026-10-04T12:30:15.Zx") == -1);
+
+    CHECK(sysinfo_docker_size("0B") == 0);
+    CHECK(sysinfo_docker_size("12.5MiB") == 12.5 * 1048576);
+    CHECK(sysinfo_docker_size("1.2GB") == 1.2e9);
+    CHECK(sysinfo_docker_size("3kB") == 3000);
+    CHECK(sysinfo_docker_size("2GiB") == 2.0 * 1073741824);
+    CHECK(sysinfo_docker_size("12") == -1);
+    CHECK(sysinfo_docker_size("MiB") == -1);
+    CHECK(sysinfo_docker_size("1 MiB") == -1);
+    CHECK(sysinfo_docker_size("--") == -1);
+
+    cJSON *c = sysinfo_containers(
+        "{\"containers\":["
+        "{\"name\":\"/web\",\"image\":\"nginx:1\",\"state\":\"running\",\"health\":\"healthy\","
+        "\"started\":\"2026-10-04T12:30:15.5Z\",\"finished\":\"0001-01-01T00:00:00Z\","
+        "\"exit_code\":0,\"restarts\":2,\"ports\":{\"80/tcp\":[{\"HostIp\":\"0.0.0.0\","
+        "\"HostPort\":\"9001\"},{\"HostIp\":\"::\",\"HostPort\":\"9001\"}],\"443/tcp\":null},"
+        "\"project\":\"home\",\"service\":\"web\"},"
+        "{\"name\":\"/davis\",\"image\":\"davis\",\"state\":\"exited\",\"health\":null,"
+        "\"started\":\"2026-10-04T10:00:00Z\",\"finished\":\"2026-10-04T11:00:00Z\","
+        "\"exit_code\":137,\"restarts\":0,\"ports\":{},\"project\":\"\",\"service\":\"\"}],"
+        "\"stats\":[{\"name\":\"web\",\"cpu\":\"1.50%\",\"memory\":\"12.5MiB / 31.3GiB\","
+        "\"memory_percent\":\"0.04%\"},{\"name\":\"davis\",\"cpu\":\"9%\",\"memory\":\"1MiB / 1GiB\","
+        "\"memory_percent\":\"1%\"}]}");
+    CHECK(cJSON_GetArraySize(c) == 2);
+    cJSON *d = cJSON_GetArrayItem(c, 0), *w = cJSON_GetArrayItem(c, 1); /* by name */
+    CHECK_STR(str(d, "name"), "davis");
+    CHECK_STR(str(d, "state"), "exited");
+    CHECK(num(d, "exit_code") == 137);
+    CHECK(num(d, "finished") == 1791111600);
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(d, "cpu"))); /* not running */
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(d, "health")));
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(d, "project")));
+    CHECK(cJSON_GetArraySize(cJSON_GetObjectItemCaseSensitive(d, "ports")) == 0);
+
+    CHECK_STR(str(w, "name"), "web");
+    CHECK_STR(str(w, "image"), "nginx:1");
+    CHECK_STR(str(w, "health"), "healthy");
+    CHECK(num(w, "started") == 1791117015);
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(w, "finished")));
+    CHECK(num(w, "restarts") == 2);
+    CHECK(num(w, "cpu") == 1.5);
+    CHECK(num(w, "memory") == 12.5 * 1048576);
+    CHECK(num(w, "memory_percent") == 0.04);
+    CHECK_STR(str(w, "project"), "home");
+    cJSON *ports = cJSON_GetObjectItemCaseSensitive(w, "ports");
+    CHECK(cJSON_GetArraySize(ports) == 3);
+    CHECK_STR(str(cJSON_GetArrayItem(ports, 0), "container"), "80/tcp");
+    CHECK_STR(str(cJSON_GetArrayItem(ports, 0), "host"), "0.0.0.0:9001");
+    CHECK_STR(str(cJSON_GetArrayItem(ports, 1), "host"), "[::]:9001");
+    CHECK_STR(str(cJSON_GetArrayItem(ports, 2), "container"), "443/tcp");
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(ports, 2), "host")));
+
+    c = sysinfo_containers("{\"containers\":[],\"stats\":[]}");
+    CHECK(c != NULL && cJSON_GetArraySize(c) == 0);
+    CHECK(sysinfo_containers("") == NULL);
+    CHECK(sysinfo_containers("{\"containers\":[]}") == NULL);
+    CHECK(sysinfo_containers("{\"containers\":[{\"name\":\"/x\"}],\"stats\":[]}") == NULL);
+}
+
 int main(void)
 {
     if (arena_init(4 * 1024 * 1024) != 0 || mkdtemp(tmp) == NULL)
@@ -448,6 +535,7 @@ int main(void)
     test_du();
     test_locked();
     test_smart();
+    test_containers();
     static const char *const made[] = {
         "hwmon0/name", "hwmon0/temp1_input", "hwmon0/temp1_label", "hwmon0/temp3_input",
         "hwmon0/temp4_input", "hwmon1/temp1_input", "four", "empty", "hwmon0", "hwmon1",

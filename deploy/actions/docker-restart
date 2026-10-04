@@ -1,0 +1,11 @@
+#!/bin/sh
+# Restarts one container (docker restart: stop, at most 10 s, then start).
+# Not while a nylm job runs (a backup stops and starts containers).
+# Argument: the container's name.
+set -eu
+. /usr/local/lib/nylm/lib.sh
+[ "$#" -eq 1 ] || die "takes one container name"
+valid_container "$1" || die "not a container name: $1"
+/usr/bin/docker inspect --type container "$1" >/dev/null 2>&1 || die "no such container: $1"
+take_lock
+exec /usr/bin/docker restart "$1" >/dev/null

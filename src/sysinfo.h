@@ -106,4 +106,27 @@ int sysinfo_locked(const char *path);
 #define SYSINFO_MAX_DISKS 32
 cJSON *sysinfo_smart(const char *text);
 
+/* ---- containers ---------------------------------------------------------- */
+
+/* A container name as Docker allows it: 1..128 of A-Z a-z 0-9 _ . -,
+ * starting with a letter or digit (deploy/lib.sh: valid_container). */
+int sysinfo_container_valid(const char *s);
+
+/* Docker's time ("2026-10-04T12:00:00.123456789Z", UTC) -> unix seconds;
+ * -1 for its "never" (year 1) or anything else. */
+long long sysinfo_docker_time(const char *s);
+
+/* Docker's size ("12.5MiB", "1.2GB", "0B") -> bytes; -1 if not one. */
+double sysinfo_docker_size(const char *s);
+
+/*
+ * The action docker-list's output -> [{name, image, state, health,
+ * started, finished, exit_code, restarts, ports: [{container, host}],
+ * project, service, cpu, memory, memory_percent}] sorted by name. The
+ * times in unix seconds, the use only for running containers (else null).
+ * At most SYSINFO_MAX_CONTAINERS.
+ */
+#define SYSINFO_MAX_CONTAINERS 256
+cJSON *sysinfo_containers(const char *text);
+
 #endif

@@ -57,6 +57,9 @@ void server_log(struct request *req, struct response *res);
 void server_disk_usage(struct request *req, struct response *res);
 void server_disk_usage_start(struct request *req, struct response *res);
 void server_smart(struct request *req, struct response *res);
+void server_containers(struct request *req, struct response *res);
+void server_container_log(struct request *req, struct response *res);
+void server_container_restart(struct request *req, struct response *res);
 /* Checks the server app's settings (NYLM_UNITS, NYLM_BACKUP...) once at
  * start; -1 (logged) if any is invalid. */
 int server_configure(void);

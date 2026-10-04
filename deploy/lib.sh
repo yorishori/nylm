@@ -32,6 +32,14 @@ valid_unit() {
     [ "${#1}" -le 128 ]
 }
 
+# A container name as Docker allows it: 1..128 of A-Z a-z 0-9 _ . -,
+# starting with a letter or digit.
+valid_container() {
+    case $1 in [A-Za-z0-9]*) ;; *) return 1 ;; esac
+    case $1 in *[!A-Za-z0-9_.-]*) return 1 ;; esac
+    [ "${#1}" -le 128 ]
+}
+
 # A backup entry's name: 1..32 of a-z 0-9 -, starting with a letter or
 # digit; "nylm" is nylm's own data.
 valid_entry() {

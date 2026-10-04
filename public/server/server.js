@@ -5,6 +5,8 @@
  *   #/system   the host (uptime, load, memory, temperatures, whether a
  *              reboot is needed), its disks, their SMART health, what takes
  *              the room on them, and the latest actions
+ *   #/containers every Docker container: state, health, ports, use; restart
+ *              it, read its log
  *
  * Reads never ask for anything; every button that changes the machine
  * asks for the password again, and the server records it (latest actions).
@@ -12,11 +14,12 @@
  * back while it runs, and shows its log.
  */
 
-const TABS = [["system", "System"]];
+const TABS = [["system", "System"], ["containers", "Containers"]];
 
 /* What each recorded action was, by its name in the audit log. */
 const ACTION_TEXT = {
   "disk-usage": "Measure disk usage",
+  "docker-restart": "Restart container",
 };
 
 function shell(active, ...content) {
@@ -87,17 +90,16 @@ function jobState(job) {
     `${job.status ? `, exit status ${job.status}` : ""}): see its log.`);
 }
 
-/* A button that shows the last run's log of unit under it, with a button
- * to close it again. */
-function logPanel(unit, label) {
+/* A Log button and the panel it opens: load() resolves to the log's text
+ * (emptyText if there is none); the panel has a button to close it. */
+function logPanel(load, emptyText) {
   const panel = el("div", { class: "stack", hidden: true });
   const open = el("button", { class: "btn", type: "button", onclick: async () => {
     open.disabled = true;
     try {
-      const r = await api("GET", `/api/server/log?unit=${encodeURIComponent(unit)}`);
+      const text = await load();
       panel.replaceChildren(
-        r.log ? el("pre", { class: "log" }, r.log)
-              : el("p", { class: "empty" }, "No log: it has not run since the server started."),
+        text ? el("pre", { class: "log" }, text) : el("p", { class: "empty" }, emptyText),
         el("div", { class: "actions" },
           el("button", { class: "btn", type: "button", onclick: () => {
             panel.hidden = true;
@@ -110,8 +112,14 @@ function logPanel(unit, label) {
     } finally {
       open.disabled = false;
     }
-  } }, label || "Log");
+  } }, "Log");
   return { button: open, panel };
+}
+
+/* The log panel of a unit's last run. */
+function unitLog(unit) {
+  return logPanel(async () => (await api("GET", `/api/server/log?unit=${encodeURIComponent(unit)}`)).log,
+                  "No log: it has not run since the server started.");
 }
 
 /*
@@ -257,7 +265,7 @@ function usageCard(du) {
     "Measures nylm's data, the music, the backups, Docker's folder and each backup " +
     "entry. On large folders this takes a while.",
     "Measure", "Measuring disk usage…");
-  const log = logPanel(job.unit);
+  const log = unitLog(job.unit);
   const sizes = (du.sizes || []).slice().sort((a, b) => b.bytes - a.bytes);
   const card = el("section", { class: "card stack" },
     el("h2", {}, "Disk usage"),
@@ -311,11 +319,68 @@ async function systemPage() {
     actionsSection(audit.actions));
 }
 
+/* ---- containers ---------------------------------------------------------- */
+
+const STATE_CLASS = { running: "ok", restarting: "warn", paused: "warn", created: "muted",
+                      exited: "bad", dead: "bad", removing: "warn" };
+const HEALTH_CLASS = { healthy: "ok", starting: "warn", unhealthy: "bad" };
+
+/* "0.0.0.0:9001 → 80/tcp"; an exposed port without a host port alone. */
+function portText(p) {
+  return p.host ? `${p.host} → ${p.container}` : `${p.container} (not published)`;
+}
+
+function containerItem(c) {
+  const restart = passwordForm("/api/server/containers/restart", { name: c.name },
+    `Restarts ${c.name}: Docker stops it (at most 10 s) and starts it again.`,
+    "Restart", `${c.name} restarted`);
+  const log = logPanel(async () =>
+    (await api("GET", `/api/server/containers/log?name=${encodeURIComponent(c.name)}`)).log,
+    "The container wrote nothing.");
+  const up = c.state === "running";
+  return el("li", { class: "card stack" },
+    el("header", { class: "line" },
+      el("h3", {}, c.name),
+      el("span", {},
+        el("strong", { class: STATE_CLASS[c.state] || "" }, c.state),
+        c.health ? [" · ", el("span", { class: HEALTH_CLASS[c.health] || "" }, c.health)] : null)),
+    el("p", { class: "muted path" }, c.image || "?"),
+    facts([
+      up ? ["Up", c.started ? showDuration(Date.now() / 1000 - c.started) : "?"]
+         : ["Stopped", `${c.finished ? showTime(c.finished) : "?"}, exit code ${c.exit_code}`],
+      c.restarts ? ["Restarts", el("span", { class: "warn" }, String(c.restarts))] : null,
+      c.ports.length ? ["Ports", c.ports.map((p) => el("div", {}, portText(p)))] : null,
+      c.cpu != null ? ["CPU", `${c.cpu.toFixed(1)} %`] : null,
+      c.memory != null ? ["Memory", `${showSize(c.memory)}` +
+                                    (c.memory_percent != null ? ` (${c.memory_percent.toFixed(1)} %)` : "")]
+                       : null,
+    ]),
+    el("div", { class: "actions" },
+      el("button", { class: "btn", type: "button", onclick: () => restart.open() }, "Restart"),
+      log.button),
+    restart,
+    log.panel);
+}
+
+async function containersPage() {
+  const r = await api("GET", "/api/server/containers");
+  const running = r.containers.filter((c) => c.state === "running").length;
+  return shell("containers",
+    el("section", { class: "section" },
+      el("header", {},
+        el("h2", {}, "Containers ", el("span", { class: "count" },
+          `${running} of ${r.containers.length} running`))),
+      r.containers.length
+        ? el("ul", { class: "list cols" }, r.containers.map(containerItem))
+        : el("p", { class: "empty" }, "No containers.")));
+}
+
 /* ---- routing ------------------------------------------------------------- */
 
 function route(parts) {
   const [section, rest] = parts;
   if (section === "system" && rest === undefined) return systemPage();
+  if (section === "containers" && rest === undefined) return containersPage();
   go("#/system");
   return null;
 }

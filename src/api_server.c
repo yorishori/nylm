@@ -38,6 +38,7 @@
 #define SHOW_MAX   (256 * 1024)      /* systemctl show of the units */
 #define SHOW_TIMEOUT 10              /* seconds */
 #define SMART_MAX  (4 * 1024 * 1024) /* smartctl's reports of every disk */
+#define DOCKER_MAX (2 * 1024 * 1024) /* docker-list: every container */
 
 #define BUSY_MESSAGE \
     "another job is running (disk usage, update or backup); try again when it is done"
@@ -395,6 +396,91 @@ void server_disk_usage(struct request *req, struct response *res)
 void server_disk_usage_start(struct request *req, struct response *res)
 {
     start_job(req, res, "disk-usage", NULL, "nylm-disk-usage.service");
+}
+
+/* ---- containers ---------------------------------------------------------- */
+
+/* GET /api/server/containers: every container, its state and use. */
+void server_containers(struct request *req, struct response *res)
+{
+    (void)req;
+    char *text;
+    cJSON *list = action_output("docker-list", NULL, DOCKER_MAX, &text, NULL) == 0
+                      ? sysinfo_containers(text)
+                      : NULL;
+    if (list == NULL) {
+        fprintf(stderr, "server: can not list the containers (action docker-list)\n");
+        json_error(res, 502, "could not list the containers; see the server log");
+        return;
+    }
+    cJSON *out = cJSON_CreateObject();
+    if (out == NULL || !cJSON_AddItemToObject(out, "containers", list)) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, out);
+}
+
+/* GET /api/server/containers/log?name=N: its last 500 lines. -> {name, log} */
+void server_container_log(struct request *req, struct response *res)
+{
+    const char *name;
+    int rc = http_query(req, "name", &name);
+    if (rc != 0 || !sysinfo_container_valid(name)) {
+        json_error(res, 400, rc < 0 ? "invalid query string" : "'name' must be a container name");
+        return;
+    }
+    char *log;
+    if (action_output("docker-logs", name, LOG_MAX, &log, NULL) != 0) {
+        json_error(res, 502, "could not read its log (is there such a container?); "
+                             "see the server log");
+        return;
+    }
+    cJSON *out = cJSON_CreateObject();
+    if (out == NULL || cJSON_AddStringToObject(out, "name", name) == NULL ||
+        cJSON_AddStringToObject(out, "log", log) == NULL) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, out);
+}
+
+/*
+ * POST /api/server/containers/restart {name, password}: restarts it, not
+ * while a job runs (a backup stops and starts containers). -> 200 when it
+ * is restarted.
+ */
+void server_container_restart(struct request *req, struct response *res)
+{
+    cJSON *body = json_body(req, res);
+    const char *name;
+    if (body == NULL)
+        return;
+    if (json_get_string(body, "name", 1, 128, &name) != NULL || !sysinfo_container_valid(name)) {
+        json_error(res, 400, "'name' must be a container name");
+        return;
+    }
+    if (!audit_password_ok(body, res))
+        return;
+    int busy = sysinfo_locked(JOBS_LOCK);
+    if (busy != 0) {
+        json_error(res, busy < 0 ? 500 : 409,
+                   busy < 0 ? "can not tell whether a job is running; see the server log"
+                            : BUSY_MESSAGE);
+        return;
+    }
+    long long audit = audit_begin(server_db, req, "docker-restart", name);
+    if (audit < 0) {
+        json_error(res, 500, "can not write the audit log; nothing was restarted");
+        return;
+    }
+    int ok = action_run("docker-restart", name) == 0;
+    audit_end(server_db, audit, ok ? "ok: restarted" : "failed: see the server log");
+    if (!ok) {
+        json_error(res, 502, "could not restart it; see the server log");
+        return;
+    }
+    json_reply(res, 200, cJSON_CreateObject());
 }
 
 /* ---- disks' health ------------------------------------------------------- */
