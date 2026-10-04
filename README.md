@@ -251,12 +251,12 @@ downloads.
 
 ## Commands
 
+On the server (the deployed app, run as user `nylm` by systemd):
+
 ```sh
-make run                          # debug build on http://127.0.0.1:8080
-make test                         # unit + end-to-end tests
-sudo deploy/install.sh            # on the server: install or update
-journalctl -u nylm -f             # server logs
+sudo deploy/install.sh                 # install or update (after git pull)
 sudo -u nylm env NYLM_DATA=/mnt/data/nylm nylm set-password
+journalctl -u nylm -f                  # server logs
 sudo systemctl start nylm-music-scan   # scan the music folder (or what is queued)
 sudo systemctl start nylm-music-write  # write the pending tag changes
 sudo systemctl start nylm-music-move   # move the files where their tags put them
@@ -264,7 +264,20 @@ sudo systemctl start nylm-qobuz        # Qobuz: what the web app queued
 sudo -u nylm env NYLM_DATA=/mnt/data/nylm NYLM_MUSIC=/mnt/data/music \
     nylm music-scan /mnt/data/music/Some/Album   # scan one folder or file
 journalctl -u nylm-music-scan -u nylm-music-write -u nylm-music-move -u nylm-qobuz
-NYLM_DATA=dev-data ./nylm-debug set-password   # password for make run
+```
+
+In a checkout (a debug build with sanitizers, data in `./dev-data`):
+
+```sh
+make test                              # unit + end-to-end tests
+NYLM_DATA=dev-data ./nylm-debug set-password   # once, before make run
+make run                               # server on http://127.0.0.1:8080
+# The services by hand (the web app's buttons need the deployed root
+# actions); NYLM_MUSIC is the music folder to use:
+NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-debug music-scan
+NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-debug music-write
+NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-debug music-move
+NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-qobuz-debug
 ```
 
 Configuration is environment variables; `nylm --help` lists them.
