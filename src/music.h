@@ -71,14 +71,25 @@ int music_write(void);
 int music_lock_shared(void);
 void music_unlock(int fd);
 
-/* The service running now: "scan", "write", "move", "busy" (just
- * starting), or NULL if none (or on error: *error set, logged). */
+/* The service running now: "scan", "write", "move", "qobuz" (placing
+ * downloaded files), "busy" (just starting), or NULL if none (or on
+ * error: *error set, logged). */
 const char *music_busy(int *error);
 
-/* For a service (name: "scan", "write", "move"): takes the library lock
+/* For a service (name: "scan", "write", "move", "qobuz"): takes the library lock
  * once the library is set up and there. The fd (closing it releases the
  * lock), or -1 (logged). */
 int music_start_service(const char *name);
+
+/*
+ * The Qobuz service's own lock (<NYLM_DATA>/music/qobuz.lock), apart from
+ * the library's: it downloads while the library is edited. service 1: takes
+ * it exclusively for the service, waiting a moment for the server; 0: the
+ * server takes it shared while it queues and starts the service. An fd
+ * (release with music_unlock()), MUSIC_BUSY if the other side has it, or -1
+ * (logged).
+ */
+int music_qobuz_lock(int service);
 
 /*
  * The columns of a track's tags in a query on "tracks t": its pictures (a

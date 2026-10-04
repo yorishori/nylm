@@ -31,6 +31,7 @@
 #include "json.h"
 #include "move.h"
 #include "music.h"
+#include "qobuz.h"
 #include "tags.h"
 
 #define ID_MAX       9007199254740991LL /* 2^53 - 1: exact in a JSON number */
@@ -1600,6 +1601,141 @@ void music_move_start(struct request *req, struct response *res)
         return;
     }
     start_action(req, res, lock, 0, "music-move", "{}");
+}
+
+/* ---- Qobuz ------------------------------------------------------------ */
+
+#define QOBUZ_MAX_URLS      50  /* album links in one request */
+#define QOBUZ_MAX_DOWNLOADS 100 /* downloads listed */
+
+/*
+ * GET /api/music/qobuz: whether nylm-qobuz runs, the login (connected,
+ * the subscription's label, a pasted login waiting, the last error; the
+ * token itself never leaves the server), the link to log in at once the
+ * web player's app id is known, and the latest downloads.
+ */
+void music_qobuz(struct request *req, struct response *res)
+{
+    (void)req;
+    int lock = music_qobuz_lock(0);
+    if (lock == -1) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    music_unlock(lock);
+    sqlite3_stmt *st = db_prepare(music_db,
+        "SELECT app_id, token IS NOT NULL AND token <> '', label, login IS NOT NULL, error"
+        " FROM qobuz_account WHERE id = 1");
+    int rc = st != NULL ? sqlite3_step(st) : SQLITE_ERROR;
+    cJSON *obj = cJSON_CreateObject();
+    int ok = rc == SQLITE_ROW && obj != NULL &&
+             cJSON_AddBoolToObject(obj, "running", lock == MUSIC_BUSY) != NULL;
+    if (ok) {
+        const char *app_id = (const char *)sqlite3_column_text(st, 0);
+        const char *label = (const char *)sqlite3_column_text(st, 2);
+        char url[128];
+        snprintf(url, sizeof url, "https://www.qobuz.com/signin/oauth?ext_app_id=%s"
+                                  "&redirect_url=http://localhost", app_id ? app_id : "");
+        ok = (app_id != NULL ? cJSON_AddStringToObject(obj, "login_url", url)
+                             : cJSON_AddNullToObject(obj, "login_url")) != NULL &&
+             cJSON_AddBoolToObject(obj, "connected", sqlite3_column_int(st, 1)) != NULL &&
+             (label != NULL ? cJSON_AddStringToObject(obj, "label", label)
+                            : cJSON_AddNullToObject(obj, "label")) != NULL &&
+             cJSON_AddBoolToObject(obj, "login_pending", sqlite3_column_int(st, 3)) != NULL &&
+             cJSON_AddStringToObject(obj, "error",
+                                     (const char *)sqlite3_column_text(st, 4)) != NULL;
+    }
+    if (rc != SQLITE_ROW)
+        db_log_error(music_db, "qobuz account");
+    sqlite3_finalize(st);
+    cJSON *list = ok ? cJSON_AddArrayToObject(obj, "downloads") : NULL;
+    st = list != NULL ? db_prepare(music_db,
+        "SELECT id, album_id, title, artist, requested, started, finished, state, tracks, saved,"
+        " note FROM qobuz_downloads ORDER BY id DESC LIMIT 100") : NULL;
+    ok = st != NULL && add_rows(list, st, 11, QOBUZ_MAX_DOWNLOADS) == 0;
+    sqlite3_finalize(st);
+    if (!ok) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, obj);
+}
+
+/*
+ * POST /api/music/qobuz/start {password, login?, urls?}: queues the login
+ * the user pasted (the address Qobuz sent them to, or its code) and the
+ * album links to download (1 to 50), and starts nylm-qobuz.service, which
+ * also reads the web player's app id for the login link. -> 202
+ */
+void music_qobuz_start(struct request *req, struct response *res)
+{
+    cJSON *body = password_checked(req, res);
+    if (body == NULL)
+        return;
+    const cJSON *login = cJSON_GetObjectItemCaseSensitive(body, "login");
+    const cJSON *urls = cJSON_GetObjectItemCaseSensitive(body, "urls");
+    char code[QOBUZ_MAX_TOKEN + 1], token[QOBUZ_MAX_TOKEN + 1], user[QOBUZ_MAX_TOKEN + 1];
+    if (login != NULL && (!cJSON_IsString(login) ||
+                          qobuz_redirect_parse(login->valuestring, code, token, user) != 0)) {
+        json_error(res, 400, "'login' must be the address Qobuz sent you to after logging in "
+                             "(it has a code or a token)");
+        return;
+    }
+    int nurls = urls != NULL ? cJSON_GetArraySize(urls) : 0;
+    if (urls != NULL && (!cJSON_IsArray(urls) || nurls < 1 || nurls > QOBUZ_MAX_URLS)) {
+        json_error(res, 400, "'urls' must be a list of 1 to 50 Qobuz album links");
+        return;
+    }
+    char (*ids)[QOBUZ_MAX_ID + 1] = arena_alloc((size_t)(nurls + 1) * sizeof *ids);
+    if (ids == NULL) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    for (int i = 0; i < nurls; i++) {
+        const cJSON *u = cJSON_GetArrayItem(urls, i);
+        if (!cJSON_IsString(u) || qobuz_album_id(u->valuestring, ids[i]) != 0) {
+            char n[16];
+            snprintf(n, sizeof n, "%d", i + 1);
+            json_error(res, 400, message("link %s is not a Qobuz album link (like %s)", n,
+                                         "https://www.qobuz.com/us-en/album/name/ID"));
+            return;
+        }
+    }
+    long long connected = single_number(
+        "SELECT count(*) FROM qobuz_account WHERE token IS NOT NULL AND token <> ''", 0);
+    if (connected < 0) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    if (nurls > 0 && connected == 0 && login == NULL) {
+        json_error(res, 409, "connect to Qobuz first");
+        return;
+    }
+    int lock = music_qobuz_lock(0);
+    if (lock < 0) {
+        json_error(res, lock == MUSIC_BUSY ? 409 : 500,
+                   lock == MUSIC_BUSY ? "Qobuz is busy: try again when it is done"
+                                      : "internal error");
+        return;
+    }
+    /* One transaction; start_action() commits it, or rolls it back. */
+    int rc = db_exec(music_db, "BEGIN IMMEDIATE");
+    for (int i = login != NULL ? -1 : 0; rc == 0 && i < nurls; i++) {
+        sqlite3_stmt *st = db_prepare(music_db, i < 0
+            ? "UPDATE qobuz_account SET login = ?, error = '', updated = unixepoch() WHERE id = 1"
+            : "INSERT INTO qobuz_downloads (album_id) VALUES (?)");
+        const char *v = i < 0 ? login->valuestring : ids[i];
+        if (st != NULL && sqlite3_bind_text(st, 1, v, -1, SQLITE_STATIC) == SQLITE_OK) {
+            rc = run_once(st); /* finalizes st */
+        } else {
+            sqlite3_finalize(st);
+            rc = -1;
+        }
+    }
+    char detail[64];
+    snprintf(detail, sizeof detail, "{\"login\":%s,\"albums\":%d}", login != NULL ? "true" : "false",
+             nurls);
+    start_action(req, res, lock, rc, "qobuz", detail);
 }
 
 /* POST /api/music/write {password}: starts nylm-music-write.service. -> 202 */

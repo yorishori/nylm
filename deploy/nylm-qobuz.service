@@ -1,0 +1,21 @@
+[Unit]
+Description=nylm Qobuz downloads
+Documentation=file:///usr/local/share/nylm/README.md
+Wants=network-online.target
+After=network-online.target
+
+# Started from the web app (action qobuz) or by hand:
+#   sudo systemctl start nylm-qobuz
+# Reads the Qobuz web player's app id, finishes a login pasted in the web
+# app, downloads the queued albums into the music folder (tagged, named by
+# the naming rule) and scans them. The only part of nylm that talks to the
+# internet, and the only binary that links libssl.
+[Service]
+Type=oneshot
+User=nylm
+Group=nylm
+EnvironmentFile=/etc/nylm.conf
+ExecStart=/usr/local/bin/nylm-qobuz
+WorkingDirectory=/var/lib/nylm
+Nice=10
+IOSchedulingClass=idle

@@ -31,13 +31,16 @@
 static char root[MUSIC_MAX_ROOT + 1];
 static size_t root_len;
 static char lock_path[DB_MAX_PATH];
+static char qobuz_lock_path[DB_MAX_PATH];
 
 int music_configure(const char *dir, const char *data_dir)
 {
     root[0] = '\0';
     root_len = 0;
     int n = snprintf(lock_path, sizeof lock_path, "%s/music/library.lock", data_dir);
-    if (n < 0 || (size_t)n >= sizeof lock_path || art_configure(data_dir) != 0) {
+    int q = snprintf(qobuz_lock_path, sizeof qobuz_lock_path, "%s/music/qobuz.lock", data_dir);
+    if (n < 0 || (size_t)n >= sizeof lock_path || q < 0 || (size_t)q >= sizeof qobuz_lock_path ||
+        art_configure(data_dir) != 0) {
         fprintf(stderr, "music: data folder path is too long\n");
         return -1;
     }
@@ -857,6 +860,31 @@ int music_lock_shared(void)
     return busy ? MUSIC_BUSY : -1;
 }
 
+int music_qobuz_lock(int service)
+{
+    int fd = open(qobuz_lock_path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        fprintf(stderr, "music: %s: %s\n", qobuz_lock_path, strerror(errno));
+        return -1;
+    }
+    const struct timespec tick = { 0, 100 * 1000 * 1000 };
+    int rc = -1;
+    for (int i = 0; i < (service ? LOCK_WAIT_SECONDS * 10 : 1) && rc != 0; i++) {
+        rc = flock(fd, (service ? LOCK_EX : LOCK_SH) | LOCK_NB);
+        if (rc != 0 && errno != EWOULDBLOCK)
+            break;
+        if (rc != 0 && service)
+            nanosleep(&tick, NULL);
+    }
+    if (rc == 0)
+        return fd;
+    int busy = errno == EWOULDBLOCK;
+    if (!busy || service)
+        fprintf(stderr, "music: %s\n", busy ? "Qobuz: the service already runs" : strerror(errno));
+    close(fd);
+    return busy ? MUSIC_BUSY : -1;
+}
+
 void music_unlock(int fd)
 {
     if (fd >= 0)
@@ -882,7 +910,7 @@ const char *music_busy(int *error)
     if (fd >= 0)
         close(fd);
     name[n > 0 ? n : 0] = '\0';
-    static const char *const services[] = { "scan", "write", "move" };
+    static const char *const services[] = { "scan", "write", "move", "qobuz" };
     for (size_t i = 0; i < sizeof services / sizeof services[0]; i++)
         if (strcmp(name, services[i]) == 0)
             return services[i];

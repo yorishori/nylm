@@ -58,6 +58,7 @@ install -d -m 755 -o root -g root /usr/local/lib/nylm "$ACTIONS"
 
 step "files"
 install -m 755 nylm /usr/local/bin/nylm
+install -m 755 nylm-qobuz /usr/local/bin/nylm-qobuz
 rm -rf "$SHARE"
 install -d -m 755 "$SHARE"
 cp -r public "$SHARE/public"
@@ -72,6 +73,7 @@ install -m 644 deploy/nylm.service /etc/systemd/system/nylm.service
 install -m 644 deploy/nylm-music-scan.service /etc/systemd/system/nylm-music-scan.service
 install -m 644 deploy/nylm-music-write.service /etc/systemd/system/nylm-music-write.service
 install -m 644 deploy/nylm-music-move.service /etc/systemd/system/nylm-music-move.service
+install -m 644 deploy/nylm-qobuz.service /etc/systemd/system/nylm-qobuz.service
 
 step "sudo rule"
 tmp=$(mktemp)

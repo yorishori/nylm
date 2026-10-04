@@ -280,6 +280,36 @@ const char *const music_migrations[] = {
     "    finished  INTEGER NOT NULL DEFAULT (unixepoch()),"
     "    CHECK ((state = 'done') = (to_path IS NOT NULL))"
     ") STRICT;",
+
+    /* 5: Qobuz (nylm-qobuz). One account row: the web player's app id,
+     * the login (token: a secret, never sent to the browser), a pasted
+     * redirect waiting for the service, and the last error. Then the
+     * albums to download, each with what came of it. */
+    "CREATE TABLE qobuz_account ("
+    "    id      INTEGER PRIMARY KEY CHECK (id = 1),"
+    "    app_id  TEXT,"
+    "    user_id TEXT,"
+    "    token   TEXT,"
+    "    label   TEXT,"
+    "    login   TEXT,"
+    "    error   TEXT    NOT NULL DEFAULT '',"
+    "    updated INTEGER NOT NULL DEFAULT (unixepoch())"
+    ") STRICT;"
+    "INSERT INTO qobuz_account (id) VALUES (1);"
+    "CREATE TABLE qobuz_downloads ("
+    "    id        INTEGER PRIMARY KEY,"
+    "    album_id  TEXT    NOT NULL,"
+    "    title     TEXT,"
+    "    artist    TEXT,"
+    "    requested INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "    started   INTEGER,"
+    "    finished  INTEGER,"
+    "    state     TEXT    NOT NULL DEFAULT 'queued' CHECK (state IN"
+    "                      ('queued', 'running', 'done', 'warning', 'failed')),"
+    "    tracks    INTEGER NOT NULL DEFAULT 0," /* of the album */
+    "    saved     INTEGER NOT NULL DEFAULT 0," /* now in the library */
+    "    note      TEXT    NOT NULL DEFAULT ''"
+    ") STRICT;",
 };
 
 const int music_migration_count = sizeof music_migrations / sizeof music_migrations[0];

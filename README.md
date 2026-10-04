@@ -33,6 +33,9 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 | `src/care.c`      | plant care dates: when a care rule is next due           |
 | `src/music.c`     | music folder, lock, `nylm music-scan` and `music-write`  |
 | `src/move.c`      | the naming rule, `nylm music-move`                       |
+| `src/qobuz.c`     | Qobuz without the network: links, login, bundle, tags    |
+| `src/qobuz_*.c`   | `nylm-qobuz`, the Qobuz service (its own binary)         |
+| `src/https.c`     | HTTPS client (libssl), only in `nylm-qobuz`              |
 | `src/tags.c`      | music file tags through TagLib: read, write, verify      |
 | `src/art.c`       | album art files, named by SHA-256; base64                |
 | `src/image.c`     | thumbnails (libjpeg-turbo, libpng), only in the services |
@@ -59,6 +62,7 @@ $NYLM_DATA/core/core.db       login password and sessions
 $NYLM_DATA/plants/plants.db   plant care
 $NYLM_DATA/music/music.db     music tags cache, changes, scans, audit log
 $NYLM_DATA/music/art/         album art: each picture once, and its thumbnail
+$NYLM_DATA/music/*.lock       the library's lock and the Qobuz service's
 ```
 
 nylm refuses to start if the folder does not exist. In an empty folder it
@@ -125,7 +129,7 @@ They never run together: each holds `$NYLM_DATA/music/library.lock`
 exclusively. The server holds it shared for its own writes to `music.db`,
 and refuses to queue or discard anything while a service runs (409).
 
-The web app has four tabs. Albums: the last scan and a button to scan
+The web app has five tabs. Albums: the last scan and a button to scan
 again, filters (search; a field each, with a switch for albums where a track
 has no value for it; and switches for albums with invalid tags, missing
 tags, invalid genres, genres that differ between tracks, several artists
@@ -148,7 +152,8 @@ pending changes by album, then track (those of tracks a scan removed in
 one group), a search over every field, Discard for an album or a track,
 and Write. Files: the naming rule, the tracks
 that move (from, to) and those that can not (why), Move files, and what
-the moves did (`GET /api/music/moves`). Info: library
+the moves did (`GET /api/music/moves`). Qobuz: connect, download albums,
+and what came of each download. Info: library
 counts, albums by genre (a donut of the 12 largest, the rest as "other",
 and every genre in a table) and by year (`GET /api/music/charts`, from the
 files' tags), the rules, and the written changes with their results.
@@ -204,6 +209,34 @@ that hash and decode completely (which makes the thumbnail), then
 replaces all of the track's pictures with it as the front cover, and
 checks it reads back.
 
+Qobuz (`nylm-qobuz`, `nylm-qobuz.service`, root action `qobuz`): the
+only part of nylm that talks to the internet, and a binary of its own so
+that only it links libssl (`src/https.c`: TLS 1.2+, certificates checked,
+30 s timeouts). The web app queues what it should do (`POST
+/api/music/qobuz/start`, password again, audited) and shows how it went
+(`GET /api/music/qobuz`); each run:
+
+1. reads the Qobuz web player's `bundle.js` for its app id, OAuth key and
+   the secrets that sign download requests;
+2. finishes a login: the user opens the login link (with that app id),
+   logs in, and pastes the `http://localhost/?code=...` address Qobuz
+   then opens; the service exchanges the code for a token, kept in
+   `music.db` (`qobuz_account`) and never sent to the browser;
+3. downloads each queued album (`qobuz_downloads`; links like
+   `https://www.qobuz.com/us-en/album/name/ID`, at most 50 at a time): the
+   best FLAC Qobuz has, track by track, into `.nylm-qobuz/` in the music
+   folder (scans skip dot folders); tags each through TagLib from Qobuz's
+   data (title and album with their version, artist, album artist, track
+   `N/tracks on its disc`, disc `D/discs`, year, composer, copyright,
+   label, ISRC, barcode, compilation 0; no genre: the user's own) with the
+   album cover; then, holding the library lock, moves the tracks where the
+   naming rule puts them (never over a file) and scans those folders.
+
+It holds `$NYLM_DATA/music/qobuz.lock`, not the library's, while it
+downloads, so the library can be edited meanwhile. The signing scheme is
+Qobuz's own and may change; then the service says that no secret signs
+downloads.
+
 ## Commands
 
 ```sh
@@ -215,13 +248,15 @@ sudo -u nylm env NYLM_DATA=/mnt/data/nylm nylm set-password
 sudo systemctl start nylm-music-scan   # scan the music folder (or what is queued)
 sudo systemctl start nylm-music-write  # write the pending tag changes
 sudo systemctl start nylm-music-move   # move the files where their tags put them
+sudo systemctl start nylm-qobuz        # Qobuz: what the web app queued
 sudo -u nylm env NYLM_DATA=/mnt/data/nylm NYLM_MUSIC=/mnt/data/music \
     nylm music-scan /mnt/data/music/Some/Album   # scan one folder or file
-journalctl -u nylm-music-scan -u nylm-music-write -u nylm-music-move   # their output
+journalctl -u nylm-music-scan -u nylm-music-write -u nylm-music-move -u nylm-qobuz
 NYLM_DATA=dev-data ./nylm-debug set-password   # password for make run
 ```
 
 Configuration is environment variables; `nylm --help` lists them.
 Build needs `gcc`, `make` and the system libraries `sqlite` (3.44+), `cjson`,
-`openssl` (3.2+) and `taglib` (2.0+), linked dynamically: `pacman -Syu`
-brings their fixes.
+`openssl` (3.2+; libssl only for `nylm-qobuz`), `taglib` (2.0+),
+`libjpeg-turbo` and `libpng`, linked dynamically: `pacman -Syu` brings their
+fixes. `make` builds `nylm` and `nylm-qobuz`.

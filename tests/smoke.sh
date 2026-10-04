@@ -465,7 +465,8 @@ for route in "GET /api/music" "GET /api/music/albums" "GET /api/music/album?trac
              "GET /api/music/values?field=artist" "GET /api/music/changes" "GET /api/music/charts" \
              "POST /api/music/queue" "POST /api/music/discard" "POST /api/music/scan" \
              "POST /api/music/write" "GET /api/music/art?hash=$(printf '%064d' 0)&size=full" \
-             "POST /api/music/cover" "GET /api/music/moves" "POST /api/music/move"; do
+             "POST /api/music/cover" "GET /api/music/moves" "POST /api/music/move" \
+             "GET /api/music/qobuz" "POST /api/music/qobuz/start"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
@@ -969,6 +970,61 @@ if [ "$(cat "$M/AC_DC_ Live/Some Album/03 - Other.flac")" = "in the way" ]; then
 rm "$M/AC_DC_ Live/Some Album/03 - Other.flac"
 service 0 "scan after the moves" music-scan
 logged "0 removed" "the scan finds every moved track"
+
+# Qobuz: the account and downloads; starting it is checked up to the root
+# action (the service talks to Qobuz, which these tests do not).
+QZ=/api/music/qobuz/start
+QDB() { sqlite3 "$MDB" "SELECT (SELECT coalesce(login, '-') FROM qobuz_account),
+                               (SELECT count(*) FROM qobuz_downloads)"; }
+expect 200 "qobuz"             -b "$JAR" "$B/api/music/qobuz"
+expect_body '{"running":false,"login_url":null,"connected":false,"label":null,"login_pending":false,"error":"","downloads":[]}' "qobuz, never run"
+post "qobuz no password"       400 $QZ '{}'
+post "qobuz wrong password"    403 $QZ '{"password":"nope"}'
+expect 415 "qobuz needs json"  -b "$JAR" -d '{"password":"x"}' "$B$QZ"
+post "qobuz login not text"    400 $QZ "{$PW,\"login\":1}"
+expect_body "'login' must be the address Qobuz sent you to" "login message"
+post "qobuz login no code"     400 $QZ "{$PW,\"login\":\"http://localhost/?x=1\"}"
+post "qobuz login space"       400 $QZ "{$PW,\"login\":\"a b\"}"
+post "qobuz login too long"    400 $QZ "{$PW,\"login\":\"$(printf '%02049d' 0)\"}"
+post "qobuz urls not a list"   400 $QZ "{$PW,\"urls\":\"x\"}"
+expect_body "'urls' must be a list of 1 to 50 Qobuz album links" "urls message"
+post "qobuz urls empty"        400 $QZ "{$PW,\"urls\":[]}"
+post "qobuz urls 51"           400 $QZ "{$PW,\"urls\":[$(seq -s, 1 51 | sed 's|[0-9]*|"https://open.qobuz.com/album/a&"|g')]}"
+post "qobuz url not a link"    400 $QZ "{$PW,\"urls\":[\"https://open.qobuz.com/album/a\",\"https://evil.com/album/b\"]}"
+expect_body "link 2 is not a Qobuz album link" "link message"
+post "qobuz url a track"       400 $QZ "{$PW,\"urls\":[\"https://www.qobuz.com/us-en/track/x/1\"]}"
+post "qobuz urls not text"     400 $QZ "{$PW,\"urls\":[1]}"
+post "qobuz urls, not connected" 409 $QZ "{$PW,\"urls\":[\"https://open.qobuz.com/album/a\"]}"
+expect_body "connect to Qobuz first" "connect message"
+flock "$TMP/data/music/qobuz.lock" sleep 2 &
+LOCKER=$!
+sleep 0.3
+expect 200 "qobuz while running" -b "$JAR" "$B/api/music/qobuz"
+expect_body '{"running":true,' "qobuz shows it runs"
+post "qobuz start while running" 409 $QZ "{$PW,\"login\":\"http://localhost/?code=abc\"}"
+expect_body "Qobuz is busy" "busy message"
+wait "$LOCKER"
+if [ "$(QDB)" = "-|0" ]; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: refused Qobuz requests changed the database: $(QDB)"; fi
+# What the service stored shows; the token never does.
+sqlite3 "$MDB" "UPDATE qobuz_account SET app_id = '798273057', token = 'SECRET-TOKEN',
+                user_id = '42', label = 'Studio', error = 'old';
+                INSERT INTO qobuz_downloads (album_id, title, state, tracks, saved, note)
+                VALUES ('abc', 'Some Album', 'warning', 3, 2, 'track 3: only a sample')"
+expect 200 "qobuz, connected"  -b "$JAR" "$B/api/music/qobuz"
+expect_body '"login_url":"https://www.qobuz.com/signin/oauth?ext_app_id=798273057&redirect_url=http://localhost","connected":true,"label":"Studio","login_pending":false,"error":"old"' "qobuz account"
+expect_body '"album_id":"abc","title":"Some Album","artist":null,' "qobuz download"
+expect_body '"state":"warning","tracks":3,"saved":2,"note":"track 3: only a sample"}]}' "qobuz download result"
+if grep -q "SECRET-TOKEN" "$TMP/body"; then FAILED=$((FAILED + 1)); echo "FAIL: the token was sent"
+else PASSED=$((PASSED + 1)); fi
+# nylm-qobuz: no arguments, and it needs NYLM_MUSIC (it stops before the network).
+QBIN=$(dirname "$BIN")/nylm-qobuz${BIN##*nylm}
+if "$QBIN" x >/dev/null 2>&1; then FAILED=$((FAILED + 1)); echo "FAIL: nylm-qobuz takes an argument"
+else PASSED=$((PASSED + 1)); fi
+if env NYLM_MUSIC= "$QBIN" >"$TMP/service.log" 2>&1; then
+    FAILED=$((FAILED + 1)); echo "FAIL: nylm-qobuz ran without NYLM_MUSIC"
+else PASSED=$((PASSED + 1)); fi
+logged "NYLM_MUSIC is not set" "nylm-qobuz says why"
 
 expect 204 "logout"             -b "$JAR" -c "$JAR" -X POST "$B/api/logout"
 expect 401 "after logout"       -b "$JAR" "$B/api/session"

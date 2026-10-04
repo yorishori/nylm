@@ -276,10 +276,7 @@ static int record(long long track, const char *from, const char *to, const char 
     return ok ? 0 : -1;
 }
 
-/* Renames from to to, never over an existing file or folder. On a file
- * system without RENAME_NOREPLACE (NFS) it checks first: nothing else
- * touches the library while the service holds the lock. 0, or -1 (errno). */
-static int rename_new(const char *from, const char *to)
+int move_rename_new(const char *from, const char *to)
 {
     if (renameat2(AT_FDCWD, from, AT_FDCWD, to, RENAME_NOREPLACE) == 0)
         return 0;
@@ -293,9 +290,7 @@ static int rename_new(const char *from, const char *to)
     return errno == ENOENT ? rename(from, to) : -1;
 }
 
-/* Makes the folders of path below the library folder (each a real folder,
- * never a symlink). 0, or -1 (errno). */
-static int make_folders(const char *path)
+int move_make_folders(const char *path)
 {
     char dir[TAGS_MAX_PATH];
     size_t start = strlen(music_root()) + 1;
@@ -343,9 +338,9 @@ static int move_track(const struct move_item *it, int last_try, struct move_coun
     int taken = 0;
     if (lstat(it->from, &sb) != 0 || !S_ISREG(sb.st_mode)) {
         why = "the file is no longer there; scan the library";
-    } else if (make_folders(it->to) != 0) {
+    } else if (move_make_folders(it->to) != 0) {
         why = strerror(errno);
-    } else if (rename_new(it->from, it->to) != 0) {
+    } else if (move_rename_new(it->from, it->to) != 0) {
         taken = errno == EEXIST;
         why = taken ? "a file is already there" : strerror(errno);
     }
@@ -369,7 +364,7 @@ static int move_track(const struct move_item *it, int last_try, struct move_coun
         db_log_error(music_db, "move: new path");
         if (sqlite3_get_autocommit(music_db) == 0)
             db_exec(music_db, "ROLLBACK");
-        if (rename_new(it->to, it->from) != 0)
+        if (move_rename_new(it->to, it->from) != 0)
             fprintf(stderr, "music: %s is now %s, but the cache still has the old path: "
                             "scan the library (%s)\n", it->from, it->to, strerror(errno));
         return -1;
@@ -450,7 +445,7 @@ static int tidy_folder(const struct source *s, struct move_counts *n)
         const char *why = NULL;
         if (a < 0 || (size_t)a >= sizeof from || b < 0 || (size_t)b >= sizeof to)
             why = "the path is too long";
-        else if (rename_new(from, to) != 0)
+        else if (move_rename_new(from, to) != 0)
             why = errno == EEXIST ? "that name is taken there" : strerror(errno);
         if (why == NULL) {
             n->others++;

@@ -42,5 +42,7 @@ void music_scan_start(struct request *req, struct response *res);
 void music_write_start(struct request *req, struct response *res);
 void music_moves(struct request *req, struct response *res);
 void music_move_start(struct request *req, struct response *res);
+void music_qobuz(struct request *req, struct response *res);
+void music_qobuz_start(struct request *req, struct response *res);
 
 #endif

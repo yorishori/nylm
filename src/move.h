@@ -58,4 +58,14 @@ int move_plan(struct move_plan *plan);
  */
 int music_move(void);
 
+/* Renames from to to, never over an existing file or folder. On a file
+ * system without RENAME_NOREPLACE (NFS) it checks first: nothing else
+ * touches the library while the caller holds the library lock. 0, or -1
+ * (errno). */
+int move_rename_new(const char *from, const char *to);
+
+/* Makes the folders of path below the library folder (each a real folder,
+ * never a symlink). 0, or -1 (errno). */
+int move_make_folders(const char *path);
+
 #endif

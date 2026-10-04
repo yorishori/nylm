@@ -9,6 +9,7 @@
  *                  discard them, write them
  *   #/files        where the move service puts each file (its plan, its
  *                  problems, what it did), and starting it
+ *   #/qobuz        connect to Qobuz, download albums into the library
  *   #/info         library counts, genres and years charts, the rules,
  *                  the written changes
  *
@@ -269,7 +270,7 @@ function changesLabel(pending) {
 function shell(active, overview, ...content) {
   musicRoot = overview.root || "";
   const tabs = [["albums", "Albums"], ["changes", changesLabel(overview.pending)],
-                ["files", "Files"], ["info", "Info"]];
+                ["files", "Files"], ["qobuz", "Qobuz"], ["info", "Info"]];
   return el("section", {},
     el("header", { class: "app-head" },
       el("h1", {}, "Music"),
@@ -312,6 +313,7 @@ function busyText(o) {
   }
   if (o.busy === "write") return "Writing changes to the files…";
   if (o.busy === "move") return "Moving files…";
+  if (o.busy === "qobuz") return "Saving downloaded files…";
   return o.busy ? "Starting…" : "";
 }
 
@@ -1462,6 +1464,117 @@ async function filesPage() {
         : el("p", { class: "empty" }, "Nothing moved yet.")));
 }
 
+/* ---- qobuz --------------------------------------------------------------- */
+
+const DOWNLOAD_STATE = { queued: "Waiting", running: "Downloading", done: "Done",
+                         warning: "Done, with a problem", failed: "Failed" };
+
+/* A form that starts the Qobuz service with the password and what
+ * inputs() gives (it throws invalid() if something is missing). */
+function qobuzForm(intro, inputs, submitLabel, started, ...fields) {
+  const password = el("input", { type: "password", name: "password", required: true,
+                                 autocomplete: "current-password" });
+  return form({ class: "raised" }, async () => {
+    const extra = inputs();
+    try {
+      await api("POST", "/api/music/qobuz/start", { ...extra, password: password.value });
+    } finally {
+      password.value = "";
+    }
+    setStatus(started);
+    refresh();
+  },
+    el("p", {}, intro),
+    ...fields,
+    field("Password", password, "Starting the Qobuz service needs your password again."),
+    el("div", { class: "actions" }, el("button", { class: "btn go", type: "submit" }, submitLabel)));
+}
+
+/* One download: the album, how it went. Rose failed, peach a problem. */
+function downloadItem(d) {
+  const tone = d.state === "failed" ? "late" : d.state === "warning" ? "today" : "";
+  return el("li", { class: "card stack history" },
+    el("header", {},
+      el("span", { class: tone ? `due ${tone}` : "muted" }, DOWNLOAD_STATE[d.state] || d.state),
+      el("span", { class: "muted" }, showTime(d.finished || d.started || d.requested))),
+    el("strong", {}, d.title || `Album ${d.album_id}`),
+    d.artist ? el("p", { class: "muted" }, d.artist) : null,
+    d.tracks ? el("p", {}, `${d.saved} of ${plural(d.tracks, "track", "tracks")} saved`) : null,
+    d.note ? el("p", { class: "note" }, d.note) : null);
+}
+
+async function qobuzPage() {
+  const [o, qb] = await Promise.all([api("GET", "/api/music"), api("GET", "/api/music/qobuz")]);
+  musicRoot = o.root || "";
+  const status = el("p", {}, qb.running ? "The Qobuz service is running…" : "");
+  /* While it runs, check back; when it ends, show the page again. */
+  if (qb.running) {
+    const poll = async () => {
+      if (!status.isConnected) return;
+      try {
+        const now = await api("GET", "/api/music/qobuz");
+        if (!status.isConnected) return;
+        if (now.running) setTimeout(poll, POLL_MS);
+        else {
+          setStatus("Qobuz finished");
+          refresh();
+        }
+      } catch (err) {
+        handleError(err);
+      }
+    };
+    setTimeout(poll, POLL_MS);
+  }
+  const ready = o.available && !qb.running;
+
+  const pasted = el("input", { type: "text", name: "login", required: true, autocomplete: "off",
+                               spellcheck: "false", maxlength: 2048 });
+  const connect = qb.login_url
+    ? qobuzForm("Log in at Qobuz. Qobuz then opens an address on localhost that does not load: " +
+                "copy that whole address from the address bar and paste it here.",
+                () => ({ login: pasted.value.trim() }), "Connect", "Connecting to Qobuz",
+                el("div", { class: "actions" },
+                  el("button", { class: "btn", type: "button",
+                                 onclick: () => window.open(qb.login_url, "_blank", "noopener") },
+                     "Open the Qobuz login")),
+                field("Address Qobuz opened", pasted))
+    : qobuzForm("First nylm reads the Qobuz web player's app id, which the login link needs.",
+                () => ({}), "Get the login link", "Getting the login link");
+
+  const links = el("textarea", { name: "urls", rows: 4, required: true, spellcheck: "false",
+                                 placeholder: "https://www.qobuz.com/us-en/album/name/0123456789" });
+  const download = qobuzForm(
+    "Album links, one per line (at most 50). Each album is downloaded in the best FLAC Qobuz " +
+    "has, tagged from Qobuz (no genre: add your own), saved where the naming rule puts it " +
+    "(never over a file) and scanned.",
+    () => {
+      const urls = links.value.split("\n").map((l) => l.trim()).filter(Boolean);
+      if (!urls.length) throw invalid("Paste at least one album link.");
+      return { urls };
+    }, "Download", "Downloading started", field("Album links", links));
+
+  const account = el("section", { class: "card stack" },
+    el("h2", {}, "Qobuz"),
+    el("p", {}, qb.connected ? `Connected${qb.label ? ` (${qb.label})` : ""}.`
+                             : "Not connected."),
+    qb.login_pending ? el("p", { class: "muted" }, "A login waits for the Qobuz service.") : null,
+    qb.error ? el("p", { class: "differs-text" }, qb.error) : null,
+    !o.available ? el("p", { class: "warn" }, "The music folder is not available (is the " +
+                                              "drive mounted?).") : null,
+    status);
+  const connectSection = el("section", { class: "section" },
+    el("header", {}, el("h2", {}, qb.connected ? "Connect again" : "Connect")), connect);
+  return shell("qobuz", o, account,
+    ready && qb.connected ? el("section", { class: "section" },
+                              el("header", {}, el("h2", {}, "Download")), download) : null,
+    ready ? connectSection : null,
+    el("section", { class: "section" },
+      el("header", {}, el("h2", {}, "Downloads ", el("span", { class: "count" }, qb.downloads.length))),
+      qb.downloads.length
+        ? el("ul", { class: "list cols" }, qb.downloads.map(downloadItem))
+        : el("p", { class: "empty" }, "Nothing downloaded yet.")));
+}
+
 /* ---- info ---------------------------------------------------------------- */
 
 const STATE_TEXT = { done: "Done", warning: "Done, with a warning", failed: "Failed" };
@@ -1643,6 +1756,7 @@ function route(parts) {
   if (section === "albums" && rawId === undefined) return albumsPage();
   if (section === "changes" && rawId === undefined) return changesPage();
   if (section === "files" && rawId === undefined) return filesPage();
+  if (section === "qobuz" && rawId === undefined) return qobuzPage();
   if (section === "info" && rawId === undefined) return infoPage();
   go("#/albums");
   return null;
