@@ -93,4 +93,17 @@ cJSON *sysinfo_du(const char *log);
  * not exist), -1 on error (logged). */
 int sysinfo_locked(const char *path);
 
+/* ---- disks --------------------------------------------------------------- */
+
+/*
+ * The action smart's output (a JSON array of `smartctl -j` reports) ->
+ * [{device, model, protocol, size, passed, temperature, hours,
+ * reallocated, pending, uncorrectable (ATA), percent_used, spare,
+ * media_errors, critical_warning (NVMe), error}]: what is unknown is null;
+ * error is smartctl's message when it could not read the disk (asleep,
+ * no SMART, ...). At most SYSINFO_MAX_DISKS disks.
+ */
+#define SYSINFO_MAX_DISKS 32
+cJSON *sysinfo_smart(const char *text);
+
 #endif

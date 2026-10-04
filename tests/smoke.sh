@@ -1207,7 +1207,7 @@ logged "NYLM_MUSIC is not set" "nylm-qobuz says why"
 
 # Every route of the server app needs a login.
 for route in "GET /api/server" "GET /api/server/audit" "GET /api/server/log?unit=nylm.service" \
-             "GET /api/server/disk-usage" "POST /api/server/disk-usage"; do
+             "GET /api/server/disk-usage" "POST /api/server/disk-usage" "GET /api/server/smart"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
@@ -1259,6 +1259,10 @@ expect_body '"busy":' "disk usage says whether a job runs"
 post "disk usage, no password"   400 $DU '{}'
 post "disk usage, wrong password" 403 $DU '{"password":"nope"}'
 expect 415 "disk usage needs json" -b "$JAR" -d '{"password":"x"}' "$B$DU"
+# SMART, through the root action (not installed here: 502).
+expect_either 200 502 "smart"    -b "$JAR" "$B/api/server/smart"
+expect 405 "smart is GET only"   -b "$JAR" -X POST -H "$J" "$B/api/server/smart"
+
 expect 200 "audit after refusals" -b "$JAR" "$B/api/server/audit"
 if grep -q '"action":"disk-usage"' "$TMP/body"; then
     FAILED=$((FAILED + 1)); echo "FAIL: a refused start was recorded"

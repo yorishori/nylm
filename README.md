@@ -279,7 +279,11 @@ modules folder (`/usr/lib/modules/$(uname -r)`) is gone, i.e. a newer
 kernel was installed. Disks: each filesystem on a disk (ext4, btrfs, xfs,
 vfat, ...; each device once), its size and free space; network and pseudo
 filesystems are left out (a network mount that is gone would hang the
-server). Rose from 90 % used, peach from 80 %.
+server). Rose from 90 % used, peach from 80 %. Disk health: each disk's
+SMART data (action `smart`: `smartctl -j -a -n standby` for every disk
+`lsblk` lists, so a disk that is asleep is not woken): pass or fail,
+temperature, hours on, and the signs of wear: reallocated, pending and
+uncorrectable sectors (SATA), % used, spare and media errors (NVMe).
 
 Long work is a job: a root script in `/usr/local/lib/nylm/jobs/` (from
 `deploy/jobs/`) run by its own systemd unit, which a root action starts.
@@ -345,4 +349,5 @@ Configuration is environment variables; `nylm --help` lists them.
 Build needs `gcc`, `make` and the system libraries `sqlite` (3.44+), `cjson`,
 `openssl` (3.2+; libssl only for `nylm-qobuz`), `taglib` (2.0+),
 `libjpeg-turbo` and `libpng`, linked dynamically: `pacman -Syu` brings their
-fixes. `make` builds `nylm` and `nylm-qobuz`.
+fixes. `make` builds `nylm` and `nylm-qobuz`. The server app's root
+actions also use `smartmontools` (`install.sh` installs what they need).

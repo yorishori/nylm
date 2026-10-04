@@ -37,6 +37,7 @@
 #define LOG_MAX    (2 * 1024 * 1024) /* a unit's log as unit-log prints it */
 #define SHOW_MAX   (256 * 1024)      /* systemctl show of the units */
 #define SHOW_TIMEOUT 10              /* seconds */
+#define SMART_MAX  (4 * 1024 * 1024) /* smartctl's reports of every disk */
 
 #define BUSY_MESSAGE \
     "another job is running (disk usage, update or backup); try again when it is done"
@@ -394,4 +395,29 @@ void server_disk_usage(struct request *req, struct response *res)
 void server_disk_usage_start(struct request *req, struct response *res)
 {
     start_job(req, res, "disk-usage", NULL, "nylm-disk-usage.service");
+}
+
+/* ---- disks' health ------------------------------------------------------- */
+
+/* GET /api/server/smart: each disk's SMART health (action smart). -> {disks} */
+void server_smart(struct request *req, struct response *res)
+{
+    (void)req;
+    char *text;
+    if (action_output("smart", NULL, SMART_MAX, &text, NULL) != 0) {
+        json_error(res, 502, "could not read the disks' SMART data; see the server log");
+        return;
+    }
+    cJSON *disks = sysinfo_smart(text);
+    if (disks == NULL) {
+        fprintf(stderr, "server: the action smart printed something unexpected\n");
+        json_error(res, 502, "could not read the disks' SMART data; see the server log");
+        return;
+    }
+    cJSON *out = cJSON_CreateObject();
+    if (out == NULL || !cJSON_AddItemToObject(out, "disks", disks)) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, out);
 }

@@ -3,8 +3,8 @@
 /*
  * Server app (/server/). Sections by URL hash:
  *   #/system   the host (uptime, load, memory, temperatures, whether a
- *              reboot is needed), its disks, what takes the room on them,
- *              and the latest actions
+ *              reboot is needed), its disks, their SMART health, what takes
+ *              the room on them, and the latest actions
  *
  * Reads never ask for anything; every button that changes the machine
  * asks for the password again, and the server records it (latest actions).
@@ -197,7 +197,58 @@ function disksCard(mounts) {
           mounts.map(mountRow)));
 }
 
-const DU_LABELS = { "nylm data": "nylm's data", music: "Music", backups: "Backups",
+/* What predicts a disk's failure: ATA's bad sectors, NVMe's wear. Each
+ * [text, colour] (colour "" if fine). */
+function diskProblems(d) {
+  const out = [];
+  const count = (n, one, many) => [plural(n, one, many), n ? "bad" : ""];
+  if (d.reallocated != null) out.push(count(d.reallocated, "reallocated sector", "reallocated sectors"));
+  if (d.pending != null) out.push(count(d.pending, "pending sector", "pending sectors"));
+  if (d.uncorrectable != null) {
+    out.push(count(d.uncorrectable, "uncorrectable sector", "uncorrectable sectors"));
+  }
+  if (d.percent_used != null) out.push([`${d.percent_used} % worn`, fullness(d.percent_used / 100)]);
+  if (d.spare != null) out.push([`${d.spare} % spare`, d.spare <= 10 ? "bad" : ""]);
+  if (d.media_errors != null) out.push(count(d.media_errors, "media error", "media errors"));
+  if (d.critical_warning) out.push([`critical warning ${d.critical_warning}`, "bad"]);
+  return out;
+}
+
+function smartRow(d) {
+  const health = d.passed === true ? el("span", { class: "ok" }, "passed")
+    : d.passed === false ? el("strong", { class: "bad" }, "FAILING")
+    : el("span", { class: "muted" }, "—");
+  return el("tr", {},
+    el("td", {}, d.device, el("div", { class: "muted small" }, d.model || "")),
+    el("td", { class: "num" }, d.size ? showSize(d.size) : "—"),
+    el("td", {}, health),
+    el("td", { class: `num ${d.temperature != null ? tempClass(d.temperature) : ""}` },
+       d.temperature != null ? `${d.temperature} °C` : "—"),
+    el("td", { class: "num" }, d.hours != null ? showDuration(d.hours * 3600) : "—"),
+    el("td", {}, d.error
+      ? el("span", { class: "muted" }, d.error)
+      : diskProblems(d).map(([text, cls]) => el("div", { class: cls || null }, text))));
+}
+
+/* SMART health of every disk; filled in when smartctl has answered (about
+ * a second per disk), so the rest of the page does not wait for it. */
+function smartCard() {
+  const body = el("p", { class: "muted" }, "Reading the disks…");
+  const card = el("section", { class: "card stack" }, el("h2", {}, "Disk health"), body);
+  api("GET", "/api/server/smart").then((r) => {
+    body.replaceWith(r.disks.length
+      ? table([["Disk"], ["Size", "num"], ["SMART"], ["Temp.", "num"], ["Powered on", "num"],
+               ["Signs of wear"]], r.disks.map(smartRow))
+      : el("p", { class: "empty" }, "No disks found."));
+  }).catch((err) => {
+    if (!(err instanceof ApiError && err.status === 401 && handleError(err))) {
+      body.replaceWith(el("p", { class: "bad" }, err.message));
+    }
+  });
+  return card;
+}
+
+const DU_LABELS ={ "nylm data": "nylm's data", music: "Music", backups: "Backups",
                     docker: "Docker (images, containers, volumes)" };
 
 function usageCard(du) {
@@ -255,6 +306,7 @@ async function systemPage() {
   return shell("system",
     el("div", { class: "columns" }, hostCard(h), temperaturesCard(h.temperatures)),
     disksCard(h.mounts),
+    smartCard(),
     usageCard(du),
     actionsSection(audit.actions));
 }

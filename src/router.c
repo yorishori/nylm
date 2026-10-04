@@ -64,6 +64,7 @@ static const struct route routes[] = {
     { "GET",    "/api/server/log",            server_log,          0 },
     { "GET",    "/api/server/disk-usage",     server_disk_usage,   0 },
     { "POST",   "/api/server/disk-usage",     server_disk_usage_start, 0 },
+    { "GET",    "/api/server/smart",          server_smart,        0 },
 };
 
 int router_find(const struct route *table, size_t n, const char *method, const char *path)

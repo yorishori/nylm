@@ -1,0 +1,23 @@
+#!/bin/sh
+# Prints the SMART data of every disk (lsblk type "disk") as one JSON
+# array of smartctl's JSON reports. A disk that is asleep is not woken
+# (-n standby): its report says so. Takes no arguments.
+set -eu
+if [ "$#" -ne 0 ]; then
+    echo "smart: takes no arguments" >&2
+    exit 2
+fi
+sep=
+printf '['
+/usr/bin/lsblk -dn -o NAME,TYPE | while read -r name type; do
+    [ "$type" = disk ] || continue
+    case $name in
+        '' | *[!a-z0-9]*) echo "smart: unexpected disk name: $name" >&2; continue ;;
+    esac
+    printf '%s' "$sep"
+    # smartctl's exit status is a bit mask of what it found; the report
+    # says the same, so it is not an error here.
+    /usr/bin/smartctl -j -a -n standby "/dev/$name" || true
+    sep=,
+done
+printf ']\n'

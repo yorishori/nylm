@@ -365,6 +365,72 @@ static void test_locked(void)
     CHECK(remove(path) == 0);
 }
 
+static void test_smart(void)
+{
+    cJSON *d = sysinfo_smart(
+        "[{\"smartctl\":{\"exit_status\":0},"
+        "\"device\":{\"name\":\"/dev/sda\",\"type\":\"sat\",\"protocol\":\"ATA\"},"
+        "\"model_name\":\"WDC WD40EFRX\",\"user_capacity\":{\"blocks\":7814037168,"
+        "\"bytes\":4000787030016},\"smart_status\":{\"passed\":true},"
+        "\"temperature\":{\"current\":34},\"power_on_time\":{\"hours\":23456},"
+        "\"ata_smart_attributes\":{\"table\":["
+        "{\"id\":5,\"name\":\"Reallocated_Sector_Ct\",\"raw\":{\"value\":8,\"string\":\"8\"}},"
+        "{\"id\":197,\"name\":\"Current_Pending_Sector\",\"raw\":{\"value\":0}},"
+        "{\"id\":198,\"name\":\"Offline_Uncorrectable\",\"raw\":{\"value\":1}}]}},"
+        "{\"smartctl\":{\"exit_status\":0},"
+        "\"device\":{\"name\":\"/dev/nvme0\",\"protocol\":\"NVMe\"},"
+        "\"model_name\":\"Samsung SSD 980\",\"user_capacity\":{\"bytes\":1000204886016},"
+        "\"smart_status\":{\"passed\":false},\"temperature\":{\"current\":41},"
+        "\"power_on_time\":{\"hours\":900},\"nvme_smart_health_information_log\":"
+        "{\"critical_warning\":0,\"available_spare\":100,\"percentage_used\":3,"
+        "\"media_errors\":0}},"
+        "{\"smartctl\":{\"exit_status\":2,\"messages\":[{\"string\":\"Device is in STANDBY "
+        "mode, exit(2)\",\"severity\":\"information\"},{\"string\":\"Device is in STANDBY "
+        "mode\",\"severity\":\"error\"}]},\"device\":{\"name\":\"/dev/sdb\"}}]");
+    CHECK(cJSON_GetArraySize(d) == 3);
+    cJSON *a = cJSON_GetArrayItem(d, 0), *n = cJSON_GetArrayItem(d, 1),
+          *s = cJSON_GetArrayItem(d, 2);
+    CHECK_STR(str(a, "device"), "/dev/sda");
+    CHECK_STR(str(a, "model"), "WDC WD40EFRX");
+    CHECK_STR(str(a, "protocol"), "ATA");
+    CHECK(num(a, "size") == 4000787030016.0);
+    CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(a, "passed")));
+    CHECK(num(a, "temperature") == 34);
+    CHECK(num(a, "hours") == 23456);
+    CHECK(num(a, "reallocated") == 8);
+    CHECK(num(a, "pending") == 0);
+    CHECK(num(a, "uncorrectable") == 1);
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(a, "percent_used")));
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(a, "error")));
+
+    CHECK(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(n, "passed")));
+    CHECK(num(n, "percent_used") == 3);
+    CHECK(num(n, "spare") == 100);
+    CHECK(num(n, "media_errors") == 0);
+    CHECK(num(n, "critical_warning") == 0);
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(n, "reallocated")));
+
+    CHECK_STR(str(s, "device"), "/dev/sdb");
+    CHECK_STR(str(s, "error"), "Device is in STANDBY mode");
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(s, "passed")));
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(s, "model")));
+
+    d = sysinfo_smart("[]\n");
+    CHECK(d != NULL && cJSON_GetArraySize(d) == 0);
+    CHECK(sysinfo_smart("") == NULL);
+    CHECK(sysinfo_smart("{}") == NULL);
+    CHECK(sysinfo_smart("[1]") == NULL);
+    CHECK(sysinfo_smart("[{\"device\":") == NULL);
+
+    /* At most SYSINFO_MAX_DISKS. */
+    char many[40 * 3 + 3];
+    size_t used = (size_t)snprintf(many, sizeof many, "[{}");
+    for (int i = 1; i < 40; i++)
+        used += (size_t)snprintf(many + used, sizeof many - used, ",{}");
+    snprintf(many + used, sizeof many - used, "]");
+    CHECK(cJSON_GetArraySize(sysinfo_smart(many)) == SYSINFO_MAX_DISKS);
+}
+
 int main(void)
 {
     if (arena_init(4 * 1024 * 1024) != 0 || mkdtemp(tmp) == NULL)
@@ -381,6 +447,7 @@ int main(void)
     test_units();
     test_du();
     test_locked();
+    test_smart();
     static const char *const made[] = {
         "hwmon0/name", "hwmon0/temp1_input", "hwmon0/temp1_label", "hwmon0/temp3_input",
         "hwmon0/temp4_input", "hwmon1/temp1_input", "four", "empty", "hwmon0", "hwmon1",

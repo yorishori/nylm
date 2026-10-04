@@ -593,3 +593,120 @@ int sysinfo_locked(const char *path)
     close(fd); /* also drops our shared lock */
     return locked;
 }
+
+/* ---- disks --------------------------------------------------------------- */
+
+/* obj's item at a path of keys (NULL-terminated), or NULL. */
+static const cJSON *dig(const cJSON *obj, const char *const *keys)
+{
+    for (; *keys != NULL && obj != NULL; keys++)
+        obj = cJSON_GetObjectItemCaseSensitive(obj, *keys);
+    return obj;
+}
+
+/* Adds key: the number at keys in report (null if absent). 0 or -1. */
+static int copy_number(cJSON *out, const char *key, const cJSON *report,
+                       const char *const *keys)
+{
+    const cJSON *v = dig(report, keys);
+    return (cJSON_IsNumber(v) ? cJSON_AddNumberToObject(out, key, v->valuedouble)
+                              : cJSON_AddNullToObject(out, key)) != NULL ? 0 : -1;
+}
+
+/* Adds key: the raw value of ATA attribute id (null if the disk has none). */
+static int ata_attribute(cJSON *out, const char *key, const cJSON *report, int id)
+{
+    static const char *const table_keys[] = { "ata_smart_attributes", "table", NULL };
+    static const char *const raw_keys[] = { "raw", "value", NULL };
+    const cJSON *row;
+    cJSON_ArrayForEach(row, dig(report, table_keys)) {
+        const cJSON *rid = cJSON_GetObjectItemCaseSensitive(row, "id");
+        if (cJSON_IsNumber(rid) && rid->valueint == id)
+            return copy_number(out, key, row, raw_keys);
+    }
+    return cJSON_AddNullToObject(out, key) != NULL ? 0 : -1;
+}
+
+/* Adds key: the string at keys in report (null if absent). 0 or -1. */
+static int copy_string(cJSON *out, const char *key, const cJSON *report,
+                       const char *const *keys)
+{
+    const cJSON *v = dig(report, keys);
+    return (cJSON_IsString(v) ? cJSON_AddStringToObject(out, key, v->valuestring)
+                              : cJSON_AddNullToObject(out, key)) != NULL ? 0 : -1;
+}
+
+/* One smartctl report -> what the page shows; NULL if out of memory. */
+static cJSON *smart_disk(const cJSON *report)
+{
+    static const char *const device[] = { "device", "name", NULL };
+    static const char *const model[] = { "model_name", NULL };
+    static const char *const protocol[] = { "device", "protocol", NULL };
+    static const char *const size[] = { "user_capacity", "bytes", NULL };
+    static const char *const temp[] = { "temperature", "current", NULL };
+    static const char *const hours[] = { "power_on_time", "hours", NULL };
+    static const char *const used[] = { "nvme_smart_health_information_log",
+                                        "percentage_used", NULL };
+    static const char *const spare[] = { "nvme_smart_health_information_log",
+                                         "available_spare", NULL };
+    static const char *const media[] = { "nvme_smart_health_information_log",
+                                         "media_errors", NULL };
+    static const char *const warning[] = { "nvme_smart_health_information_log",
+                                           "critical_warning", NULL };
+    static const char *const passed_keys[] = { "smart_status", "passed", NULL };
+    static const char *const messages[] = { "smartctl", "messages", NULL };
+
+    cJSON *out = cJSON_CreateObject();
+    if (out == NULL || copy_string(out, "device", report, device) != 0 ||
+        copy_string(out, "model", report, model) != 0 ||
+        copy_string(out, "protocol", report, protocol) != 0 ||
+        copy_number(out, "size", report, size) != 0)
+        return NULL;
+    const cJSON *passed = dig(report, passed_keys);
+    if ((cJSON_IsBool(passed) ? cJSON_AddBoolToObject(out, "passed", cJSON_IsTrue(passed))
+                              : cJSON_AddNullToObject(out, "passed")) == NULL ||
+        copy_number(out, "temperature", report, temp) != 0 ||
+        copy_number(out, "hours", report, hours) != 0 ||
+        ata_attribute(out, "reallocated", report, 5) != 0 ||
+        ata_attribute(out, "pending", report, 197) != 0 ||
+        ata_attribute(out, "uncorrectable", report, 198) != 0 ||
+        copy_number(out, "percent_used", report, used) != 0 ||
+        copy_number(out, "spare", report, spare) != 0 ||
+        copy_number(out, "media_errors", report, media) != 0 ||
+        copy_number(out, "critical_warning", report, warning) != 0)
+        return NULL;
+    /* smartctl's first error message, e.g. a disk asleep or without SMART. */
+    const char *error = NULL;
+    const cJSON *m;
+    cJSON_ArrayForEach(m, dig(report, messages)) {
+        const cJSON *sev = cJSON_GetObjectItemCaseSensitive(m, "severity");
+        const cJSON *s = cJSON_GetObjectItemCaseSensitive(m, "string");
+        if (error == NULL && cJSON_IsString(s) && cJSON_IsString(sev) &&
+            strcmp(sev->valuestring, "error") == 0)
+            error = s->valuestring;
+    }
+    if ((error != NULL ? cJSON_AddStringToObject(out, "error", error)
+                       : cJSON_AddNullToObject(out, "error")) == NULL)
+        return NULL;
+    return out;
+}
+
+cJSON *sysinfo_smart(const char *text)
+{
+    cJSON *reports = cJSON_Parse(text);
+    cJSON *list = cJSON_CreateArray();
+    if (!cJSON_IsArray(reports) || list == NULL)
+        return NULL;
+    const cJSON *report;
+    int count = 0;
+    cJSON_ArrayForEach(report, reports) {
+        if (!cJSON_IsObject(report))
+            return NULL;
+        if (count++ == SYSINFO_MAX_DISKS)
+            break;
+        cJSON *disk = smart_disk(report);
+        if (disk == NULL || !cJSON_AddItemToArray(list, disk))
+            return NULL;
+    }
+    return list;
+}
