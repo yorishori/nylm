@@ -1324,9 +1324,9 @@ void music_cover(struct request *req, struct response *res)
 }
 
 /*
- * POST /api/music/discard {track} | {album} | {removed: true}: deletes the
- * pending changes of a track, of every track of the album of track album,
- * or of the tracks a scan removed. -> 200 {discarded}
+ * POST /api/music/discard {track} | {album} | {removed: true} | {all: true}:
+ * deletes the pending changes of a track, of every track of the album of
+ * track album, of the tracks a scan removed, or all. -> 200 {discarded}
  */
 void music_discard(struct request *req, struct response *res)
 {
@@ -1335,28 +1335,29 @@ void music_discard(struct request *req, struct response *res)
         "DELETE FROM changes WHERE state = 'pending' AND track_id IN"
         " (SELECT t.id FROM tracks t WHERE" SAME_ALBUM ")",
         "DELETE FROM changes WHERE state = 'pending' AND track_id IS NULL",
+        "DELETE FROM changes WHERE state = 'pending'",
     };
-    static const char *const keys[] = { "track", "album", "removed" };
+    static const char *const keys[] = { "track", "album", "removed", "all" };
     cJSON *body = json_body(req, res);
     if (body == NULL)
         return;
     int which = -1, given = 0;
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         if (cJSON_GetObjectItemCaseSensitive(body, keys[i]) != NULL) {
             which = i;
             given++;
         }
     }
     if (given != 1) {
-        json_error(res, 400, "give exactly one of 'track', 'album' or 'removed'");
+        json_error(res, 400, "give exactly one of 'track', 'album', 'removed' or 'all'");
         return;
     }
     long long id = 0;
-    int removed = 0;
+    int yes = 0;
     const char *err = which < 2 ? get_id(body, keys[which], &id)
-                                : json_get_bool(body, "removed", &removed);
-    if (err == NULL && which == 2 && !removed)
-        err = "'removed' must be true";
+                                : json_get_bool(body, keys[which], &yes);
+    if (err == NULL && which >= 2 && !yes)
+        err = which == 2 ? "'removed' must be true" : "'all' must be true";
     if (err != NULL) {
         json_error(res, 400, err);
         return;
@@ -1368,7 +1369,7 @@ void music_discard(struct request *req, struct response *res)
         return;
     sqlite3_stmt *st = db_prepare(music_db, sql[which]);
     int rc = -1;
-    if (st != NULL && (which == 2 || sqlite3_bind_int64(st, 1, id) == SQLITE_OK))
+    if (st != NULL && (which >= 2 || sqlite3_bind_int64(st, 1, id) == SQLITE_OK))
         rc = run_once(st); /* finalizes st */
     else
         sqlite3_finalize(st);

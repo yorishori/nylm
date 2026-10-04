@@ -696,7 +696,7 @@ D=/api/music/discard
 post "isrc back as in the files" 200 $Q "{\"album\":$T1,\"set\":{\"isrc\":\"\"}}"
 expect_body '"queued":0,"dropped":3' "back to the files' value drops the changes"
 post "discard no key"          400 $D '{}'
-expect_body "give exactly one of 'track', 'album' or 'removed'" "discard message"
+expect_body "give exactly one of 'track', 'album', 'removed' or 'all'" "discard message"
 post "discard two keys"        400 $D "{\"track\":$T1,\"album\":$T1}"
 post "discard bad track"       400 $D '{"track":"x"}'
 post "discard track 0"         400 $D '{"track":0}'
@@ -707,6 +707,9 @@ post "discard removed false"   400 $D '{"removed":false}'
 post "discard removed number"  400 $D '{"removed":1}'
 post "discard removed"         200 $D '{"removed":true}'
 expect_body '{"discarded":0}' "no removed tracks"
+post "discard all false"       400 $D '{"all":false}'
+expect_body "'all' must be true" "all message"
+post "discard all and a track" 400 $D "{\"all\":true,\"track\":$T1}"
 expect 415 "discard needs json" -b "$JAR" -d "{\"track\":$T1}" "$B$D"
 
 # Starting the services: the password, then nothing may be running. (The
@@ -911,7 +914,9 @@ N=$(sqlite3 "$MDB" "SELECT count(*) FROM tracks WHERE album = 'Some Album'")
 { printf '\377\330\377'; head -c 716797 /dev/zero; } > "$TMP/max.jpg"
 cover_json "$TMP/max.jpg"
 expect 200 "cover of 700 KiB"  -b "$JAR" -H "$J" --data-binary "@$TMP/cover.json" "$B$C"
-post "discard it"              200 $D "{\"album\":$TA}"
+post "discard all"             200 $D '{"all":true}'
+query "0" "nothing pending after discarding all" \
+    "SELECT count(*) FROM changes WHERE state = 'pending'"
 printf '\0' >> "$TMP/max.jpg"
 cover_json "$TMP/max.jpg"
 expect 413 "cover too big"     -b "$JAR" -H "$J" --data-binary "@$TMP/cover.json" "$B$C"

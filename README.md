@@ -161,8 +161,8 @@ saving numbers the whole album again (Y per disc for track numbers; a
 missing X gets the lowest free number). Every edit is queued at once as
 one batch (`changes` table), and colours what will change. Changes: the
 pending changes by album, then track (those of tracks a scan removed in
-one group), a search over every field, Discard for an album or a track,
-and Write. Files: the naming rule, the tracks
+one group), a search over every field, Discard for an album, a track or
+all, and Write. Files: the naming rule, the tracks
 that move (from, to) and those that can not (why), Move files, and what
 the moves did (`GET /api/music/moves`). Qobuz: connect, download albums,
 and what came of each download. Info: library

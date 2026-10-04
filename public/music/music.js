@@ -1323,10 +1323,11 @@ async function changesPage() {
            `${plural(ch.count, "change", "changes")} to ${plural(tracks, "track", "tracks")} ` +
            `in ${plural(albums.size, "group", "groups")}` +
            (ch.pending.length < ch.count ? ` (the first ${ch.pending.length} are listed)` : "") + "."),
-    ch.count === 0 || o.busy || !o.available ? null
+    ch.count === 0 || o.busy ? null
       : el("div", { class: "actions" },
-          el("button", { class: "btn go", type: "button", onclick: () => write.open() },
-             "Write changes…")),
+          o.available ? el("button", { class: "btn go", type: "button",
+                                       onclick: () => write.open() }, "Write changes…") : null,
+          discardButton({ all: true }, "all", ch.count, false)),
     write);
   watchBusy(o, panel, text);
   if (!ch.pending.length) return shell("changes", o, panel);
