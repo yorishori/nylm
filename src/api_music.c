@@ -790,8 +790,9 @@ void music_charts(struct request *req, struct response *res)
     "  WHERE v.track_id = t.id AND v.field = c.field) END"
 
 /*
- * GET /api/music/changes: the pending changes (at most 5000, by batch; now
- * is the file's value), how many there are, and the latest written ones
+ * GET /api/music/changes: the pending changes (at most 5000, by album (the
+ * files' album and album artist), track and change; now is the file's
+ * value), how many there are, and the latest written ones
  * (done, warning, failed) with their notes. track and path are null when
  * a scan removed the track. Genre and composer values are JSON arrays.
  */
@@ -803,16 +804,17 @@ void music_changes(struct request *req, struct response *res)
     cJSON *history = obj != NULL ? cJSON_AddArrayToObject(obj, "history") : NULL;
     long long count = single_number("SELECT count(*) FROM changes WHERE state = 'pending'", 0);
     sqlite3_stmt *a = pending == NULL ? NULL : db_prepare(music_db,
-        "SELECT c.id, c.batch, c.track_id AS track, t.path, t.title, c.field, c.value, "
-        NOW_VALUE " AS now FROM changes c LEFT JOIN tracks t ON t.id = c.track_id"
-        " WHERE c.state = 'pending' ORDER BY c.batch, t.path, c.id");
+        "SELECT c.id, c.track_id AS track, t.path, t.album, t.albumartist, t.title, c.field,"
+        " c.value, " NOW_VALUE " AS now FROM changes c LEFT JOIN tracks t ON t.id = c.track_id"
+        " WHERE c.state = 'pending' ORDER BY t.id IS NULL, t.albumartist COLLATE NOCASE,"
+        " t.album COLLATE NOCASE, t.albumartist, t.album, t.path, c.id");
     sqlite3_stmt *b = history == NULL ? NULL : db_prepare(music_db,
         "SELECT c.id, c.batch, c.track_id AS track, t.path, c.field, c.value, c.started,"
         " c.finished, c.state, c.note FROM changes c LEFT JOIN tracks t ON t.id = c.track_id"
         " WHERE c.done = 1 ORDER BY c.finished DESC, c.id DESC LIMIT 300");
     int ok = a != NULL && b != NULL && count >= 0 &&
              cJSON_AddNumberToObject(obj, "count", (double)count) != NULL &&
-             add_rows(pending, a, 8, MAX_LIST) == 0 && add_rows(history, b, 10, MAX_HISTORY) == 0;
+             add_rows(pending, a, 9, MAX_LIST) == 0 && add_rows(history, b, 10, MAX_HISTORY) == 0;
     sqlite3_finalize(a);
     sqlite3_finalize(b);
     if (!ok) {
@@ -1319,26 +1321,52 @@ void music_cover(struct request *req, struct response *res)
     json_reply(res, 200, out);
 }
 
-/* POST /api/music/discard {batch}: deletes the batch's pending changes.
- * -> 200 {discarded} */
+/*
+ * POST /api/music/discard {track} | {album} | {removed: true}: deletes the
+ * pending changes of a track, of every track of the album of track album,
+ * or of the tracks a scan removed. -> 200 {discarded}
+ */
 void music_discard(struct request *req, struct response *res)
 {
+    static const char *const sql[] = {
+        "DELETE FROM changes WHERE state = 'pending' AND track_id = ?1",
+        "DELETE FROM changes WHERE state = 'pending' AND track_id IN"
+        " (SELECT t.id FROM tracks t WHERE" SAME_ALBUM ")",
+        "DELETE FROM changes WHERE state = 'pending' AND track_id IS NULL",
+    };
+    static const char *const keys[] = { "track", "album", "removed" };
     cJSON *body = json_body(req, res);
-    long long batch;
     if (body == NULL)
         return;
-    const char *err = get_id(body, "batch", &batch);
+    int which = -1, given = 0;
+    for (int i = 0; i < 3; i++) {
+        if (cJSON_GetObjectItemCaseSensitive(body, keys[i]) != NULL) {
+            which = i;
+            given++;
+        }
+    }
+    if (given != 1) {
+        json_error(res, 400, "give exactly one of 'track', 'album' or 'removed'");
+        return;
+    }
+    long long id = 0;
+    int removed = 0;
+    const char *err = which < 2 ? get_id(body, keys[which], &id)
+                                : json_get_bool(body, "removed", &removed);
+    if (err == NULL && which == 2 && !removed)
+        err = "'removed' must be true";
     if (err != NULL) {
         json_error(res, 400, err);
         return;
     }
+    if (which < 2 && track_exists(res, id) != 1)
+        return;
     int lock = lock_for_write(res);
     if (lock < 0)
         return;
-    sqlite3_stmt *st = db_prepare(music_db,
-        "DELETE FROM changes WHERE state = 'pending' AND batch = ?");
+    sqlite3_stmt *st = db_prepare(music_db, sql[which]);
     int rc = -1;
-    if (st != NULL && sqlite3_bind_int64(st, 1, batch) == SQLITE_OK)
+    if (st != NULL && (which == 2 || sqlite3_bind_int64(st, 1, id) == SQLITE_OK))
         rc = run_once(st); /* finalizes st */
     else
         sqlite3_finalize(st);

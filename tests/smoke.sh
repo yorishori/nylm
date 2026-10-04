@@ -595,21 +595,27 @@ expect_body "'bpm' of one track is changed twice" "edit twice message"
 post "queue edit missing track" 404 $Q '{"edits":[{"track":999,"field":"bpm","value":"1"}]}'
 post "queue edit sort tag"     400 $Q "{\"edits\":[{\"track\":$T1,\"field\":\"albumsort\",\"value\":\"x\"}]}"
 
-# The pending changes, and discarding a batch.
+# The pending changes by album and track, and discarding them.
 expect 200 "changes"           -b "$JAR" "$B/api/music/changes"
-expect_body "\"track\":$T1,\"path\":\"$M/Artist/Album/01.mp3\",\"title\":\"Song One\",\"field\":\"date\",\"value\":\"1999\",\"now\":\"2001\"" "pending change with the file's value"
+expect_body "\"track\":$T1,\"path\":\"$M/Artist/Album/01.mp3\",\"album\":\"Some Album\",\"albumartist\":\"Some Artist\",\"title\":\"Song One\",\"field\":\"date\",\"value\":\"1999\",\"now\":\"2001\"" "pending change with its album and the file's value"
 expect_body '"field":"genre","value":"[\"rock\",\"pop\"]","now":"[\"Rock\"]"' "list values as JSON"
 expect_body '"history":[],"count":17' "count and empty history"
 D=/api/music/discard
-ISRC_BATCH=$(sqlite3 "$MDB" "SELECT DISTINCT batch FROM changes WHERE field = 'isrc'")
-post "discard a batch"         200 $D "{\"batch\":$ISRC_BATCH}"
-expect_body '{"discarded":3}' "discard counts"
-post "discard again"           200 $D "{\"batch\":$ISRC_BATCH}"
-expect_body '{"discarded":0}' "nothing left to discard"
-post "discard no batch"        400 $D '{}'
-post "discard bad batch"       400 $D '{"batch":"x"}'
-post "discard batch 0"         400 $D '{"batch":0}'
-expect 415 "discard needs json" -b "$JAR" -d '{"batch":1}' "$B$D"
+post "isrc back as in the files" 200 $Q "{\"album\":$T1,\"set\":{\"isrc\":\"\"}}"
+expect_body '"queued":0,"dropped":3' "back to the files' value drops the changes"
+post "discard no key"          400 $D '{}'
+expect_body "give exactly one of 'track', 'album' or 'removed'" "discard message"
+post "discard two keys"        400 $D "{\"track\":$T1,\"album\":$T1}"
+post "discard bad track"       400 $D '{"track":"x"}'
+post "discard track 0"         400 $D '{"track":0}'
+post "discard missing track"   404 $D '{"track":999}'
+post "discard bad album"       400 $D '{"album":-1}'
+post "discard missing album"   404 $D '{"album":999}'
+post "discard removed false"   400 $D '{"removed":false}'
+post "discard removed number"  400 $D '{"removed":1}'
+post "discard removed"         200 $D '{"removed":true}'
+expect_body '{"discarded":0}' "no removed tracks"
+expect 415 "discard needs json" -b "$JAR" -d "{\"track\":$T1}" "$B$D"
 
 # Starting the services: the password, then nothing may be running. (The
 # right password with something to do runs the root action through sudo,
@@ -634,7 +640,7 @@ expect 200 "overview while busy" -b "$JAR" "$B/api/music"
 expect_body '"busy":"' "overview shows the library busy"
 post "queue while busy"        409 $Q "{\"album\":$T1,\"set\":{\"date\":\"2000\"}}"
 expect_body "the library is busy" "busy message"
-post "discard while busy"      409 $D '{"batch":1}'
+post "discard while busy"      409 $D "{\"track\":$T1}"
 post "scan while busy"         409 $S "{$PW}"
 post "write while busy"        409 $W "{$PW}"
 service 1 "music-write while busy" music-write
@@ -797,13 +803,20 @@ COVER=d5f6219958dc70a334eed2ab216ad29f487608ffabd2af5d9a0578fd0e1a4fcd
 cover_json() {
     printf '{"album":%s,"image":"%s"}' "$TA" "$(base64 -w0 "$1")" > "$TMP/cover.json"
 }
-BPM_BATCH=$(sqlite3 "$MDB" "SELECT DISTINCT batch FROM changes WHERE state = 'pending'")
-post "discard before covers"   200 $D "{\"batch\":$BPM_BATCH}"
+post "queue to discard"         200 $Q "{\"album\":$TA,\"set\":{\"mood\":\"gone\"}}"
+post "discard a track"         200 $D "{\"track\":$TA}"
+expect_body '{"discarded":1}' "discard counts"
+query "0|1" "the track has no pending changes, the others keep theirs" \
+    "SELECT sum(track_id = $TA), count(*) > 1 FROM changes WHERE state = 'pending'"
+post "discard the track again" 200 $D "{\"track\":$TA}"
+expect_body '{"discarded":0}' "nothing left to discard"
+post "discard before covers"   200 $D "{\"album\":$TA}"
+query "0" "the album has no pending changes" "SELECT count(*) FROM changes WHERE state = 'pending'"
 N=$(sqlite3 "$MDB" "SELECT count(*) FROM tracks WHERE album = 'Some Album'")
 { printf '\377\330\377'; head -c 716797 /dev/zero; } > "$TMP/max.jpg"
 cover_json "$TMP/max.jpg"
 expect 200 "cover of 700 KiB"  -b "$JAR" -H "$J" --data-binary "@$TMP/cover.json" "$B$C"
-post "discard it"              200 $D "{\"batch\":$(sqlite3 "$MDB" "SELECT max(batch) FROM changes")}"
+post "discard it"              200 $D "{\"album\":$TA}"
 printf '\0' >> "$TMP/max.jpg"
 cover_json "$TMP/max.jpg"
 expect 413 "cover too big"     -b "$JAR" -H "$J" --data-binary "@$TMP/cover.json" "$B$C"
@@ -865,7 +878,7 @@ if [ -f "$ART/$COVER.thumb" ]; then PASSED=$((PASSED + 1)); else
     FAILED=$((FAILED + 1)); echo "FAIL: no thumbnail of the cover"; fi
 expect 200 "same cover, now in the files" -b "$JAR" -H "$J" --data-binary "@$TMP/cover.json" "$B$C"
 expect_body '"queued":3,"dropped":0' "only the tracks without it are queued"
-post "discard that"            200 $D "{\"batch\":$(sqlite3 "$MDB" "SELECT max(batch) FROM changes")}"
+post "discard that"            200 $D "{\"album\":$TA}"
 
 # A cover that does not decode is not written; the files stay as they were.
 head -c 400 tests/data/cover.jpg > "$TMP/damaged.jpg"

@@ -5,7 +5,8 @@
  *   #/albums       every album (tracks sharing ALBUM and ALBUMARTIST) in an
  *                  editable table with filters, and the library scan
  *   #/album/ID     the tracks of the album of track ID, every tag editable
- *   #/changes      the queued changes by batch: discard them, write them
+ *   #/changes      the queued changes by album and track: search them,
+ *                  discard them, write them
  *   #/info         library counts, genres and years charts, the rules,
  *                  the written changes
  *
@@ -1216,54 +1217,96 @@ function searchButtons(artist, name) {
 
 /* ---- changes ------------------------------------------------------------- */
 
-/* One pending change as a table row: track, tag, now, new. A cover shows
- * as pictures: the track's now, the new one. */
+/* One pending change as a table row: tag, now, new. A cover shows as
+ * pictures: the track's now, the new one. */
 function pendingRow(c) {
   const cover = c.field === COVER_FIELD;
   const now = cover ? JSON.parse(c.now || "[]") : fromStored(c.field, c.now);
   const next = cover ? c.value : fromStored(c.field, c.value);
   return el("tr", {},
-    el("td", {}, c.title ?? relative(c.path),
-       c.title ? el("div", { class: "path muted small" }, relative(c.path)) : null),
     el("td", {}, fieldLabel(c.field)),
     el("td", { class: cover ? "" : "old" }, cover ? thumbList(now, "Picture now") : showValue(c.field, now)),
     el("td", { class: "edited-text" },
        cover ? thumbList([next], "New cover") : next === "" ? "(removed)" : showValue(c.field, next)));
 }
 
-/* The pending changes of one batch, with Discard. */
-function batchCard(batch, changes) {
-  const discard = el("button", { class: "btn danger", type: "button", onclick: async () => {
-    if (!sure(`Discard the ${plural(changes.length, "change", "changes")} of batch ${batch}?`)) return;
-    discard.disabled = true;
+/* The text the pending search looks in: album, artist, track, file, tag,
+ * now and new. */
+function pendingText(c) {
+  const show = (v) => (c.field === COVER_FIELD ? "" : showValue(c.field, fromStored(c.field, v)));
+  return [c.album, c.albumartist, c.title, relative(c.path), fieldLabel(c.field), show(c.now),
+          show(c.value)].filter(Boolean).join("\n").toLowerCase();
+}
+
+/* A button that discards body's pending changes (what names them). */
+function discardButton(body, what, total, disabled) {
+  const button = el("button", { class: "btn danger", type: "button", disabled,
+                                onclick: async () => {
+    if (!sure(`Discard ${what}: ${plural(total, "change", "changes")}?`)) return;
+    button.disabled = true;
     try {
-      const r = await api("POST", "/api/music/discard", { batch });
+      const r = await api("POST", "/api/music/discard", body);
       setStatus(`Discarded ${plural(r.discarded, "change", "changes")}`);
       refresh();
     } catch (err) {
       handleError(err);
-      discard.disabled = false;
+      button.disabled = false;
     }
-  } }, "Discard");
+  } }, `Discard ${what}`);
+  return button;
+}
+
+/* One album's pending changes (shown: those the search finds), track by
+ * track, each with Discard; the whole album's with Discard album. The
+ * changes of tracks no longer in the library are one group. */
+function albumChanges(changes, shown, readOnly) {
+  const first = changes[0];
+  const removed = first.track == null;
+  const tracks = new Map();
+  for (const c of shown) {
+    if (!tracks.has(c.track)) tracks.set(c.track, []);
+    tracks.get(c.track).push(c);
+  }
+  const perTrack = new Map();
+  for (const c of changes) perTrack.set(c.track, (perTrack.get(c.track) || 0) + 1);
   return el("section", { class: "card stack" },
     el("header", { class: "batch-head" },
-      el("h3", {}, `Batch ${batch} `, el("span", { class: "count" }, changes.length)),
-      discard),
-    el("div", { class: "grid-wrap" },
-      el("table", { class: "grid" },
-        el("thead", {}, el("tr", {},
-          el("th", { scope: "col" }, "Track"), el("th", { scope: "col" }, "Tag"),
-          el("th", { scope: "col" }, "Now"), el("th", { scope: "col" }, "New"))),
-        el("tbody", {}, changes.map(pendingRow)))));
+      removed
+        ? el("h3", {}, "No longer in the library ", el("span", { class: "count" }, changes.length))
+        : el("div", {},
+            el("h3", {}, first.album ?? "No album name", " ",
+               el("span", { class: "count" }, changes.length)),
+            el("p", { class: "muted" }, first.albumartist ?? "No album artist")),
+      discardButton(removed ? { removed: true } : { album: first.track },
+                    removed ? "these" : "album", changes.length, readOnly)),
+    removed ? el("p", { class: "muted small" },
+                 "A scan removed these tracks; writing marks their changes failed.") : null,
+    [...tracks].map(([track, list]) => el("div", { class: "track-changes stack" },
+      removed ? null : el("header", { class: "batch-head" },
+        el("div", {},
+          el("strong", {}, list[0].title ?? relative(list[0].path)),
+          el("div", { class: "path muted small" }, relative(list[0].path))),
+        discardButton({ track }, "track", perTrack.get(track), readOnly)),
+      el("div", { class: "grid-wrap" },
+        el("table", { class: "grid" },
+          el("thead", {}, el("tr", {},
+            el("th", { scope: "col" }, "Tag"), el("th", { scope: "col" }, "Now"),
+            el("th", { scope: "col" }, "New"))),
+          el("tbody", {}, list.map(pendingRow)))))));
 }
+
+/* The pending search; kept while the page is drawn again. */
+let pendingSearch = "";
 
 async function changesPage() {
   const [o, ch] = await Promise.all([api("GET", "/api/music"), api("GET", "/api/music/changes")]);
   musicRoot = o.root || "";
-  const batches = new Map();
+  /* By album: the server sends them in album order, removed tracks last. */
+  const albums = new Map();
   for (const c of ch.pending) {
-    if (!batches.has(c.batch)) batches.set(c.batch, []);
-    batches.get(c.batch).push(c);
+    const key = c.track == null ? "removed" : JSON.stringify([c.album, c.albumartist]);
+    if (!albums.has(key)) albums.set(key, []);
+    albums.get(key).push(c);
   }
   const tracks = new Set(ch.pending.map((c) => c.track)).size;
   const write = serviceForm("/api/music/write", {},
@@ -1281,7 +1324,8 @@ async function changesPage() {
     ch.count === 0
       ? el("p", { class: "muted" }, "Nothing is queued. Edit albums to queue changes.")
       : el("p", { class: "muted" },
-           `${plural(ch.count, "change", "changes")} to ${plural(tracks, "track", "tracks")}` +
+           `${plural(ch.count, "change", "changes")} to ${plural(tracks, "track", "tracks")} ` +
+           `in ${plural(albums.size, "group", "groups")}` +
            (ch.pending.length < ch.count ? ` (the first ${ch.pending.length} are listed)` : "") + "."),
     ch.count === 0 || o.busy || !o.available ? null
       : el("div", { class: "actions" },
@@ -1289,8 +1333,32 @@ async function changesPage() {
              "Write changes…")),
     write);
   watchBusy(o, panel, text);
-  return shell("changes", o, panel,
-    [...batches].map(([batch, changes]) => batchCard(batch, changes)));
+  if (!ch.pending.length) return shell("changes", o, panel);
+
+  const texts = new Map(ch.pending.map((c) => [c, pendingText(c)]));
+  const list = el("div", { class: "stack" });
+  const found = el("p", { class: "muted", "aria-live": "polite" });
+  const show = () => {
+    const q = pendingSearch.trim().toLowerCase();
+    const cards = [];
+    let n = 0;
+    for (const changes of albums.values()) {
+      const shown = q ? changes.filter((c) => texts.get(c).includes(q)) : changes;
+      n += shown.length;
+      if (shown.length) cards.push(albumChanges(changes, shown, Boolean(o.busy)));
+    }
+    list.replaceChildren(...cards);
+    found.textContent = q ? `${plural(n, "change", "changes")} found.` : "";
+    if (q && !n) list.append(el("p", { class: "empty" }, "No pending change matches."));
+  };
+  const search = el("input", { type: "search", value: pendingSearch, "aria-label": "Search the changes",
+                               placeholder: "Search the changes" });
+  search.addEventListener("input", () => {
+    pendingSearch = search.value;
+    show();
+  });
+  show();
+  return shell("changes", o, panel, el("div", { class: "filters stack" }, search, found), list);
 }
 
 /* ---- info ---------------------------------------------------------------- */
