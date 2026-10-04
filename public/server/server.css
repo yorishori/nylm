@@ -1,0 +1,41 @@
+/* Server app. Shared look and parts: /style.css.
+ *
+ * Colour says how things are, as everywhere: rose = wrong or nearly full
+ * (failed, stopped, >= 90 %), peach = needs attention (>= 80 %, a reboot
+ * is needed, starting), mint = running or fine. */
+
+/* A title and what goes with it on one line, wrapping when narrow. */
+.line { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline;
+        gap: 0.3rem 0.75rem; }
+
+.ok { color: var(--mint); }
+.bad { color: var(--rose); }
+
+/* How full something is: a pressed track with a filled part. */
+.meter {
+  height: 0.55rem;
+  min-width: 5rem;
+  border-radius: 999px;
+  box-shadow: var(--pressed);
+  overflow: hidden;
+}
+.meter > span { display: block; height: 100%; border-radius: 999px; background: var(--mint); }
+.meter.warn > span { background: var(--peach); }
+.meter.bad > span { background: var(--rose); }
+
+.facts { display: grid; grid-template-columns: max-content 1fr; gap: 0.4rem 1rem; margin: 0; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.facts .meter { margin-top: 0.35rem; max-width: 20rem; }
+
+.grid td.col-meter { min-width: 6rem; }
+
+.columns { display: grid; gap: var(--gap); align-content: start; }
+@media (min-width: 56rem) {
+  .columns { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 21rem) {
+  .facts { grid-template-columns: 1fr; gap: 0.15rem; }
+  .facts dd { margin-bottom: 0.4rem; }
+}

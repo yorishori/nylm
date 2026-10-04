@@ -9,11 +9,6 @@
  * tracks' pictures differ, "none" in rose where there is no picture.
  * Rose and peach keep their meaning in the history: failed and warning. */
 
-.path { overflow-wrap: anywhere; }
-.warn { color: var(--peach); }
-.small { font-size: 0.8rem; }
-.nowrap { white-space: nowrap; }
-
 .album-head { gap: 0.3rem; }
 .album-head > h2 { font-size: 1.5rem; }
 
@@ -69,33 +64,6 @@
 
 /* ---- tables -------------------------------------------------------------- */
 
-/* Wide tables scroll sideways inside the page, never the page itself. */
-.grid-wrap {
-  overflow-x: auto;
-  border-radius: 14px;
-  border: 1px solid var(--edge);
-  background: var(--panel);
-}
-.grid {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 0.9rem;
-}
-.grid th, .grid td {
-  padding: 0.3rem 0.4rem;
-  text-align: left;
-  vertical-align: middle;
-  border-bottom: 1px solid var(--edge);
-}
-.grid thead th {
-  position: sticky;
-  top: 0;
-  background: var(--panel);
-  color: var(--muted);
-  font-weight: 400;
-  white-space: nowrap;
-}
-.grid .num { text-align: right; white-space: nowrap; }
 .grid .col-album, .grid .col-title { min-width: 12rem; }
 .grid .col-albumartist, .grid .col-artist, .grid .col-genre, .grid .col-composer,
 .grid .col-copyright, .grid .col-label { min-width: 10rem; }

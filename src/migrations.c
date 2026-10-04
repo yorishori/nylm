@@ -324,3 +324,18 @@ const char *const music_migrations[] = {
 };
 
 const int music_migration_count = sizeof music_migrations / sizeof music_migrations[0];
+
+const char *const server_migrations[] = {
+    /* 1: every root job, restart and reboot started from the web app (the
+     * password was given again): who, what, when, and how it went. */
+    "CREATE TABLE audit ("
+    "    id     INTEGER PRIMARY KEY,"
+    "    at     INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "    client TEXT    NOT NULL," /* IP address */
+    "    action TEXT    NOT NULL,"
+    "    detail TEXT    NOT NULL," /* what it acted on, "" if nothing */
+    "    result TEXT    NOT NULL"
+    ") STRICT;",
+};
+
+const int server_migration_count = sizeof server_migrations / sizeof server_migrations[0];

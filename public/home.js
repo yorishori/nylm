@@ -31,9 +31,21 @@ async function musicSummary() {
   ];
 }
 
+/* Pills for the server: what needs attention, else how long it is up. */
+async function serverSummary() {
+  const h = await api("GET", "/api/server");
+  const full = h.mounts.filter((m) => m.size && m.used / m.size >= 0.9);
+  const pills = [
+    h.reboot_needed ? el("span", { class: "pill today" }, "Reboot needed") : null,
+    ...full.map((m) => el("span", { class: "pill late" }, `${m.path} nearly full`)),
+  ].filter(Boolean);
+  return pills.length ? pills : [el("span", { class: "pill" }, `Up ${showDuration(h.uptime)}`)];
+}
+
 const APPS = [
   { name: "Plants", href: "/plants/", summary: plantsSummary },
   { name: "Music", href: "/music/", summary: musicSummary },
+  { name: "Server", href: "/server/", summary: serverSummary },
 ];
 
 async function homePage() {

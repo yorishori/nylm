@@ -27,6 +27,11 @@ extern const char *const music_migrations[];
 extern const int music_migration_count;
 extern sqlite3 *music_db;
 
+/* server: the server app's audit log and what it keeps between pages. */
+extern const char *const server_migrations[];
+extern const int server_migration_count;
+extern sqlite3 *server_db;
+
 /*
  * Opens every app's database under data_dir, which must already exist (it
  * lives on the data drive: missing means not mounted). Creates missing app

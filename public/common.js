@@ -578,6 +578,71 @@ function colorPicker(selected) {
   return node;
 }
 
+/* ---- server jobs ------------------------------------------------------ */
+
+/* How often a page checks back on something running on the server. */
+const POLL_MS = 3000;
+
+/* "3.2 MB" */
+function showSize(bytes) {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let v = bytes;
+  let i = 0;
+  while (v >= 1000 && i < units.length - 1) {
+    v /= 1000;
+    i++;
+  }
+  return `${i ? v.toFixed(1) : v} ${units[i]}`;
+}
+
+/* "3 d 4 h", "4 h 12 min", "12 min" */
+function showDuration(seconds) {
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  if (d) return `${d} d ${h} h`;
+  if (h) return `${h} h ${m} min`;
+  return `${m} min`;
+}
+
+/* A unix time as "Sat 3 Oct 14:05". */
+function showTime(ts) {
+  if (!ts) return "—";
+  const d = new Date(ts * 1000);
+  return `${showDate(isoDate(d.getFullYear(), d.getMonth() + 1, d.getDate()))} ` +
+         `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+/*
+ * A hidden password form that starts something on the server (POST path
+ * with extra and the password), then shows the page again; node.open()
+ * shows it. intro says what it starts, started goes to the status line.
+ */
+function passwordForm(path, extra, intro, submitLabel, started) {
+  const password = el("input", { type: "password", name: "password", required: true,
+                                 autocomplete: "current-password" });
+  const node = form({ class: "raised", hidden: true }, async () => {
+    try {
+      await api("POST", path, { ...extra, password: password.value });
+    } finally {
+      password.value = "";
+    }
+    setStatus(started);
+    refresh();
+  },
+    el("p", {}, intro),
+    field("Password", password, "Starting it needs your password again."),
+    el("div", { class: "actions" },
+      el("button", { class: "btn go", type: "submit" }, submitLabel),
+      el("button", { class: "btn", type: "button", onclick: () => { node.hidden = true; } },
+         "Cancel")));
+  node.open = () => {
+    node.hidden = false;
+    password.focus();
+  };
+  return node;
+}
+
 /* ---- pages and session ------------------------------------------------- */
 
 /* The page's router: (parts of the hash) -> Promise of the page, or null if

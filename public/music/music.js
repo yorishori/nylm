@@ -60,7 +60,6 @@ const MAX_BYTES = 500;
 const MAX_VALUES = 64;
 const MAX_SUGGESTIONS = 50;
 const SHOW_STEP = 200; /* albums shown at a time */
-const POLL_MS = 3000;
 const POPUP_ROOM = 320; /* pixels an editing popup may grow to */
 const GENRE_SLICES = 12;  /* genres in the donut; the rest are "other" */
 const YEAR_BAR = 6;       /* pixels per year in the years chart */
@@ -139,26 +138,6 @@ function fromStored(field, s) {
 
 function sameValue(a, b) {
   return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
-}
-
-/* "3.2 MB" */
-function showSize(bytes) {
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let v = bytes;
-  let i = 0;
-  while (v >= 1000 && i < units.length - 1) {
-    v /= 1000;
-    i++;
-  }
-  return `${i ? v.toFixed(1) : v} ${units[i]}`;
-}
-
-/* A unix time as "Sat 3 Oct 14:05". */
-function showTime(ts) {
-  if (!ts) return "—";
-  const d = new Date(ts * 1000);
-  return `${showDate(isoDate(d.getFullYear(), d.getMonth() + 1, d.getDate()))} ` +
-         `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
 /* A tag's name, or "Cover" for a new cover. */
@@ -308,33 +287,6 @@ function watchBusy(o, node, text) {
   setTimeout(poll, POLL_MS);
 }
 
-/* A password form that starts a service (POST path with extra), then shows
- * the page again. */
-function serviceForm(path, extra, intro, submitLabel, started) {
-  const password = el("input", { type: "password", name: "password", required: true,
-                                 autocomplete: "current-password" });
-  const node = form({ class: "raised", hidden: true }, async () => {
-    try {
-      await api("POST", path, { ...extra, password: password.value });
-    } finally {
-      password.value = "";
-    }
-    setStatus(started);
-    refresh();
-  },
-    el("p", {}, intro),
-    field("Password", password, "Starting it needs your password again."),
-    el("div", { class: "actions" },
-      el("button", { class: "btn go", type: "submit" }, submitLabel),
-      el("button", { class: "btn", type: "button", onclick: () => { node.hidden = true; } },
-         "Cancel")));
-  node.open = () => {
-    node.hidden = false;
-    password.focus();
-  };
-  return node;
-}
-
 const SCAN_STATE = {
   done: "done",
   incomplete: "incomplete: something could not be read, so nothing was removed (see the server log)",
@@ -357,7 +309,7 @@ function othersText(s) {
 /* The folder, the last scan and the scan button. */
 function scanCard(o) {
   const text = el("p", {}, o.busy ? busyText(o) : scanSummary(o.scan));
-  const scan = serviceForm("/api/music/scan", {},
+  const scan = passwordForm("/api/music/scan", {},
     "The scan reads new and changed files into nylm. It changes no file.",
     "Start scan", "Scan started");
   const card = el("section", { class: "card stack" },
@@ -1167,7 +1119,7 @@ async function albumPage(id) {
        String(plannedPictures(t).length)),
     el("td", { class: "muted nowrap" }, showTime(t.scanned))));
 
-  const refreshForm = serviceForm("/api/music/scan", { track: id },
+  const refreshForm = passwordForm("/api/music/scan", { track: id },
     `Reads the ${plural(tracks.length, "file", "files")} of this album again. It changes no file.`,
     "Read again", "Scan started");
   return shell("albums", o,
@@ -1308,7 +1260,7 @@ async function changesPage() {
     albums.get(key).push(c);
   }
   const tracks = new Set(ch.pending.map((c) => c.track)).size;
-  const write = serviceForm("/api/music/write", {},
+  const write = passwordForm("/api/music/write", {},
     `Writes ${plural(ch.count, "change", "changes")} into the files, track by track. Each ` +
     "file is checked first (it must still be as scanned, and every tag valid), then written " +
     "and read back; each result is listed in Info.",
@@ -1401,7 +1353,7 @@ function moveItem(m) {
 async function filesPage() {
   const [o, mv] = await Promise.all([api("GET", "/api/music"), api("GET", "/api/music/moves")]);
   musicRoot = o.root || "";
-  const start = serviceForm("/api/music/move", {},
+  const start = passwordForm("/api/music/move", {},
     `Moves ${plural(mv.count, "file", "files")} to where their tags put them. A file is ` +
     "never moved over another; each move is listed below.",
     "Move files", "Moving started");

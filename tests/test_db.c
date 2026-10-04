@@ -192,12 +192,13 @@ int main(void)
         "core/core.db", "core/core.db-wal", "core/core.db-shm",
         "plants/plants.db", "plants/plants.db-wal", "plants/plants.db-shm",
         "music/music.db", "music/music.db-wal", "music/music.db-shm",
+        "server/server.db", "server/server.db-wal", "server/server.db-shm",
     };
     for (size_t i = 0; i < sizeof files / sizeof files[0]; i++) {
         snprintf(path, sizeof path, "%s/%s", dir, files[i]);
         unlink(path); /* the -wal/-shm files may already be gone */
     }
-    static const char *const dirs[] = { "core", "plants", "music", "" };
+    static const char *const dirs[] = { "core", "plants", "music", "server", "" };
     for (size_t i = 0; i < sizeof dirs / sizeof dirs[0]; i++) {
         snprintf(path, sizeof path, "%s/%s", dir, dirs[i]);
         CHECK(rmdir(path) == 0);

@@ -40,7 +40,9 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 | `src/tags.c`      | music file tags through TagLib: read, write, verify      |
 | `src/art.c`       | album art files, named by SHA-256; base64                |
 | `src/image.c`     | thumbnails (libjpeg-turbo, libpng), only in the services |
-| `src/action.c`    | runs root actions through `sudo -n`                      |
+| `src/action.c`    | runs root actions through `sudo -n`, and their output    |
+| `src/audit.c`     | dangerous actions: the password again, the audit log     |
+| `src/sysinfo.c`   | the server app's parsers of /proc, /sys, actions' output |
 | `src/auth.c`      | password hashing (Argon2id), sessions                    |
 | `src/db.c`        | SQLite connection, applies migrations                    |
 | `src/migrations.c`| the schema, one appended entry per change                |
@@ -65,6 +67,7 @@ $NYLM_DATA/plants/photos/     journal photos: each once, and its thumbnail
 $NYLM_DATA/music/music.db     music tags cache, changes, scans, audit log
 $NYLM_DATA/music/art/         album art: each picture once, and its thumbnail
 $NYLM_DATA/music/*.lock       the library's lock and the Qobuz service's
+$NYLM_DATA/server/server.db   server app: audit log
 ```
 
 nylm refuses to start if the folder does not exist. In an empty folder it
@@ -260,6 +263,23 @@ It holds `$NYLM_DATA/music/qobuz.lock`, not the library's, while it
 downloads, so the library can be edited meanwhile. The signing scheme is
 Qobuz's own and may change; then the service says that no secret signs
 downloads.
+
+## Server
+
+Maintenance of the machine nylm runs on (`src/api_server.c`, API under
+`/api/server`). Reads never ask for anything; everything that changes the
+machine asks for the password again and is recorded in the `audit` table
+of `server.db` (shown as the latest actions). Status that needs no root
+comes from `/proc`, `/sys` and `statvfs()` (parsed by `src/sysinfo.c`);
+what needs root goes through a root action.
+
+System: host name, kernel, uptime, load, memory and swap, temperatures
+(`/sys/class/hwmon`), and "reboot needed" when the running kernel's
+modules folder (`/usr/lib/modules/$(uname -r)`) is gone, i.e. a newer
+kernel was installed. Disks: each filesystem on a disk (ext4, btrfs, xfs,
+vfat, ...; each device once), its size and free space; network and pseudo
+filesystems are left out (a network mount that is gone would hang the
+server). Rose from 90 % used, peach from 80 %.
 
 ## Commands
 

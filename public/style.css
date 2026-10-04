@@ -325,6 +325,41 @@ legend { padding: 0; }
   box-shadow: var(--raised-small);
 }
 
+/* ---- tables ------------------------------------------------------------- */
+
+/* Wide tables scroll sideways inside the page, never the page itself. */
+.grid-wrap {
+  overflow-x: auto;
+  border-radius: 14px;
+  border: 1px solid var(--edge);
+  background: var(--panel);
+}
+.grid {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+}
+.grid th, .grid td {
+  padding: 0.3rem 0.4rem;
+  text-align: left;
+  vertical-align: middle;
+  border-bottom: 1px solid var(--edge);
+}
+.grid thead th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  color: var(--muted);
+  font-weight: 400;
+  white-space: nowrap;
+}
+.grid .num { text-align: right; white-space: nowrap; }
+
+.path { overflow-wrap: anywhere; }
+.warn { color: var(--peach); }
+.small { font-size: 0.8rem; }
+.nowrap { white-space: nowrap; }
+
 /* ---- layout -------------------------------------------------------------- */
 
 /* A name and its buttons on one line, wrapping when narrow. */

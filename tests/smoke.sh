@@ -110,7 +110,7 @@ else PASSED=$((PASSED + 1)); fi
 mkdir "$TMP/data"
 echo 'smoke test password' | "$BIN" set-password 2>/dev/null ||
     { echo "set-password failed"; exit 1; }
-for f in core/core.db plants/plants.db music/music.db; do
+for f in core/core.db plants/plants.db music/music.db server/server.db; do
     if [ -f "$TMP/data/$f" ]; then PASSED=$((PASSED + 1)); else
         FAILED=$((FAILED + 1)); echo "FAIL: $f not created"; fi
 done
@@ -1200,7 +1200,31 @@ if env NYLM_MUSIC= "$QBIN" >"$TMP/service.log" 2>&1; then
 else PASSED=$((PASSED + 1)); fi
 logged "NYLM_MUSIC is not set" "nylm-qobuz says why"
 
-expect 204 "logout"             -b "$JAR" -c "$JAR" -X POST "$B/api/logout"
+# ---- server ------------------------------------------------------------------
+
+# Every route of the server app needs a login.
+for route in "GET /api/server" "GET /api/server/audit"; do
+    expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
+done
+
+# The host, read from /proc, /sys and statvfs (this machine's).
+expect 200 "server host"         -b "$JAR" "$B/api/server"
+for key in '"hostname":"' '"kernel":"' '"uptime":' '"load":[' '"cpus":' '"memory":{"total":' \
+           '"temperatures":[' '"reboot_needed":false' '"mounts":[{"path":"' '"used":'; do
+    expect_body "$key" "server host has $key"
+done
+expect 200 "server audit, empty" -b "$JAR" "$B/api/server/audit"
+expect_body '{"actions":[]}' "no actions yet"
+sqlite3 "$TMP/data/server/server.db" \
+    "INSERT INTO audit (client, action, detail, result) VALUES ('127.0.0.1', 'reboot', '', 'ok: started')"
+expect 200 "server audit"        -b "$JAR" "$B/api/server/audit"
+expect_body '"client":"127.0.0.1","action":"reboot","detail":"","result":"ok: started"}]}' "an action"
+expect 405 "server is GET only"  -b "$JAR" -X POST -H "$J" "$B/api/server"
+
+expect 200 "server page"         "$B/server/"
+expect 200 "server script"       "$B/server/server.js"
+
+expect 204 "logout"            -b "$JAR" -c "$JAR" -X POST "$B/api/logout"
 expect 401 "after logout"       -b "$JAR" "$B/api/session"
 
 stop

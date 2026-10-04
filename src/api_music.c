@@ -26,7 +26,7 @@
 #include "api.h"
 #include "arena.h"
 #include "art.h"
-#include "auth.h"
+#include "audit.h"
 #include "db.h"
 #include "dupes.h"
 #include "json.h"
@@ -40,9 +40,6 @@
 #define MAX_EDITS    2000  /* track changes in one request */
 #define MAX_LIST     5000  /* rows in a list of values or pending changes */
 #define MAX_HISTORY  300   /* written changes listed */
-
-/* Every failed password check costs the caller this long, as for login. */
-#define PASSWORD_FAILURE_DELAY_SECONDS 1
 
 #define BUSY_MESSAGE "the library is busy: a scan or write is running; try again when it is done"
 
@@ -1770,63 +1767,16 @@ void music_discard(struct request *req, struct response *res)
 
 /* ---- starting the services ---------------------------------------------- */
 
-/* Records that an action starts (the caller holds the library lock). Its
- * row id, or -1 (logged): then the action must not happen. */
-static long long audit_begin(const struct request *req, const char *action, const char *detail)
-{
-    sqlite3_stmt *st = db_prepare(music_db, "INSERT INTO audit (client, action, detail, result)"
-                                            " VALUES (?, ?, ?, 'started')");
-    int ok = st != NULL &&
-             sqlite3_bind_text(st, 1, req->client ? req->client : "-", -1, SQLITE_STATIC) ==
-                 SQLITE_OK &&
-             sqlite3_bind_text(st, 2, action, -1, SQLITE_STATIC) == SQLITE_OK &&
-             sqlite3_bind_text(st, 3, detail, -1, SQLITE_STATIC) == SQLITE_OK &&
-             sqlite3_step(st) == SQLITE_DONE;
-    if (!ok)
-        fprintf(stderr, "music: can not write the audit log: %s\n", sqlite3_errmsg(music_db));
-    sqlite3_finalize(st);
-    return ok ? (long long)sqlite3_last_insert_rowid(music_db) : -1;
-}
-
-/* Records an action's result (logged as well when it failed). */
-static void audit_end(long long id, const char *result)
-{
-    sqlite3_stmt *st = db_prepare(music_db, "UPDATE audit SET result = ? WHERE id = ?");
-    int ok = st != NULL && sqlite3_bind_text(st, 1, result, -1, SQLITE_STATIC) == SQLITE_OK &&
-             sqlite3_bind_int64(st, 2, id) == SQLITE_OK && sqlite3_step(st) == SQLITE_DONE;
-    if (!ok)
-        fprintf(stderr, "music: can not record audit result %lld '%s': %s\n", id, result,
-                sqlite3_errmsg(music_db));
-    sqlite3_finalize(st);
-    if (strncmp(result, "ok", 2) != 0)
-        fprintf(stderr, "music: audit %lld: %s\n", id, result);
-}
-
-/* Checks the body's password (replies 400, 403 after a delay, or 500).
- * The body, or NULL after replying. */
+/* Checks the body's password, after the library (replies 400, 503, 403
+ * after a delay, or 500). The body, or NULL after replying. */
 static cJSON *password_checked(struct request *req, struct response *res)
 {
     cJSON *body = json_body(req, res);
-    const char *password;
     if (body == NULL)
         return NULL;
-    if (json_get_string(body, "password", 1, AUTH_MAX_PASSWORD, &password) != NULL) {
-        json_error(res, 400, "'password' is required");
+    if (cJSON_GetObjectItemCaseSensitive(body, "password") != NULL && !library_ready(res))
         return NULL;
-    }
-    if (!library_ready(res))
-        return NULL;
-    int ok = auth_check_password(password);
-    if (ok < 0) {
-        json_error(res, 500, "internal error");
-        return NULL;
-    }
-    if (ok == 0) {
-        sleep(PASSWORD_FAILURE_DELAY_SECONDS);
-        json_error(res, 403, "wrong password");
-        return NULL;
-    }
-    return body;
+    return audit_password_ok(body, res) ? body : NULL;
 }
 
 /*
@@ -1837,7 +1787,7 @@ static cJSON *password_checked(struct request *req, struct response *res)
 static void start_action(struct request *req, struct response *res, int lock, int rc,
                          const char *action, const char *detail)
 {
-    long long audit = rc == 0 ? audit_begin(req, action, detail) : -1;
+    long long audit = rc == 0 ? audit_begin(music_db, req, action, detail) : -1;
     if (audit < 0) {
         if (sqlite3_get_autocommit(music_db) == 0)
             db_exec(music_db, "ROLLBACK");
@@ -1847,7 +1797,7 @@ static void start_action(struct request *req, struct response *res, int lock, in
         return;
     }
     if (sqlite3_get_autocommit(music_db) == 0 && db_exec(music_db, "COMMIT") != 0) {
-        audit_end(audit, "failed: database error");
+        audit_end(music_db, audit, "failed: database error");
         music_unlock(lock);
         json_error(res, 500, "internal error");
         return;
@@ -1855,7 +1805,8 @@ static void start_action(struct request *req, struct response *res, int lock, in
     /* The service waits a moment for this lock, so it starts after we
      * release it. */
     int started = action_run(action, NULL) == 0;
-    audit_end(audit, started ? "ok: started" : "failed: the action did not start the service");
+    audit_end(music_db, audit,
+              started ? "ok: started" : "failed: the action did not start the service");
     music_unlock(lock);
     if (!started) {
         json_error(res, 500, "could not start it; see the server log");
