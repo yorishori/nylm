@@ -57,6 +57,7 @@ const MAX_VALUES = 64;
 const MAX_SUGGESTIONS = 50;
 const SHOW_STEP = 200; /* albums shown at a time */
 const POLL_MS = 3000;
+const POPUP_ROOM = 320; /* pixels an editing popup may grow to */
 const GENRE_SLICES = 12;  /* genres in the donut; the rest are "other" */
 const YEAR_BAR = 6;       /* pixels per year in the years chart */
 const GENRE_RE = /^[a-z0-9-]+$/;
@@ -404,9 +405,18 @@ function floatingPopup(anchor, label, onClose) {
   };
   document.body.append(pop);
   if (!window.matchMedia("(max-width: 21rem)").matches) {
-    /* Positioned with the CSS object model: not an inline style attribute. */
+    /* Positioned with the CSS object model: not an inline style attribute.
+     * Below the anchor, or above it (growing upwards) when it would not fit
+     * below and there is more room above. */
     const r = anchor.getBoundingClientRect();
-    pop.style.top = `${Math.round(r.bottom + 6)}px`;
+    const below = window.innerHeight - r.bottom;
+    /* Its suggestions come later: plan for at least POPUP_ROOM pixels. */
+    const need = Math.max(pop.offsetHeight, POPUP_ROOM);
+    if (r.bottom + 6 + need > window.innerHeight - 8 && r.top > below) {
+      pop.style.bottom = `${Math.round(window.innerHeight - r.top + 6)}px`;
+    } else {
+      pop.style.top = `${Math.round(r.bottom + 6)}px`;
+    }
     pop.style.left = `${Math.round(Math.max(8, Math.min(r.left,
                                                         window.innerWidth - 8 - pop.offsetWidth)))}px`;
   }

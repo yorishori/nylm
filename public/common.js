@@ -242,10 +242,16 @@ let openPopover = null; /* { owner, close(refocus) } */
 function popoverOpened(owner, pop, close) {
   if (openPopover && openPopover.owner !== owner) openPopover.close(false);
   openPopover = { owner, close };
-  /* Keep it on screen: open towards the left if it would overflow. */
-  pop.classList.remove("align-right");
-  if (pop.getBoundingClientRect && pop.getBoundingClientRect().right > window.innerWidth - 8) {
-    pop.classList.add("align-right");
+  /* Keep it on screen: open towards the left if it would overflow the
+   * right edge, and upwards if it would overflow the bottom and there is
+   * more room above the control. (A floating popup places itself.) */
+  pop.classList.remove("align-right", "open-up");
+  if (!pop.getBoundingClientRect || pop.classList.contains("floating")) return;
+  const r = pop.getBoundingClientRect();
+  if (r.right > window.innerWidth - 8) pop.classList.add("align-right");
+  const at = owner.getBoundingClientRect();
+  if (r.bottom > window.innerHeight - 8 && at.top > window.innerHeight - at.bottom) {
+    pop.classList.add("open-up");
   }
 }
 

@@ -379,6 +379,7 @@ legend { padding: 0; }
   box-shadow: 8px 8px 20px var(--shade);
 }
 .popover.align-right { left: auto; right: 0; }
+.popover.open-up { top: auto; bottom: calc(100% + 0.5rem); }
 
 .listbox {
   list-style: none;
@@ -460,7 +461,7 @@ legend { padding: 0; }
   .bar .btn { padding: 0.4rem 0.8rem; }
   .section { margin-top: 1.5rem; }
   /* Dropdowns and calendars open as a sheet along the bottom edge. */
-  .popover, .popover.align-right {
+  .popover, .popover.align-right, .popover.open-up {
     position: fixed;
     top: auto;
     left: 0.5rem;
