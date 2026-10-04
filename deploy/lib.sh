@@ -56,12 +56,22 @@ valid_path() {
     [ "${#1}" -le 1024 ]
 }
 
+# full_unit NAME: the unit's full name as systemd reads it, ".service"
+# added when it has no unit type.
+full_unit() {
+    case $1 in
+        ?*.service | ?*.socket | ?*.device | ?*.mount | ?*.automount | ?*.swap | ?*.target | \
+            ?*.path | ?*.timer | ?*.slice | ?*.scope) printf '%s\n' "$1" ;;
+        *) printf '%s.service\n' "$1" ;;
+    esac
+}
+
 # unit_shown UNIT: nylm shows this unit's log (nylm's own, NYLM_UNITS, the
-# backup job of an entry).
+# backup job of an entry); UNIT is a full name.
 unit_shown() {
     valid_unit "$1" || return 1
     for u in $NYLM_OWN_UNITS $NYLM_UNITS; do
-        [ "$u" = "$1" ] && return 0
+        [ "$(full_unit "$u")" = "$1" ] && return 0
     done
     for e in $NYLM_BACKUP; do
         [ "nylm-backup@${e%%=*}.service" = "$1" ] && return 0

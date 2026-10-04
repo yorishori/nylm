@@ -65,6 +65,7 @@ static const struct route routes[] = {
     { "GET",    "/api/server/disk-usage",     server_disk_usage,   0 },
     { "POST",   "/api/server/disk-usage",     server_disk_usage_start, 0 },
     { "GET",    "/api/server/smart",          server_smart,        0 },
+    { "GET",    "/api/server/units",          server_units,        0 },
     { "GET",    "/api/server/containers",     server_containers,   0 },
     { "GET",    "/api/server/containers/log", server_container_log, 0 },
     { "POST",   "/api/server/containers/restart", server_container_restart, 0 },

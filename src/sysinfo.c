@@ -346,6 +346,24 @@ static int listed(const cJSON *list, const char *name)
     return 0;
 }
 
+char *sysinfo_unit_full(const char *name)
+{
+    static const char *const types[] = {
+        ".service", ".socket", ".device", ".mount", ".automount", ".swap",
+        ".target",  ".path",   ".timer",  ".slice", ".scope",
+    };
+    size_t len = strlen(name);
+    for (size_t i = 0; i < sizeof types / sizeof types[0]; i++) {
+        size_t t = strlen(types[i]);
+        if (len > t && strcmp(name + len - t, types[i]) == 0)
+            return arena_strndup(name, len);
+    }
+    char *full = arena_alloc(len + sizeof ".service");
+    if (full != NULL)
+        snprintf(full, len + sizeof ".service", "%s.service", name);
+    return full;
+}
+
 cJSON *sysinfo_unit_list(const char *s, const char **why)
 {
     char *w[SYSINFO_MAX_UNITS];
@@ -358,15 +376,16 @@ cJSON *sysinfo_unit_list(const char *s, const char **why)
         return NULL;
     }
     for (int i = 0; i < n; i++) {
-        if (!sysinfo_unit_valid(w[i])) {
+        char *name = sysinfo_unit_full(w[i]);
+        if (name == NULL || !sysinfo_unit_valid(name)) {
             *why = "NYLM_UNITS: a unit name may only have A-Z a-z 0-9 @ . _ : - (at most 128)";
             return NULL;
         }
-        if (listed(list, w[i])) {
+        if (listed(list, name)) {
             *why = "NYLM_UNITS: a unit is listed twice";
             return NULL;
         }
-        cJSON *v = cJSON_CreateString(w[i]);
+        cJSON *v = cJSON_CreateString(name);
         if (v == NULL || !cJSON_AddItemToArray(list, v))
             return NULL;
     }
@@ -477,6 +496,7 @@ static int unit_property(cJSON *unit, const char *key, const char *value)
         { "Id", "unit", 's' },          { "Description", "description", 's' },
         { "LoadState", "load", 's' },   { "ActiveState", "active", 's' },
         { "SubState", "sub", 's' },     { "Result", "result", 's' },
+        { "Type", "type", 's' },
         { "ExecMainStatus", "status", 'i' },
         { "ExecMainStartTimestamp", "started", 't' },
         { "ExecMainExitTimestamp", "ended", 't' },

@@ -240,7 +240,23 @@ static void test_config(void)
     const char *why = NULL;
     cJSON *u = sysinfo_unit_list(" docker  wg-quick@wg0\tsshd.service\n", &why);
     CHECK(cJSON_GetArraySize(u) == 3);
-    CHECK_STR(cJSON_GetArrayItem(u, 1)->valuestring, "wg-quick@wg0");
+    CHECK_STR(cJSON_GetArrayItem(u, 0)->valuestring, "docker.service");
+    CHECK_STR(cJSON_GetArrayItem(u, 1)->valuestring, "wg-quick@wg0.service");
+    CHECK_STR(cJSON_GetArrayItem(u, 2)->valuestring, "sshd.service");
+    CHECK(sysinfo_unit_list("docker docker.service", &why) == NULL); /* the same unit */
+    CHECK_STR(sysinfo_unit_full("docker"), "docker.service");
+    CHECK_STR(sysinfo_unit_full("docker.socket"), "docker.socket");
+    CHECK_STR(sysinfo_unit_full("backup.timer"), "backup.timer");
+    CHECK_STR(sysinfo_unit_full("mnt-data.mount"), "mnt-data.mount");
+    CHECK_STR(sysinfo_unit_full("a.b"), "a.b.service");
+    CHECK_STR(sysinfo_unit_full(".service"), ".service.service");
+    /* A name that is too long once ".service" is added. */
+    char long_name[130];
+    memset(long_name, 'u', sizeof long_name);
+    long_name[121] = '\0';
+    CHECK(sysinfo_unit_list(long_name, &why) == NULL);
+    long_name[120] = '\0';
+    CHECK(sysinfo_unit_list(long_name, &why) != NULL);
     u = sysinfo_unit_list(NULL, &why);
     CHECK(u != NULL && cJSON_GetArraySize(u) == 0);
     u = sysinfo_unit_list("", &why);
@@ -303,7 +319,7 @@ static void test_units(void)
 {
     cJSON *u = sysinfo_units(
         "Id=docker.service\nDescription=Docker Application Container Engine\n"
-        "LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\n"
+        "LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\nType=notify\n"
         "ExecMainStatus=0\nExecMainStartTimestamp=@1700000000\nExecMainExitTimestamp=\n"
         "ActiveEnterTimestamp=@1700000001\nSomethingElse=x=y\n"
         "\n"
@@ -314,6 +330,7 @@ static void test_units(void)
     CHECK_STR(str(a, "unit"), "docker.service");
     CHECK_STR(str(a, "active"), "active");
     CHECK_STR(str(a, "sub"), "running");
+    CHECK_STR(str(a, "type"), "notify");
     CHECK(num(a, "status") == 0);
     CHECK(num(a, "started") == 1700000000);
     CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(a, "ended")));

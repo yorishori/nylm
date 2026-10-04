@@ -296,6 +296,11 @@ the backup jobs). The actions and jobs read `/etc/nylm.conf` through
 its values by the same rules as nylm; nylm refuses to start when a value
 is invalid.
 
+Services: the units in `NYLM_UNITS`, then nylm's own: state, since when
+or how the last run ended (rose: failed, or a service that is stopped),
+and Log (the unit's last run). A name without a unit type is a service,
+as systemd reads it (`docker` is `docker.service`).
+
 Disk usage (`nylm-disk-usage.service`): Measure (password) sizes nylm's
 data, the music, the backups, `/var/lib/docker` and each backup entry
 with `du -sxb`, one line each in the journal, which the page reads back.

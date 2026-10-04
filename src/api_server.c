@@ -117,7 +117,7 @@ static cJSON *units_state(const char *const *units, size_t n)
     char systemctl[] = "/usr/bin/systemctl", show[] = "show", ts[] = "--timestamp=unix",
          p[] = "-p", props[] = "Id,Description,LoadState,ActiveState,SubState,Result,"
                                "ExecMainStatus,ExecMainStartTimestamp,ExecMainExitTimestamp,"
-                               "ActiveEnterTimestamp",
+                               "ActiveEnterTimestamp,Type",
          dashes[] = "--";
     size_t argc = 0;
     if (n > sizeof argv / sizeof argv[0] - 8)
@@ -396,6 +396,29 @@ void server_disk_usage(struct request *req, struct response *res)
 void server_disk_usage_start(struct request *req, struct response *res)
 {
     start_job(req, res, "disk-usage", NULL, "nylm-disk-usage.service");
+}
+
+/* ---- services ------------------------------------------------------------ */
+
+/* GET /api/server/units: the units in NYLM_UNITS, then nylm's own. */
+void server_units(struct request *req, struct response *res)
+{
+    (void)req;
+    const char *names[SYSINFO_MAX_UNITS + NNYLM_UNITS];
+    size_t n = 0;
+    const cJSON *item;
+    cJSON *watched = watched_units();
+    cJSON_ArrayForEach(item, watched)
+        names[n++] = item->valuestring;
+    for (size_t i = 0; i < NNYLM_UNITS; i++)
+        names[n++] = nylm_units[i];
+    cJSON *list = watched != NULL ? units_state(names, n) : NULL;
+    cJSON *out = list != NULL ? cJSON_CreateObject() : NULL;
+    if (out == NULL || !cJSON_AddItemToObject(out, "units", list)) {
+        json_error(res, 500, "can not read the services' state; see the server log");
+        return;
+    }
+    json_reply(res, 200, out);
 }
 
 /* ---- containers ---------------------------------------------------------- */

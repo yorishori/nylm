@@ -3,8 +3,9 @@
 /*
  * Server app (/server/). Sections by URL hash:
  *   #/system   the host (uptime, load, memory, temperatures, whether a
- *              reboot is needed), its disks, their SMART health, what takes
- *              the room on them, and the latest actions
+ *              reboot is needed), the services (systemd units), its disks,
+ *              their SMART health, what takes the room on them, and the
+ *              latest actions
  *   #/containers every Docker container: state, health, ports, use; restart
  *              it, read its log
  *
@@ -289,6 +290,43 @@ function usageCard(du) {
   return card;
 }
 
+/* A unit's state in a few words, and its colour. */
+function unitState(u) {
+  if (u.load === "not-found") return ["not installed", "bad"];
+  if (u.active === "active") {
+    return [u.sub === "exited" ? "done" : u.sub, "ok", u.since ? `since ${showTime(u.since)}` : ""];
+  }
+  if (u.active === "failed") return [`failed (${u.result})`, "bad", u.ended ? showTime(u.ended) : ""];
+  if (running(u)) return [u.active, "warn", u.started ? `since ${showTime(u.started)}` : ""];
+  /* inactive: a job that ran and ended (or has not run), or a service that
+   * is stopped: that is wrong for a service someone watches. */
+  const when = u.ended ? showTime(u.ended) : "";
+  if (u.started && u.result !== "success") return [`stopped (${u.result})`, "bad", when];
+  if (u.type === "oneshot") return [u.started ? "done" : "not run", "muted", when];
+  return ["stopped", "bad", when];
+}
+
+function unitRow(u) {
+  const [text, cls, when] = unitState(u);
+  const log = unitLog(u.unit);
+  return [
+    el("tr", {},
+      el("td", {}, u.unit, u.description && u.description !== u.unit
+        ? el("div", { class: "muted small" }, u.description) : null),
+      el("td", {}, el("strong", { class: cls }, text), when ? el("div", { class: "muted small" }, when) : null),
+      el("td", {}, u.load === "not-found" ? null : log.button)),
+    el("tr", { class: "log-row" }, el("td", { colspan: 3 }, log.panel)),
+  ];
+}
+
+/* Services: NYLM_UNITS, then nylm's own units. */
+function servicesCard(units) {
+  return el("section", { class: "card stack" },
+    el("h2", {}, "Services"),
+    table([["Unit"], ["State"], [""]], units.flatMap(unitRow)),
+    el("p", { class: "muted small" }, "More units: NYLM_UNITS in /etc/nylm.conf."));
+}
+
 function actionItem(a) {
   const failed = !a.result.startsWith("ok") && a.result !== "started";
   return el("li", { class: "card stack" },
@@ -308,11 +346,13 @@ function actionsSection(actions) {
 }
 
 async function systemPage() {
-  const [h, du, audit] = await Promise.all([api("GET", "/api/server"),
-                                             api("GET", "/api/server/disk-usage"),
-                                             api("GET", "/api/server/audit")]);
+  const [h, units, du, audit] = await Promise.all([api("GET", "/api/server"),
+                                                    api("GET", "/api/server/units"),
+                                                    api("GET", "/api/server/disk-usage"),
+                                                    api("GET", "/api/server/audit")]);
   return shell("system",
     el("div", { class: "columns" }, hostCard(h), temperaturesCard(h.temperatures)),
+    servicesCard(units.units),
     disksCard(h.mounts),
     smartCard(),
     usageCard(du),

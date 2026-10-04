@@ -66,8 +66,13 @@ int sysinfo_entry_valid(const char *s);
  * not "/", without empty, "." or ".." parts and no trailing slash. */
 int sysinfo_path_valid(const char *s);
 
-/* NYLM_UNITS (unit names separated by spaces) -> [names]. NULL (and why)
- * if a name is invalid or repeated, or there are too many. */
+/* The unit's full name as systemd reads it: ".service" added when it has
+ * no unit type ("docker" -> "docker.service"). In the arena; NULL if out
+ * of memory. */
+char *sysinfo_unit_full(const char *name);
+
+/* NYLM_UNITS (unit names separated by spaces) -> [full names]. NULL (and
+ * why) if a name is invalid or repeated, or there are too many. */
 cJSON *sysinfo_unit_list(const char *s, const char **why);
 
 /* NYLM_BACKUP (entries "name=path[,path...]" separated by spaces) ->
@@ -79,7 +84,8 @@ cJSON *sysinfo_backup_entries(const char *s, const char **why);
 
 /*
  * `systemctl show --timestamp=unix -p ...` of one or more units -> [{unit,
- * description, load, active, sub, result, status, started, ended, since}],
+ * description, load, active, sub, result, type, status, started, ended,
+ * since}],
  * timestamps in unix seconds or null.
  */
 cJSON *sysinfo_units(const char *text);

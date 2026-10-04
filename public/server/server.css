@@ -29,6 +29,9 @@
 .facts .meter { margin-top: 0.35rem; max-width: 20rem; }
 
 .grid td.col-meter { min-width: 6rem; }
+/* A row that holds the log of the row above, when it is open. */
+.grid tr.log-row > td { border-bottom: 0; padding: 0; }
+.grid tr.log-row:has(> td > div:not([hidden])) > td { padding: 0.5rem 0.4rem; }
 
 /* A job's or unit's log: scrolls inside its box, keeps its lines. */
 .log {

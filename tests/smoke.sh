@@ -19,7 +19,7 @@ trap cleanup EXIT
 
 export NYLM_DATA="$TMP/data" NYLM_PUBLIC=public NYLM_PORT=$PORT
 # The server app's settings, as /etc/nylm.conf would have them.
-export NYLM_UNITS="docker.service wg-quick@wg0" \
+export NYLM_UNITS="docker wg-quick@wg0" \
        NYLM_BACKUP="davis=/srv/davis immich=/srv/immich,/srv/immich-db"
 
 # expect STATUS DESCRIPTION curl-args...
@@ -1209,7 +1209,7 @@ logged "NYLM_MUSIC is not set" "nylm-qobuz says why"
 for route in "GET /api/server" "GET /api/server/audit" "GET /api/server/log?unit=nylm.service" \
              "GET /api/server/disk-usage" "POST /api/server/disk-usage" "GET /api/server/smart" \
              "GET /api/server/containers" "GET /api/server/containers/log?name=web" \
-             "POST /api/server/containers/restart"; do
+             "POST /api/server/containers/restart" "GET /api/server/units"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
@@ -1248,7 +1248,7 @@ expect 404 "log, other unit"     -b "$JAR" "$L?unit=sshd.service"
 expect_body "NYLM_UNITS" "log says how to show a unit"
 expect 404 "log, unknown entry"  -b "$JAR" "$L?unit=nylm-backup@other.service"
 expect 404 "log, by prefix"      -b "$JAR" "$L?unit=docker"
-for unit in nylm.service docker.service wg-quick@wg0 nylm-backup@immich.service; do
+for unit in nylm.service docker.service wg-quick@wg0.service nylm-backup@immich.service; do
     expect_either 200 502 "log of $unit" -b "$JAR" "$L?unit=$unit"
 done
 
@@ -1261,6 +1261,13 @@ expect_body '"busy":' "disk usage says whether a job runs"
 post "disk usage, no password"   400 $DU '{}'
 post "disk usage, wrong password" 403 $DU '{"password":"nope"}'
 expect 415 "disk usage needs json" -b "$JAR" -d '{"password":"x"}' "$B$DU"
+# Services: NYLM_UNITS, then nylm's own units (systemctl show, no root).
+expect 200 "units"               -b "$JAR" "$B/api/server/units"
+expect_body '{"units":[{"unit":"docker.service",' "units start with NYLM_UNITS"
+expect_body '{"unit":"wg-quick@wg0.service",' "a unit name as systemd completes it"
+expect_body '{"unit":"nylm.service",' "nylm's own units"
+expect_body '"unit":"nylm-disk-usage.service",' "nylm's jobs"
+
 # SMART, through the root action (not installed here: 502).
 expect_either 200 502 "smart"    -b "$JAR" "$B/api/server/smart"
 expect 405 "smart is GET only"   -b "$JAR" -X POST -H "$J" "$B/api/server/smart"
@@ -1331,7 +1338,7 @@ done
 
 # deploy/lib.sh's rules, on a copy that reads a test configuration and lock.
 cat >"$TMP/nylm.conf" <<'EOF'
-NYLM_UNITS="docker.service wg-quick@wg0"
+NYLM_UNITS="docker wg-quick@wg0"
 NYLM_BACKUP="davis=/srv/davis immich=/srv/immich,/srv/immich-db"
 EOF
 mkdir "$TMP/jobs"
@@ -1380,10 +1387,15 @@ lib no "path, glob"         'valid_path "/a*"'
 lib ok "path, 1024"         "valid_path /$(printf '%01023d' 0)"
 lib no "path, 1025"         "valid_path /$(printf '%01024d' 0)"
 lib ok "shown, own"         'unit_shown nylm-disk-usage.service'
-lib ok "shown, NYLM_UNITS"  'unit_shown wg-quick@wg0'
+lib ok "shown, NYLM_UNITS"  'unit_shown wg-quick@wg0.service'
 lib ok "shown, backup job"  'unit_shown nylm-backup@immich.service'
 lib no "shown, other"       'unit_shown sshd.service'
-lib no "shown, by prefix"   'unit_shown docker'
+lib ok "shown, completed"   'unit_shown docker.service'
+lib no "shown, short name"  'unit_shown docker'
+lib no "shown, other type"  'unit_shown docker.socket'
+lib ok "full name"          '[ "$(full_unit wg-quick@wg0)" = wg-quick@wg0.service ]'
+lib ok "full name, typed"   '[ "$(full_unit backup.timer)" = backup.timer ]'
+lib ok "full name, a.b"     '[ "$(full_unit a.b)" = a.b.service ]'
 lib no "shown, other entry" 'unit_shown nylm-backup@other.service'
 lib ok "entry paths"        '[ "$(entry_paths immich)" = "$(printf "/srv/immich\n/srv/immich-db")" ]'
 lib no "entry paths, none"  'entry_paths other'
