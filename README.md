@@ -128,7 +128,8 @@ without being a compilation, tracks without art, art that differs between
 tracks), and a table of
 albums edited in place: the cover, album, album artist, date, composers,
 genres, compilation, for every track at once. The tracks count opens the
-album: its pictures (each once: type, size, on how many tracks, full
+album: buttons that search RateYourMusic, Wikipedia and MusicBrainz for it
+(in a new tab), its pictures (each once: type, size, on how many tracks, full
 size) with Set cover, then every track with every tag, edited in place;
 a value that differs from the rest of the album is ringed rose. Set
 cover reads a picture file in the browser, scales it to at most 1200

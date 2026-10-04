@@ -1180,7 +1180,8 @@ async function albumPage(id) {
     el("header", { class: "section album-head" },
       el("h2", {}, name ?? "No album name"),
       el("p", {}, artist ?? "No album artist"),
-      el("p", { class: "muted" }, plural(tracks.length, "track", "tracks"))),
+      el("p", { class: "muted" }, plural(tracks.length, "track", "tracks")),
+      searchButtons(artist, name)),
     readOnly ? el("p", { class: "warn" }, "A scan or write is running: editing is possible " +
                                           "again when it is done.") : null,
     picturesSection(id, tracks, readOnly),
@@ -1195,6 +1196,22 @@ async function albumPage(id) {
           el("th", { scope: "col" }, "Pictures"),
           el("th", { scope: "col" }, "Scanned"))),
         el("tbody", {}, rows))));
+}
+
+/* Buttons that search other sites for the album, each in a new tab. */
+function searchButtons(artist, name) {
+  const q = [artist, name].filter(Boolean).join(" ");
+  if (!q) return null;
+  const sites = [
+    ["RateYourMusic", "https://rateyourmusic.com/search", { searchterm: q, searchtype: "l" }],
+    ["Wikipedia", "https://en.wikipedia.org/w/index.php", { search: q }],
+    ["MusicBrainz", "https://musicbrainz.org/search", { query: q, type: "release_group" }],
+  ];
+  return el("div", { class: "actions" },
+    sites.map(([label, base, params]) => el("button", {
+      class: "btn", type: "button", "aria-label": `Search ${label} for this album`,
+      onclick: () => window.open(`${base}?${new URLSearchParams(params)}`, "_blank", "noopener"),
+    }, label)));
 }
 
 /* ---- changes ------------------------------------------------------------- */
