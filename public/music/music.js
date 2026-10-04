@@ -7,6 +7,8 @@
  *   #/album/ID     the tracks of the album of track ID, every tag editable
  *   #/changes      the queued changes by album and track: search them,
  *                  discard them, write them
+ *   #/files        where the move service puts each file (its plan, its
+ *                  problems, what it did), and starting it
  *   #/info         library counts, genres and years charts, the rules,
  *                  the written changes
  *
@@ -266,7 +268,8 @@ function changesLabel(pending) {
 
 function shell(active, overview, ...content) {
   musicRoot = overview.root || "";
-  const tabs = [["albums", "Albums"], ["changes", changesLabel(overview.pending)], ["info", "Info"]];
+  const tabs = [["albums", "Albums"], ["changes", changesLabel(overview.pending)],
+                ["files", "Files"], ["info", "Info"]];
   return el("section", {},
     el("header", { class: "app-head" },
       el("h1", {}, "Music"),
@@ -308,6 +311,7 @@ function busyText(o) {
              : "Scanning…";
   }
   if (o.busy === "write") return "Writing changes to the files…";
+  if (o.busy === "move") return "Moving files…";
   return o.busy ? "Starting…" : "";
 }
 
@@ -328,7 +332,8 @@ function watchBusy(o, node, text) {
         setTimeout(poll, POLL_MS);
       } else {
         setStatus(o.busy === "write" ? "Writing finished: see the results in Info"
-                                     : "Scan finished");
+                  : o.busy === "move" ? "Moving finished: see the results below"
+                  : "Scan finished");
         refresh();
       }
     } catch (err) {
@@ -1361,6 +1366,102 @@ async function changesPage() {
   return shell("changes", o, panel, el("div", { class: "filters stack" }, search, found), list);
 }
 
+/* ---- files --------------------------------------------------------------- */
+
+const MOVE_STATE = { done: "Moved", failed: "Not moved", kept: "Stayed" };
+
+/* A table shown SHOW_STEP rows at a time, with Show more. */
+function steppedTable(head, rows) {
+  const body = el("tbody");
+  const more = el("button", { class: "btn", type: "button" }, "Show more");
+  let limit = 0;
+  const show = () => {
+    limit += SHOW_STEP;
+    body.replaceChildren(...rows.slice(0, limit));
+    more.hidden = rows.length <= limit;
+  };
+  more.addEventListener("click", show);
+  show();
+  return [el("div", { class: "grid-wrap" },
+            el("table", { class: "grid" },
+              el("thead", {}, el("tr", {}, head.map((h) => el("th", { scope: "col" }, h)))),
+              body)),
+          el("div", { class: "actions" }, more)];
+}
+
+/* One thing the move service did. Rose: not moved; peach: stayed. */
+function moveItem(m) {
+  const tone = m.state === "failed" ? "late" : m.state === "kept" ? "today" : "";
+  return el("li", { class: "card stack history" },
+    el("header", {},
+      el("span", { class: tone ? `due ${tone}` : "muted" },
+         `${MOVE_STATE[m.state] || m.state}${m.track == null ? " (not a track)" : ""}`),
+      el("span", { class: "muted" }, showTime(m.finished))),
+    el("strong", { class: "path" }, relative(m.from_path)),
+    m.to_path ? el("p", { class: "path" }, el("span", { class: "muted" }, "→ "),
+                   relative(m.to_path)) : null,
+    m.note ? el("p", { class: "note" }, m.note) : null);
+}
+
+async function filesPage() {
+  const [o, mv] = await Promise.all([api("GET", "/api/music"), api("GET", "/api/music/moves")]);
+  musicRoot = o.root || "";
+  const start = serviceForm("/api/music/move", {},
+    `Moves ${plural(mv.count, "file", "files")} to where their tags put them. A file is ` +
+    "never moved over another; each move is listed below.",
+    "Move files", "Moving started");
+  const text = el("p", {}, busyText(o));
+  const canStart = mv.count > 0 && !mv.pending && !o.busy && o.available;
+  const panel = el("section", { class: "card stack" },
+    el("h2", {}, "Files"),
+    el("p", {}, "Each track belongs at Album artist/Album/NN - Title.ext below the music " +
+                "folder, or D-NN - Title.ext when the album has several discs (NN: the track " +
+                "number, D: the disc). The names come from the files' tags: / \\ : * ? \" < > | " +
+                "and control characters become _, and a name never starts with a dot."),
+    el("p", { class: "muted" }, "When all the tracks of a folder go to one folder, its other " +
+                                "files (covers, logs, ...) go with them; emptied folders are " +
+                                "removed."),
+    o.busy ? text : null,
+    !o.available ? el("p", { class: "warn" }, "The music folder is not available (is the " +
+                                              "drive mounted?): nothing can be moved now.") : null,
+    mv.pending ? el("p", { class: "warn" },
+                    `${plural(mv.pending, "change is", "changes are")} pending: write or ` +
+                    "discard them first, the names come from the files' tags.") : null,
+    el("p", {}, mv.count ? `${plural(mv.count, "track moves", "tracks move")}.`
+                         : "Every track that can be named is where it belongs.",
+       mv.problem_count ? ` ${plural(mv.problem_count, "track can not", "tracks can not")} ` +
+                          "move (see below)." : ""),
+    canStart ? el("div", { class: "actions" },
+                 el("button", { class: "btn go", type: "button", onclick: () => start.open() },
+                    "Move files…")) : null,
+    start);
+  watchBusy(o, panel, text);
+  const listed = (n, list) => (list.length < n ? ` (the first ${list.length})` : "");
+  return shell("files", o, panel,
+    mv.moves.length
+      ? el("section", { class: "section" },
+          el("header", {}, el("h2", {}, "To move ", el("span", { class: "count" }, mv.count),
+                              listed(mv.count, mv.moves))),
+          steppedTable(["From", "To"], mv.moves.map((m) => el("tr", {},
+            el("td", { class: "path" }, relative(m.from)),
+            el("td", { class: "path edited-text" }, relative(m.to))))))
+      : null,
+    mv.problems.length
+      ? el("section", { class: "section" },
+          el("header", {}, el("h2", {}, "Can not move ",
+                              el("span", { class: "count" }, mv.problem_count),
+                              listed(mv.problem_count, mv.problems))),
+          steppedTable(["File", "Why"], mv.problems.map((p) => el("tr", {},
+            el("td", { class: "path" }, relative(p.path)),
+            el("td", { class: "differs-text" }, p.problem)))))
+      : null,
+    el("section", { class: "section" },
+      el("header", {}, el("h2", {}, "Moved ", el("span", { class: "count" }, mv.history.length))),
+      mv.history.length
+        ? el("ul", { class: "list cols" }, mv.history.map(moveItem))
+        : el("p", { class: "empty" }, "Nothing moved yet.")));
+}
+
 /* ---- info ---------------------------------------------------------------- */
 
 const STATE_TEXT = { done: "Done", warning: "Done, with a warning", failed: "Failed" };
@@ -1541,6 +1642,7 @@ function route(parts) {
   if (section === "album" && Number.isInteger(id) && id > 0) return albumPage(id);
   if (section === "albums" && rawId === undefined) return albumsPage();
   if (section === "changes" && rawId === undefined) return changesPage();
+  if (section === "files" && rawId === undefined) return filesPage();
   if (section === "info" && rawId === undefined) return infoPage();
   go("#/albums");
   return null;

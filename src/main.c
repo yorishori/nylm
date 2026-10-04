@@ -12,6 +12,7 @@
 #include "auth.h"
 #include "db.h"
 #include "json.h"
+#include "move.h"
 #include "music.h"
 #include "server.h"
 
@@ -172,6 +173,7 @@ static void usage(void)
             "                            library if none is queued\n"
             "       nylm music-scan PATH scan a folder or file in the music library\n"
             "       nylm music-write     write the pending music tag changes\n"
+            "       nylm music-move      move the music files to where their tags put them\n"
             "\n"
             "environment (defaults in brackets):\n"
             "  NYLM_DATA    (required)     data folder; must exist. Each app gets its own\n"
@@ -193,7 +195,7 @@ int main(int argc, char **argv)
     int scan_path = argc == 3 && strcmp(cmd, "music-scan") == 0;
     if ((argc > 2 && !scan_path) ||
         (argc == 2 && strcmp(cmd, "set-password") != 0 && strcmp(cmd, "music-scan") != 0 &&
-         strcmp(cmd, "music-write") != 0)) {
+         strcmp(cmd, "music-write") != 0 && strcmp(cmd, "music-move") != 0)) {
         usage();
         return 2;
     }
@@ -208,14 +210,15 @@ int main(int argc, char **argv)
     int rc;
     if (strcmp(cmd, "set-password") == 0) {
         rc = cmd_set_password();
-    } else if (strcmp(cmd, "music-scan") == 0 || strcmp(cmd, "music-write") == 0) {
+    } else if (strncmp(cmd, "music-", 6) == 0) {
         if (arena_init(ARENA_SIZE) != 0) {
             fprintf(stderr, "out of memory\n");
             rc = 1;
         } else {
             json_init();
-            rc = strcmp(cmd, "music-scan") == 0 ? music_scan(scan_path ? argv[2] : NULL)
-                                                : music_write();
+            rc = strcmp(cmd, "music-scan") == 0    ? music_scan(scan_path ? argv[2] : NULL)
+                 : strcmp(cmd, "music-write") == 0 ? music_write()
+                                                   : music_move();
         }
     } else {
         rc = cmd_serve();

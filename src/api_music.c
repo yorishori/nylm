@@ -29,6 +29,7 @@
 #include "auth.h"
 #include "db.h"
 #include "json.h"
+#include "move.h"
 #include "music.h"
 #include "tags.h"
 
@@ -1520,6 +1521,85 @@ void music_scan_start(struct request *req, struct response *res)
     char detail[64];
     snprintf(detail, sizeof detail, track != 0 ? "{\"album_of_track\":%lld}" : "{}", track);
     start_action(req, res, lock, rc, "music-scan", detail);
+}
+
+/*
+ * GET /api/music/moves: the plan of the move service (src/move.h), from
+ * the cache: how many tracks move and the first 5000 (track, from, to);
+ * how many can not and the first 5000 (track, path, problem); how many
+ * changes are pending (the service waits for them); and the latest moves
+ * it made (done, failed, kept).
+ */
+void music_moves(struct request *req, struct response *res)
+{
+    (void)req;
+    if (music_root() == NULL) {
+        json_error(res, 503, "music is not set up: set NYLM_MUSIC in /etc/nylm.conf");
+        return;
+    }
+    struct move_plan plan;
+    long long pending = single_number("SELECT count(*) FROM changes WHERE state = 'pending'", 0);
+    cJSON *obj = cJSON_CreateObject();
+    cJSON *moves = obj != NULL ? cJSON_AddArrayToObject(obj, "moves") : NULL;
+    cJSON *problems = moves != NULL ? cJSON_AddArrayToObject(obj, "problems") : NULL;
+    cJSON *history = problems != NULL ? cJSON_AddArrayToObject(obj, "history") : NULL;
+    int ok = history != NULL && pending >= 0 && move_plan(&plan) == 0 &&
+             cJSON_AddNumberToObject(obj, "pending", (double)pending) != NULL &&
+             cJSON_AddNumberToObject(obj, "count", (double)plan.moves) != NULL &&
+             cJSON_AddNumberToObject(obj, "problem_count", (double)plan.problems) != NULL;
+    for (size_t i = 0; ok && i < plan.n; i++) {
+        const struct move_item *it = &plan.items[i];
+        cJSON *list = it->to != NULL ? moves : it->problem != NULL ? problems : NULL;
+        if (list == NULL || cJSON_GetArraySize(list) >= MAX_LIST)
+            continue;
+        cJSON *row = cJSON_CreateObject();
+        ok = row != NULL && cJSON_AddItemToArray(list, row) &&
+             cJSON_AddNumberToObject(row, "track", (double)it->id) != NULL &&
+             cJSON_AddStringToObject(row, it->to != NULL ? "from" : "path", it->from) != NULL &&
+             cJSON_AddStringToObject(row, it->to != NULL ? "to" : "problem",
+                                     it->to != NULL ? it->to : it->problem) != NULL;
+    }
+    sqlite3_stmt *st = ok ? db_prepare(music_db,
+        "SELECT id, track_id AS track, from_path, to_path, state, note, finished FROM moves"
+        " ORDER BY id DESC LIMIT 300") : NULL;
+    ok = st != NULL && add_rows(history, st, 7, MAX_HISTORY) == 0;
+    sqlite3_finalize(st);
+    if (!ok) {
+        fprintf(stderr, "music: moves failed\n");
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, obj);
+}
+
+/* POST /api/music/move {password}: starts nylm-music-move.service, when
+ * no change is pending (the names come from the files' tags) and a track
+ * has to move. -> 202 */
+void music_move_start(struct request *req, struct response *res)
+{
+    if (password_checked(req, res) == NULL)
+        return;
+    int lock = lock_for_write(res);
+    if (lock < 0)
+        return;
+    struct move_plan plan;
+    long long pending = single_number("SELECT count(*) FROM changes WHERE state = 'pending'", 0);
+    const char *refused = NULL;
+    if (pending < 0 || move_plan(&plan) != 0) {
+        music_unlock(lock);
+        json_error(res, 500, "internal error");
+        return;
+    }
+    if (pending > 0)
+        refused = "write or discard the pending changes first: the names come from the files' tags";
+    else if (plan.moves == 0)
+        refused = "every track is where its tags put it: there is nothing to move";
+    if (refused != NULL) {
+        music_unlock(lock);
+        json_error(res, 409, refused);
+        return;
+    }
+    start_action(req, res, lock, 0, "music-move", "{}");
 }
 
 /* POST /api/music/write {password}: starts nylm-music-write.service. -> 202 */

@@ -32,6 +32,7 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 | `src/api_*.c`     | handlers, one file per feature                           |
 | `src/care.c`      | plant care dates: when a care rule is next due           |
 | `src/music.c`     | music folder, lock, `nylm music-scan` and `music-write`  |
+| `src/move.c`      | the naming rule, `nylm music-move`                       |
 | `src/tags.c`      | music file tags through TagLib: read, write, verify      |
 | `src/art.c`       | album art files, named by SHA-256; base64                |
 | `src/image.c`     | thumbnails (libjpeg-turbo, libpng), only in the services |
@@ -100,7 +101,7 @@ in order; another tag with several values shows them joined by `"; "` and
 is written back as one.
 
 The server never opens a music file. It reads the cache, queues changes
-and scans, and starts the two services that do work on the files, each its
+and scans, and starts the three services that do work on the files, each its
 own process, started by hand or from the web app (password again,
 recorded in the `audit` table) through a root action that only starts its
 unit:
@@ -115,12 +116,16 @@ unit:
   removes the stored pictures no track has.
 - `nylm music-write` (`nylm-music-write.service`): writes the pending
   changes, track by track, then reads each track back into the cache.
+- `nylm music-move` (`nylm-music-move.service`): moves each track to where
+  the naming rule puts it (below), never over an existing file, and puts
+  its new path in the cache; each move is recorded (`moves` table). The
+  web app starts it only when no change is pending.
 
 They never run together: each holds `$NYLM_DATA/music/library.lock`
 exclusively. The server holds it shared for its own writes to `music.db`,
 and refuses to queue or discard anything while a service runs (409).
 
-The web app has three tabs. Albums: the last scan and a button to scan
+The web app has four tabs. Albums: the last scan and a button to scan
 again, filters (search; a field each, with a switch for albums where a track
 has no value for it; and switches for albums with invalid tags, missing
 tags, invalid genres, genres that differ between tracks, several artists
@@ -141,7 +146,9 @@ missing X gets the lowest free number). Every edit is queued at once as
 one batch (`changes` table), and colours what will change. Changes: the
 pending changes by album, then track (those of tracks a scan removed in
 one group), a search over every field, Discard for an album or a track,
-and Write. Info: library
+and Write. Files: the naming rule, the tracks
+that move (from, to) and those that can not (why), Move files, and what
+the moves did (`GET /api/music/moves`). Info: library
 counts, albums by genre (a donut of the 12 largest, the rest as "other",
 and every genre in a table) and by year (`GET /api/music/charts`, from the
 files' tags), the rules, and the written changes with their results.
@@ -163,6 +170,18 @@ differs and reads the file back. Each change ends `done`, `warning` (done,
 and what nylm also changed, e.g. the disc number) or `failed` (with the
 cause: an invalid tag, a file changed since the scan, a file that does not
 read back as written).
+
+The naming rule, from the cached tags: `ALBUMARTIST/ALBUM/NN - TITLE.ext`
+below the music folder, or `D-NN - TITLE.ext` when the disc total is more
+than 1 (NN: the track number, zero-padded to 2 digits or to the digits of
+the track total; the extension in lower case). In each name
+`/ \ : * ? " < > |` and control characters become `_`, spaces around and
+dots at the end go, a leading dot becomes `_`, and it is cut to 255 bytes.
+A track without album artist, album, title or an `X/Y` track number (or
+with a disc number that is not `X/Y`) stays, and so do two tracks that
+would get the same name. When all the tracks of a folder went to one
+folder, the folder's other files go there too; emptied folders are
+removed. Navidrome sees a moved file as a new one.
 
 TagLib writes in place. It saves MP3 tags as ID3v2.4 (upgrading ID3v2.3)
 and adds an ID3v1 tag; both stay as TagLib writes them.
@@ -195,9 +214,10 @@ journalctl -u nylm -f             # server logs
 sudo -u nylm env NYLM_DATA=/mnt/data/nylm nylm set-password
 sudo systemctl start nylm-music-scan   # scan the music folder (or what is queued)
 sudo systemctl start nylm-music-write  # write the pending tag changes
+sudo systemctl start nylm-music-move   # move the files where their tags put them
 sudo -u nylm env NYLM_DATA=/mnt/data/nylm NYLM_MUSIC=/mnt/data/music \
     nylm music-scan /mnt/data/music/Some/Album   # scan one folder or file
-journalctl -u nylm-music-scan -u nylm-music-write   # their output
+journalctl -u nylm-music-scan -u nylm-music-write -u nylm-music-move   # their output
 NYLM_DATA=dev-data ./nylm-debug set-password   # password for make run
 ```
 

@@ -266,6 +266,20 @@ const char *const music_migrations[] = {
     "CREATE UNIQUE INDEX changes_one_pending ON changes (track_id, field)"
     "    WHERE state = 'pending';"
     "CREATE INDEX changes_by_state ON changes (state, batch);",
+
+    /* 4: what the move service did with each file: a track (track_id) or
+     * another file of its folder moved (done), not moved (failed), or left
+     * where it was (kept; to_path NULL). */
+    "CREATE TABLE moves ("
+    "    id        INTEGER PRIMARY KEY,"
+    "    track_id  INTEGER REFERENCES tracks(id) ON DELETE SET NULL,"
+    "    from_path TEXT    NOT NULL,"
+    "    to_path   TEXT,"
+    "    state     TEXT    NOT NULL CHECK (state IN ('done', 'failed', 'kept')),"
+    "    note      TEXT    NOT NULL DEFAULT '',"
+    "    finished  INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "    CHECK ((state = 'done') = (to_path IS NOT NULL))"
+    ") STRICT;",
 };
 
 const int music_migration_count = sizeof music_migrations / sizeof music_migrations[0];

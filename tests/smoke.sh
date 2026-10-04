@@ -465,7 +465,7 @@ for route in "GET /api/music" "GET /api/music/albums" "GET /api/music/album?trac
              "GET /api/music/values?field=artist" "GET /api/music/changes" "GET /api/music/charts" \
              "POST /api/music/queue" "POST /api/music/discard" "POST /api/music/scan" \
              "POST /api/music/write" "GET /api/music/art?hash=$(printf '%064d' 0)&size=full" \
-             "POST /api/music/cover"; do
+             "POST /api/music/cover" "GET /api/music/moves" "POST /api/music/move"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
@@ -633,7 +633,7 @@ post "scan missing track"      404 $S "{$PW,\"track\":999}"
 query "0" "refused scans queue nothing" "SELECT count(*) FROM scans WHERE state = 'queued'"
 
 # While a service holds the library lock, the server writes nothing.
-flock "$LOCK" sleep 8 &
+flock "$LOCK" sleep 12 &
 LOCKER=$!
 sleep 0.3
 expect 200 "overview while busy" -b "$JAR" "$B/api/music"
@@ -643,6 +643,9 @@ expect_body "the library is busy" "busy message"
 post "discard while busy"      409 $D "{\"track\":$T1}"
 post "scan while busy"         409 $S "{$PW}"
 post "write while busy"        409 $W "{$PW}"
+post "move while busy"         409 /api/music/move "{$PW}"
+service 1 "music-move while busy" music-move
+logged "the library is busy" "move refuses while another service runs"
 service 1 "music-write while busy" music-write
 logged "the library is busy" "service refuses while another runs"
 service 1 "music-scan while busy" music-scan
@@ -898,6 +901,74 @@ service 0 "scan after removing the pictures" music-scan
 logged "6 unused picture files removed" "unused picture files removed"
 query "$COVER" "unused art rows removed" "SELECT hash FROM art"
 expect 404 "removed picture"    -b "$JAR" "$AR?hash=$FRONT&size=full"
+
+# Moving the files where their tags put them. The move reads only the
+# cache: the tags are set there. Album/ goes to Some Artist/Some Album/,
+# Multi/ to AC_DC_ Live/Some Album/ (unsafe characters), each with its
+# other files; the emptied folders go. A track without an album artist
+# can not move.
+MV=/api/music/move
+sqlite3 "$MDB" "UPDATE tracks SET title = 'Song Two', tracknumber = '2/3', discnumber = NULL
+                WHERE path LIKE '%Album/02.FLAC';
+                UPDATE tracks SET title = 'Song One', tracknumber = '1/3', discnumber = '1/1'
+                WHERE path LIKE '%Album/01.mp3';
+                UPDATE tracks SET title = 'Song Three', tracknumber = '3/3', discnumber = '1/1',
+                albumartist = 'AC/DC: Live' WHERE path LIKE '%Multi/01.flac';
+                INSERT INTO tracks (path, size, ext, scanned, title, album, tracknumber)
+                VALUES ('$M/Loose/x.mp3', 1, 'mp3', 0, 'X', 'Y', '1/1'),
+                ('$TMP/elsewhere/y.mp3', 1, 'mp3', 0, 'X', 'Y', '1/1')"
+sqlite3 "$MDB" "UPDATE tracks SET albumartist = 'Z' WHERE path LIKE '%elsewhere/y.mp3'"
+expect 200 "moves planned"     -b "$JAR" "$B/api/music/moves"
+expect_body "\"moves\":[{\"track\":$T1,\"from\":\"$M/Artist/Album/01.mp3\",\"to\":\"$M/Some Artist/Some Album/01 - Song One.mp3\"}," "a planned move"
+expect_body "\"to\":\"$M/Some Artist/Some Album/02 - Song Two.flac\"}" "the extension in lower case"
+expect_body "\"to\":\"$M/AC_DC_ Live/Some Album/03 - Song Three.flac\"}" "unsafe characters replaced"
+expect_body "\"problems\":[{\"track\":" "a problem listed"
+expect_body "\"path\":\"$M/Loose/x.mp3\",\"problem\":\"it has no album artist\"}],\"history\":[],\"pending\":0,\"count\":3,\"problem_count\":2}" "the plan's counts"
+expect_body "\"path\":\"$TMP/elsewhere/y.mp3\",\"problem\":\"it is not in the music folder: scan the library\"}" "a track outside the music folder stays"
+post "move no password"        400 $MV '{}'
+post "move wrong password"     403 $MV '{"password":"nope"}'
+expect 415 "move needs json"   -b "$JAR" -d '{"password":"x"}' "$B$MV"
+post "queue before a move"     200 $Q "{\"album\":$T1,\"set\":{\"mood\":\"wait\"}}"
+post "move with changes pending" 409 $MV "{$PW}"
+expect_body "write or discard the pending changes first" "pending message"
+expect 200 "moves with changes pending" -b "$JAR" "$B/api/music/moves"
+expect_body '"pending":2,' "the plan says changes are pending"
+post "discard before the move" 200 $D "{\"album\":$T1}"
+touch "$M/Artist/Album/.hidden"
+service 0 "music-move"         music-move
+logged "3 tracks moved, 0 failed, 2 can not move; 4 other files moved, 0 kept; 2 empty folders removed" "move counts"
+for f in "Some Artist/Some Album/01 - Song One.mp3" "Some Artist/Some Album/02 - Song Two.flac" \
+         "Some Artist/Some Album/03.mp3" "Some Artist/Some Album/cover.jpg" \
+         "Some Artist/Some Album/.hidden" "AC_DC_ Live/Some Album/03 - Song Three.flac" \
+         "AC_DC_ Live/Some Album/Cover.JPG" "Artist/README"; do
+    if [ -f "$M/$f" ]; then PASSED=$((PASSED + 1)); else
+        FAILED=$((FAILED + 1)); echo "FAIL: not moved there: $f"; fi
+done
+if [ ! -e "$M/Artist/Album" ] && [ ! -e "$M/Artist/Multi" ]; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: emptied folders not removed"; fi
+query "$M/Some Artist/Some Album/01 - Song One.mp3" "the cache has the new path" \
+    "SELECT path FROM tracks WHERE id = $T1"
+query "done|3|4|0" "moves recorded" \
+    "SELECT state, sum(track_id IS NOT NULL), sum(track_id IS NULL), sum(note <> '')
+     FROM moves GROUP BY state"
+expect 200 "moves after the move" -b "$JAR" "$B/api/music/moves"
+expect_body '"pending":0,"count":0,"problem_count":2}' "nothing left to move"
+expect_body "\"from_path\":\"$M/Artist/Album/01.mp3\",\"to_path\":\"$M/Some Artist/Some Album/01 - Song One.mp3\",\"state\":\"done\"" "history"
+post "move with nothing to move" 409 $MV "{$PW}"
+expect_body "there is nothing to move" "nothing to move message"
+# Never over an existing file: one is in the way, the track stays.
+sqlite3 "$MDB" "DELETE FROM tracks WHERE path LIKE '%Loose/x.mp3' OR path LIKE '%elsewhere/y.mp3';
+                UPDATE tracks SET title = 'Other' WHERE path LIKE '%03 - Song Three.flac'"
+echo "in the way" > "$M/AC_DC_ Live/Some Album/03 - Other.flac"
+service 0 "music-move, target taken" music-move
+logged "0 tracks moved, 1 failed, 0 can not move" "a taken target fails"
+query "failed|not moved: a file is already there" "the failure recorded" \
+    "SELECT state, note FROM moves ORDER BY id DESC LIMIT 1"
+if [ "$(cat "$M/AC_DC_ Live/Some Album/03 - Other.flac")" = "in the way" ]; then
+    PASSED=$((PASSED + 1)); else FAILED=$((FAILED + 1)); echo "FAIL: a file was replaced"; fi
+rm "$M/AC_DC_ Live/Some Album/03 - Other.flac"
+service 0 "scan after the moves" music-scan
+logged "0 removed" "the scan finds every moved track"
 
 expect 204 "logout"             -b "$JAR" -c "$JAR" -X POST "$B/api/logout"
 expect 401 "after logout"       -b "$JAR" "$B/api/session"

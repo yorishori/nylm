@@ -1,0 +1,18 @@
+[Unit]
+Description=nylm music file move
+Documentation=file:///usr/local/share/nylm/README.md
+
+# Started from the web app (action music-move) or by hand:
+#   sudo systemctl start nylm-music-move
+# Moves each music file to AlbumArtist/Album/NN - Title.ext from the
+# cached tags, never over an existing file, and records each move. Never
+# runs together with a scan or a write.
+[Service]
+Type=oneshot
+User=nylm
+Group=nylm
+EnvironmentFile=/etc/nylm.conf
+ExecStart=/usr/local/bin/nylm music-move
+WorkingDirectory=/var/lib/nylm
+Nice=10
+IOSchedulingClass=idle

@@ -11,10 +11,11 @@
  * below the folder; an album is the tracks that share ALBUM and
  * ALBUMARTIST. Dot files and folders are skipped, symlinks never followed.
  *
- * Only two services touch the files, each its own process, one at a time:
+ * Only these services touch the files, each its own process, one at a time:
  *   music_scan   reads tags into the cache;
  *   music_write  writes the pending rows of the changes table, then reads
- *                each file it wrote back into the cache.
+ *                each file it wrote back into the cache;
+ *   music_move   moves files to where the naming rule puts them (move.h).
  * The server only reads the database, queues changes and scans, and
  * starts the services.
  *
@@ -70,9 +71,14 @@ int music_write(void);
 int music_lock_shared(void);
 void music_unlock(int fd);
 
-/* The service running now: "scan", "write", "busy" (just starting), or
- * NULL if none (or on error: *error set, logged). */
+/* The service running now: "scan", "write", "move", "busy" (just
+ * starting), or NULL if none (or on error: *error set, logged). */
 const char *music_busy(int *error);
+
+/* For a service (name: "scan", "write", "move"): takes the library lock
+ * once the library is set up and there. The fd (closing it releases the
+ * lock), or -1 (logged). */
+int music_start_service(const char *name);
 
 /*
  * The columns of a track's tags in a query on "tracks t": its pictures (a

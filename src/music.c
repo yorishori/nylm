@@ -808,7 +808,7 @@ static int open_lock(void)
 }
 
 /*
- * Takes the lock for a service ("scan" or "write") and writes its name in
+ * Takes the lock for a service ("scan", "write", "move") and writes its name in
  * the file. Waits a moment for a write of the server to end; fails if a
  * service runs. The fd (closing it releases the lock), or -1 (logged).
  */
@@ -882,12 +882,14 @@ const char *music_busy(int *error)
     if (fd >= 0)
         close(fd);
     name[n > 0 ? n : 0] = '\0';
-    return strcmp(name, "scan") == 0 ? "scan" : strcmp(name, "write") == 0 ? "write" : "busy";
+    static const char *const services[] = { "scan", "write", "move" };
+    for (size_t i = 0; i < sizeof services / sizeof services[0]; i++)
+        if (strcmp(name, services[i]) == 0)
+            return services[i];
+    return "busy";
 }
 
-/* Takes the lock for a service once the library is set up and there. The
- * fd, or -1 (logged). */
-static int start_service(const char *name)
+int music_start_service(const char *name)
 {
     if (root[0] == '\0') {
         fprintf(stderr, "music: NYLM_MUSIC is not set\n");
@@ -938,7 +940,7 @@ int music_scan(const char *arg)
                 arg);
         return 1;
     }
-    int lock = start_service("scan");
+    int lock = music_start_service("scan");
     if (lock < 0)
         return 1;
 
@@ -1214,7 +1216,7 @@ static int write_track(struct scan *s, long long track_id, struct write_counts *
 
 int music_write(void)
 {
-    int lock = start_service("write");
+    int lock = music_start_service("write");
     if (lock < 0)
         return 1; /* the changes stay pending */
 
