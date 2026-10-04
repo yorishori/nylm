@@ -18,7 +18,7 @@ JOBS_LOCK=/usr/local/lib/nylm/jobs
 # nylm's own units: their logs are always shown.
 NYLM_OWN_UNITS="nylm.service nylm-music-scan.service nylm-music-write.service
 nylm-music-move.service nylm-qobuz.service nylm-disk-usage.service
-nylm-updates-check.service nylm-update.service"
+nylm-updates-check.service nylm-update.service nylm-backup@nylm.service"
 
 die() {
     echo "${0##*/}: $*" >&2
@@ -65,6 +65,20 @@ full_unit() {
             ?*.path | ?*.timer | ?*.slice | ?*.scope) printf '%s\n' "$1" ;;
         *) printf '%s.service\n' "$1" ;;
     esac
+}
+
+# NYLM_BACKUP_KEEP: a whole number from 1 to 100.
+valid_keep() {
+    case $1 in '' | *[!0-9]* | 0*) return 1 ;; esac
+    [ "${#1}" -le 3 ] && [ "$1" -le 100 ]
+}
+
+# NYLM_BACKUP_GROUP: a group name, 1..32 of a-z 0-9 _ -, not starting with
+# a digit or -.
+valid_group() {
+    case $1 in [a-z_]*) ;; *) return 1 ;; esac
+    case $1 in *[!a-z0-9_-]*) return 1 ;; esac
+    [ "${#1}" -le 32 ]
 }
 
 # unit_shown UNIT: nylm shows this unit's log (nylm's own, NYLM_UNITS, the

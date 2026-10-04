@@ -62,6 +62,8 @@ void server_updates(struct request *req, struct response *res);
 void server_updates_check(struct request *req, struct response *res);
 void server_update(struct request *req, struct response *res);
 void server_reboot(struct request *req, struct response *res);
+void server_backups(struct request *req, struct response *res);
+void server_backup_start(struct request *req, struct response *res);
 void server_ports(struct request *req, struct response *res);
 void server_wireguard(struct request *req, struct response *res);
 void server_wireguard_name(struct request *req, struct response *res);

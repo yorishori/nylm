@@ -1,0 +1,11 @@
+#!/bin/sh
+# Starts the backup of one entry (nylm-backup@NAME.service, root) and
+# returns at once. Argument: nylm (nylm's data) or a name in NYLM_BACKUP.
+set -eu
+. /usr/local/lib/nylm/lib.sh
+[ "$#" -eq 1 ] || die "takes one entry name"
+if [ "$1" != nylm ]; then
+    valid_entry "$1" || die "not an entry name: $1"
+    entry_paths "$1" >/dev/null || die "no backup entry $1 in NYLM_BACKUP"
+fi
+exec /usr/bin/systemctl start --no-block "nylm-backup@$1.service"

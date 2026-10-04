@@ -336,17 +336,84 @@ upgrade (from `/var/log/pacman.log`), the update's log, and whether a
 reboot is needed. Reboot (password, action `reboot`) is refused while a
 job runs; the page comes back when the server is up again.
 
+Backups: by hand, one entry at a time: `nylm` (nylm's data) and each
+entry of `NYLM_BACKUP` (an app: its folders). Back up now (password;
+`nylm-backup@NAME.service`, a root job) stops the running containers that
+use any of the entry's folders, archives them (`tar --numeric-owner`,
+each path without its leading `/`, through `zstd -19 --long=27`), starts
+the containers again (also when something failed), checks the archive
+(`zstd -t`), writes its SHA-256 and only then gives it its name:
+`$NYLM_BACKUP_DIR/NAME/NAME-YYYYMMDDTHHMMSSZ.tar.zst` (UTC) and `.sha256`.
+Then the entry's backups beyond the newest `NYLM_BACKUP_KEEP` go. nylm's
+databases are copied with `sqlite3 .backup` (as user nylm, safe while it
+runs) and archived under their own names; lock files are left out.
+Archives are owned by root, readable by `NYLM_BACKUP_GROUP` (mode 640),
+else by root only. The backup folder is on the data drive: it protects
+against mistakes, not against that drive failing; keep a copy on your PC.
+
 Settings in `/etc/nylm.conf` (restart nylm after changing them):
 
 ```sh
-NYLM_UNITS="wg-quick@wg0 docker.service sshd.service"  # more units to show
-NYLM_BACKUP="davis=/var/lib/docker/volumes/davis_data/_data immich=/srv/immich,/srv/immich-db"
-NYLM_BACKUP_DIR=/mnt/data/backups
+NYLM_UNITS="wg-quick@wg0 docker sshd"   # more units to show
+NYLM_BACKUP="davis=/var/lib/docker/volumes/davis_data/_data immich=/srv/immich,/srv/immich-db compose=/home/you/docker"
+NYLM_BACKUP_DIR=/mnt/data/backups       # must exist; not inside NYLM_DATA or an entry
+NYLM_BACKUP_KEEP=2                      # backups kept of each entry, 1 to 100
+NYLM_BACKUP_GROUP=you                   # may read the backups (for the copy to your PC)
 ```
 
 Units are named as systemd names them (A-Z a-z 0-9 @ . _ : -). A backup
 entry is `name=/path[,/path...]`: a name of a-z 0-9 - (not `nylm`, which is
-nylm's own data) and absolute paths of A-Z a-z 0-9 / . _ - only.
+nylm's own data) and absolute paths of A-Z a-z 0-9 / . _ - only. Put an
+app and its database in one entry: they are stopped and archived together.
+Back up the folder with your compose file and its `.env` as an entry too.
+
+### Copying the backups to your PC
+
+The PC pulls them over SSH with a key that may only read the backup
+folder (`rrsync -ro`): the server never needs access to the PC, and the
+key can not change anything on the server. Once, on the PC:
+
+```sh
+ssh-keygen -t ed25519 -f ~/.ssh/nylm-backups -N '' -C nylm-backups
+cat ~/.ssh/nylm-backups.pub            # copy this line
+```
+
+On the server, as the user in `NYLM_BACKUP_GROUP`, add a line to
+`~/.ssh/authorized_keys` (one line; paste the key):
+
+```
+command="/usr/bin/rrsync -ro /mnt/data/backups",restrict ssh-ed25519 AAAA... nylm-backups
+```
+
+Then, on the PC, whenever you want the new backups (without `--delete`
+the PC keeps every backup it ever got), and check them:
+
+```sh
+rsync -av -e 'ssh -i ~/.ssh/nylm-backups' you@server: ~/nylm-backups/
+cd ~/nylm-backups/davis && sha256sum -c davis-*.sha256
+```
+
+(With `rrsync` the remote path is relative to the backup folder: `you@server:`
+is all of it, `you@server:davis/` one entry.)
+
+### Restoring a backup
+
+By hand, one entry at a time. The archive holds each path without its
+leading `/`, with numeric owners, so it unpacks into place from `/`:
+
+```sh
+cd /mnt/data/backups/davis
+sha256sum -c davis-20261004T123015Z.tar.zst.sha256    # it is whole
+tar --zstd -tvf davis-20261004T123015Z.tar.zst | less  # what it holds
+docker stop davis                                     # what uses it (nylm: sudo systemctl stop nylm)
+sudo mv /var/lib/docker/volumes/davis_data/_data /var/lib/docker/volumes/davis_data/_data.old
+sudo tar --zstd --numeric-owner -xpf davis-20261004T123015Z.tar.zst -C /
+docker start davis                                    # check it works, then remove _data.old
+```
+
+From the PC: copy the archive back first (`rsync -av davis-....tar.zst
+you@server:/tmp/` with a normal key), or unpack it on the PC with `-C`
+into another folder to take single files out.
 
 ## Commands
 
@@ -368,6 +435,8 @@ journalctl -u nylm-disk-usage
 sudo systemctl start nylm-updates-check # list the package updates
 sudo systemctl start nylm-update       # update every package (what Update now does)
 journalctl -u nylm-updates-check -u nylm-update
+sudo systemctl start nylm-backup@davis  # back up an entry (nylm: nylm's data)
+journalctl -u nylm-backup@davis
 ```
 
 In a checkout (a debug build with sanitizers, data in `./dev-data`):
@@ -389,6 +458,6 @@ Build needs `gcc`, `make` and the system libraries `sqlite` (3.44+), `cjson`,
 `openssl` (3.2+; libssl only for `nylm-qobuz`), `taglib` (2.0+),
 `libjpeg-turbo` and `libpng`, linked dynamically: `pacman -Syu` brings their
 fixes. `make` builds `nylm` and `nylm-qobuz`. The server app's root
-actions also use `smartmontools`, `wireguard-tools`, `pacman-contrib` and
-`fakeroot` (`install.sh` installs
-what they need).
+actions also use `smartmontools`, `wireguard-tools`, `pacman-contrib`,
+`fakeroot`, `zstd`, and `rsync` for the copy to your PC (`install.sh`
+installs them).

@@ -20,7 +20,8 @@ trap cleanup EXIT
 export NYLM_DATA="$TMP/data" NYLM_PUBLIC=public NYLM_PORT=$PORT
 # The server app's settings, as /etc/nylm.conf would have them.
 export NYLM_UNITS="docker wg-quick@wg0" \
-       NYLM_BACKUP="davis=/srv/davis immich=/srv/immich,/srv/immich-db"
+       NYLM_BACKUP="davis=/srv/davis immich=/srv/immich,/srv/immich-db" \
+       NYLM_BACKUP_DIR="$TMP/backups"
 
 # expect STATUS DESCRIPTION curl-args...
 expect() {
@@ -110,7 +111,7 @@ else PASSED=$((PASSED + 1)); fi
 # ---- setup ---------------------------------------------------------------
 
 # An empty data folder is a fresh install: each app gets its folder and database.
-mkdir "$TMP/data"
+mkdir "$TMP/data" "$TMP/backups"
 echo 'smoke test password' | "$BIN" set-password 2>/dev/null ||
     { echo "set-password failed"; exit 1; }
 for f in core/core.db plants/plants.db music/music.db server/server.db; do
@@ -1211,7 +1212,8 @@ for route in "GET /api/server" "GET /api/server/audit" "GET /api/server/log?unit
              "GET /api/server/containers" "GET /api/server/containers/log?name=web" \
              "POST /api/server/containers/restart" "GET /api/server/units" "GET /api/server/ports" \
              "GET /api/server/wireguard" "POST /api/server/wireguard/name" "GET /api/server/updates" \
-             "POST /api/server/updates/check" "POST /api/server/update" "POST /api/server/reboot"; do
+             "POST /api/server/updates/check" "POST /api/server/update" "POST /api/server/reboot" \
+             "GET /api/server/backups" "POST /api/server/backups/start"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
@@ -1314,6 +1316,34 @@ for path in /api/server/updates/check /api/server/update /api/server/reboot; do
     expect 405 "$path is POST only" -b "$JAR" "$B$path"
 done
 
+# Backups: nylm's data and each entry, its job and its backups (newest
+# first); only files named like a backup of that entry count.
+mkdir -p "$TMP/backups/davis"
+for f in davis-20261001T100000Z.tar.zst davis-20261004T123015Z.tar.zst \
+         davis-20261004T123015Z.tar.zst.sha256 .davis-20261005T000000Z.tar.zst.partial \
+         davis-old.tar.zst; do
+    printf 'x' >"$TMP/backups/davis/$f"
+done
+expect 200 "backups"             -b "$JAR" "$B/api/server/backups"
+expect_body "\"dir\":\"$TMP/backups\",\"available\":true,\"keep\":2,\"group\":null,\"busy\":" \
+    "backup settings"
+expect_body "\"entries\":[{\"paths\":[\"$TMP/data\"],\"name\":\"nylm\",\"job\":{\"unit\":\"nylm-backup@nylm.service\"" \
+    "nylm's data first"
+expect_body '"backups":[{"file":"davis-20261004T123015Z.tar.zst","size":1,"time":1791117015},{"file":"davis-20261001T100000Z.tar.zst","size":1,"time":1790848800}]}' \
+    "davis's backups, newest first"
+expect_body '{"paths":["/srv/immich","/srv/immich-db"],"name":"immich","job":{"unit":"nylm-backup@immich.service"' \
+    "an entry's paths and job"
+BS=/api/server/backups/start
+post "backup, no name"         400 $BS "{$PW}"
+post "backup, bad name"        400 $BS "{$PW,\"name\":\"Davis\"}"
+post "backup, option"          400 $BS "{$PW,\"name\":\"-x\"}"
+post "backup, too long"        400 $BS "{$PW,\"name\":\"$(printf '%033d' 0)\"}"
+post "backup, unknown"         404 $BS "{$PW,\"name\":\"other\"}"
+post "backup, no password"     400 $BS '{"name":"davis"}'
+post "backup, wrong password"  403 $BS '{"name":"nylm","password":"nope"}'
+expect 415 "backup needs json" -b "$JAR" -d '{"name":"davis"}' "$B$BS"
+# (The right password is not tried: on a server it would start a backup.)
+
 # SMART, through the root action (not installed here: 502).
 expect_either 200 502 "smart"    -b "$JAR" "$B/api/server/smart"
 expect 405 "smart is GET only"   -b "$JAR" -X POST -H "$J" "$B/api/server/smart"
@@ -1370,6 +1400,13 @@ refuses_setting "entry no path"     'NYLM_BACKUP=davis'               "NYLM_BACK
 refuses_setting "entry bad path"    'NYLM_BACKUP=davis=/srv/../etc'   "NYLM_BACKUP"
 refuses_setting "entry named nylm"  'NYLM_BACKUP=nylm=/srv/x'         "NYLM_BACKUP"
 refuses_setting "backup dir"        'NYLM_BACKUP_DIR=backups'         "NYLM_BACKUP_DIR"
+refuses_setting "backups in data"   "NYLM_BACKUP_DIR=$TMP/data/backups" "NYLM_BACKUP_DIR"
+refuses_setting "data in backups"   "NYLM_BACKUP_DIR=$TMP"            "NYLM_BACKUP_DIR"
+refuses_setting "entry holds backups" "NYLM_BACKUP=all=$TMP"          "NYLM_BACKUP"
+refuses_setting "entry in backups"  "NYLM_BACKUP=x=$TMP/backups/x"    "NYLM_BACKUP"
+refuses_setting "keep 0"            'NYLM_BACKUP_KEEP=0'              "NYLM_BACKUP_KEEP"
+refuses_setting "keep 101"          'NYLM_BACKUP_KEEP=101'            "NYLM_BACKUP_KEEP"
+refuses_setting "bad group"         'NYLM_BACKUP_GROUP=Bad Group'     "NYLM_BACKUP_GROUP"
 
 # ---- root scripts ------------------------------------------------------------
 
@@ -1452,14 +1489,108 @@ for bad in 'davis' 'davis=' 'davis=/srv/a,' 'davis=,/srv/a' 'davis=/srv/a,,/srv/
     lib no "entry paths, $bad" "NYLM_BACKUP='$bad'; entry_paths $name"
 done
 lib ok "lock"               'take_lock'
-flock "$TMP/jobs" sleep 5 &
+flock "$TMP/jobs" sleep 2 &
 LOCKER=$!
 sleep 0.3
 lib no "lock, taken"        'take_lock'
 if grep -q "another nylm job is running" "$TMP/lib.out"; then PASSED=$((PASSED + 1)); else
     FAILED=$((FAILED + 1)); echo "FAIL: lib.sh: busy lock not explained"; fi
-kill "$LOCKER" 2>/dev/null
-wait "$LOCKER" 2>/dev/null
+wait "$LOCKER" # the lock goes when its sleep ends
+
+# The backup job, on a copy that runs as this user: no chown, no runuser,
+# and a fake docker that has one running container using the entry.
+BK="$TMP/bk"
+mkdir -p "$BK/data/core" "$BK/data/plants/photos" "$BK/app/data" "$BK/out" "$BK/bin"
+sqlite3 "$BK/data/core/core.db" "PRAGMA journal_mode = WAL; CREATE TABLE t (v TEXT);
+                                 INSERT INTO t VALUES ('kept');" >/dev/null
+printf 'photo' >"$BK/data/plants/photos/a.jpg"
+printf 'lock' >"$BK/data/core/x.lock"
+printf 'app data' >"$BK/app/data/file"
+cat >"$BK/nylm.conf" <<EOF
+NYLM_DATA=$BK/data
+NYLM_BACKUP="app=$BK/app"
+NYLM_BACKUP_DIR=$BK/out
+NYLM_BACKUP_KEEP=2
+EOF
+cat >"$BK/bin/docker" <<EOF
+#!/bin/sh
+echo "\$*" >>"$BK/docker.log"
+case "\$*" in
+    "ps -q") echo abc ;;
+    *Mounts*) printf '%s\n' "$BK/app/data" /etc/localtime ;;
+    *.Name*) echo /web ;;
+esac
+EOF
+chmod 755 "$BK/bin/docker"
+sed -e "s#/etc/nylm.conf#$BK/nylm.conf#" -e "s#^JOBS_LOCK=.*#JOBS_LOCK=$TMP/jobs#" \
+    deploy/lib.sh >"$BK/lib.sh"
+sed -e "s#/usr/local/lib/nylm/lib.sh#$BK/lib.sh#" -e "s#/usr/bin/docker#$BK/bin/docker#g" \
+    -e 's#-o root -g root ##' -e 's#-o nylm -g nylm ##' -e 's#/usr/bin/runuser -u nylm -- ##' \
+    -e 's#/usr/bin/chown#/usr/bin/true#' deploy/jobs/backup >"$BK/job"
+# job WANT DESCRIPTION ENTRY: the job exits 0 (WANT ok) or not (no).
+job() {
+    if sh "$BK/job" "$3" >"$BK/job.log" 2>&1; then got=ok; else got=no; fi
+    if [ "$got" = "$1" ]; then PASSED=$((PASSED + 1)); else
+        FAILED=$((FAILED + 1)); echo "FAIL: backup job: $2: want $1, got $got ($(cat "$BK/job.log"))"
+    fi
+}
+# check DESCRIPTION COMMAND...: the command succeeds.
+check() {
+    desc=$1
+    shift
+    if "$@" >/dev/null 2>&1; then PASSED=$((PASSED + 1)); else
+        FAILED=$((FAILED + 1)); echo "FAIL: backup job: $desc"
+    fi
+}
+count() { # the number of files in folder $1 matching $2
+    find "$1" -maxdepth 1 -name "$2" | wc -l | tr -d ' '
+}
+
+job ok "nylm's data" nylm
+check "one archive"         [ "$(count "$BK/out/nylm" 'nylm-*.tar.zst')" = 1 ]
+NA=$(find "$BK/out/nylm" -name 'nylm-*.tar.zst')
+check "checksum"            sh -c "cd '$BK/out/nylm' && sha256sum -c '$(basename "$NA").sha256'"
+mkdir "$BK/x"
+zstd -dc "$NA" | tar -x -C "$BK/x"
+X="$BK/x/${BK#/}/data"
+check "database copied"     [ "$(sqlite3 "$X/core/core.db" 'SELECT v FROM t')" = kept ]
+check "photos"              [ -f "$X/plants/photos/a.jpg" ]
+check "no lock file"        [ ! -e "$X/core/x.lock" ]
+check "no live WAL"         [ ! -e "$X/core/core.db-wal" ]
+check "nothing half-made"   [ "$(count "$BK/out/nylm" '.*')" = 0 ]
+check "nylm: no container"  [ ! -e "$BK/docker.log" ]
+
+job ok "an entry" app
+check "container stopped"   grep -qx "stop abc" "$BK/docker.log"
+check "and started again"   grep -qx "start abc" "$BK/docker.log"
+AA=$(find "$BK/out/app" -name 'app-*.tar.zst')
+check "entry archived"      sh -c "zstd -dc '$AA' | tar -t | grep -qx '${BK#/}/app/data/file'"
+sleep 1
+job ok "a second" app
+sleep 1
+job ok "a third" app
+check "keeps the newest 2"  [ "$(count "$BK/out/app" 'app-*.tar.zst')" = 2 ]
+check "and their sums"      [ "$(count "$BK/out/app" 'app-*.tar.zst.sha256')" = 2 ]
+check "the oldest went"     [ ! -e "$AA" ]
+
+job no "unknown entry" other
+job no "invalid entry" ../x
+flock "$TMP/jobs" sleep 2 &
+LOCKER=$!
+sleep 0.3
+job no "while a job runs" app
+check "says why"            grep -q "another nylm job is running" "$BK/job.log"
+wait "$LOCKER" # the lock goes when its sleep ends
+if [ "$(id -u)" != 0 ]; then # root reads anything
+    printf 'secret' >"$BK/app/data/unreadable"
+    chmod 000 "$BK/app/data/unreadable"
+    : >"$BK/docker.log"
+    job no "tar fails" app
+    check "container started again" grep -qx "start abc" "$BK/docker.log"
+    check "nothing half-made"   [ "$(count "$BK/out/app" '.*')" = 0 ]
+    check "backups untouched"   [ "$(count "$BK/out/app" 'app-*.tar.zst')" = 2 ]
+    chmod 600 "$BK/app/data/unreadable"
+fi
 
 # ---- listen addresses and client allowlist ----------------------------------
 

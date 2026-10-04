@@ -12,6 +12,8 @@
  *              handshake and traffic, a name for it; the open ports
  *   #/updates  the packages that have an update (checkupdates), the system
  *              update (pacman -Syu) and its log, reboot
+ *   #/backups  each backup entry (nylm's data first): its backups, Back up
+ *              now, its log; how to copy them to another machine
  *
  * Reads never ask for anything; every button that changes the machine
  * asks for the password again, and the server records it (latest actions).
@@ -20,7 +22,7 @@
  */
 
 const TABS = [["system", "System"], ["containers", "Containers"], ["network", "Network"],
-              ["updates", "Updates"]];
+              ["updates", "Updates"], ["backups", "Backups"]];
 
 /* What each recorded action was, by its name in the audit log. */
 const ACTION_TEXT = {
@@ -29,6 +31,7 @@ const ACTION_TEXT = {
   "updates-check": "Check for updates",
   update: "System update",
   reboot: "Reboot",
+  backup: "Backup",
 };
 
 function shell(active, ...content) {
@@ -470,6 +473,74 @@ async function updatesPage() {
     el("div", { class: "columns" }, updateCard(u), rebootCard(u, h.uptime)));
 }
 
+/* ---- backups ------------------------------------------------------------- */
+
+function entryItem(e, b) {
+  const start = passwordForm("/api/server/backups/start", { name: e.name },
+    e.name === "nylm"
+      ? "Backs up nylm's data: its databases are copied safely while nylm runs."
+      : `Backs up ${e.name}: the containers that use its folders stop while they are ` +
+        "archived, and start again after.",
+    "Back up", `Backing up ${e.name}…`);
+  const log = unitLog(e.job.unit);
+  const card = el("li", { class: "card stack" },
+    el("header", { class: "line" },
+      el("h3", {}, e.name === "nylm" ? "nylm's data" : e.name),
+      el("span", { class: "count" }, plural(e.backups.length, "backup", "backups"))),
+    el("div", {}, e.paths.map((p) => el("div", { class: "path muted small" }, p))),
+    jobState(e.job),
+    e.backups.length
+      ? table([["Made"], ["Size", "num"]], e.backups.map((x) => el("tr", {},
+          el("td", {}, showTime(x.time), el("div", { class: "path muted small" }, x.file)),
+          el("td", { class: "num" }, showSize(x.size)))))
+      : el("p", { class: "empty" }, "No backup yet."),
+    el("div", { class: "actions" },
+      el("button", { class: "btn go", type: "button",
+                     disabled: running(e.job) || b.busy || !b.available,
+                     onclick: () => start.open() }, "Back up now"),
+      e.job.started ? log.button : null),
+    start,
+    log.panel);
+  watchJob(e.job, card, async () => {
+    const now = await api("GET", "/api/server/backups");
+    return now.entries.find((x) => x.name === e.name).job;
+  }, `Backup of ${e.name} finished`);
+  return card;
+}
+
+/* How to copy the backups to another machine: it pulls them over SSH. */
+function pullCard(b, host) {
+  return el("section", { class: "card stack" },
+    el("h2", {}, "Copy to your PC"),
+    el("p", {}, "Your PC pulls the backups over SSH (the server never reaches your PC). " +
+                "On the PC, after setting up its key as the README says:"),
+    el("pre", { class: "log" }, `rsync -av YOU@${host}:${b.dir}/ ~/nylm-backups/`),
+    el("p", { class: "muted small" },
+      b.group ? `The backups can be read by the group ${b.group}.`
+              : "Set NYLM_BACKUP_GROUP to a group your SSH user is in, so it can read them."));
+}
+
+async function backupsPage() {
+  const [b, h] = await Promise.all([api("GET", "/api/server/backups"), api("GET", "/api/server")]);
+  if (!b.dir) {
+    return shell("backups", el("section", { class: "card stack" },
+      el("h2", {}, "Backups"),
+      el("p", { class: "warn" },
+        "Set NYLM_BACKUP_DIR (and NYLM_BACKUP for the containers' folders) in " +
+        "/etc/nylm.conf, then restart nylm.")));
+  }
+  return shell("backups",
+    el("section", { class: "card stack" },
+      el("h2", {}, "Backups"),
+      el("p", {}, `Written to ${b.dir}; the newest ${b.keep} of each are kept. ` +
+                  "Each is started by hand."),
+      b.available ? null
+        : el("p", { class: "bad" }, `${b.dir} is not there: is the drive mounted?`),
+      b.busy ? el("p", { class: "muted" }, "A job is running: one at a time.") : null),
+    el("ul", { class: "list cols" }, b.entries.map((e) => entryItem(e, b))),
+    pullCard(b, h.hostname));
+}
+
 /* ---- containers ---------------------------------------------------------- */
 
 const STATE_CLASS = { running: "ok", restarting: "warn", paused: "warn", created: "muted",
@@ -651,6 +722,7 @@ function route(parts) {
   if (section === "containers" && rest === undefined) return containersPage();
   if (section === "network" && rest === undefined) return networkPage();
   if (section === "updates" && rest === undefined) return updatesPage();
+  if (section === "backups" && rest === undefined) return backupsPage();
   go("#/system");
   return null;
 }

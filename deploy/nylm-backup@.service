@@ -1,0 +1,16 @@
+[Unit]
+Description=nylm backup of %i
+Documentation=file:///usr/local/share/nylm/README.md
+
+# Started from the web app (action backup NAME, password) or by hand:
+#   sudo systemctl start nylm-backup@NAME     (nylm, or a name in NYLM_BACKUP)
+# Stops the containers that use the entry's folders, archives them
+# (tar | zstd -19) into NYLM_BACKUP_DIR/NAME/, starts the containers again,
+# checks the archive and keeps the newest NYLM_BACKUP_KEEP. Never runs
+# together with another nylm job (update, disk usage, another backup).
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/nylm/jobs/backup %i
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=infinity

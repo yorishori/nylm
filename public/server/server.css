@@ -51,6 +51,12 @@
   .columns { grid-template-columns: 1fr 1fr; }
 }
 
+/* Five tabs: in rows of three on a phone (style.css makes it two on the
+ * smallest ones). */
+@media (min-width: 21.01rem) and (max-width: 40rem) {
+  .tabs { display: grid; grid-template-columns: repeat(3, 1fr); border-radius: 18px; }
+}
+
 @media (max-width: 21rem) {
   .facts { grid-template-columns: 1fr; gap: 0.15rem; }
   .facts dd { margin-bottom: 0.4rem; }

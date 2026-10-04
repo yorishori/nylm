@@ -70,6 +70,8 @@ static const struct route routes[] = {
     { "POST",   "/api/server/updates/check",  server_updates_check, 0 },
     { "POST",   "/api/server/update",         server_update,       0 },
     { "POST",   "/api/server/reboot",         server_reboot,       0 },
+    { "GET",    "/api/server/backups",        server_backups,      0 },
+    { "POST",   "/api/server/backups/start",  server_backup_start, 0 },
     { "GET",    "/api/server/ports",          server_ports,        0 },
     { "GET",    "/api/server/wireguard",      server_wireguard,    0 },
     { "POST",   "/api/server/wireguard/name", server_wireguard_name, 0 },

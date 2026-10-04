@@ -688,6 +688,47 @@ static void test_updates(void)
     CHECK(sysinfo_read_tail(path, 4) == NULL);
 }
 
+static void test_backup_names(void)
+{
+    CHECK(sysinfo_backup_keep("1") == 1);
+    CHECK(sysinfo_backup_keep("2") == 2);
+    CHECK(sysinfo_backup_keep("100") == 100);
+    CHECK(sysinfo_backup_keep("101") == -1);
+    CHECK(sysinfo_backup_keep("0") == -1);
+    CHECK(sysinfo_backup_keep("02") == -1);
+    CHECK(sysinfo_backup_keep("") == -1);
+    CHECK(sysinfo_backup_keep("1000") == -1);
+    CHECK(sysinfo_backup_keep("x") == -1);
+    CHECK(sysinfo_backup_keep("-1") == -1);
+    CHECK(sysinfo_backup_keep(NULL) == -1);
+
+    CHECK(sysinfo_group_valid("yori"));
+    CHECK(sysinfo_group_valid("_backup-2"));
+    CHECK(!sysinfo_group_valid(""));
+    CHECK(!sysinfo_group_valid("2x"));
+    CHECK(!sysinfo_group_valid("-x"));
+    CHECK(!sysinfo_group_valid("Yori"));
+    CHECK(!sysinfo_group_valid("a b"));
+    CHECK(sysinfo_group_valid("abcdefghijklmnopqrstuvwxyzabcdef"));   /* 32 */
+    CHECK(!sysinfo_group_valid("abcdefghijklmnopqrstuvwxyzabcdefg")); /* 33 */
+
+    CHECK(sysinfo_path_within("/mnt/data/backups", "/mnt/data"));
+    CHECK(sysinfo_path_within("/mnt/data", "/mnt/data"));
+    CHECK(!sysinfo_path_within("/mnt/data2", "/mnt/data"));
+    CHECK(!sysinfo_path_within("/mnt", "/mnt/data"));
+
+    CHECK(sysinfo_backup_time("davis", "davis-20261004T123015Z.tar.zst") == 1791117015);
+    CHECK(sysinfo_backup_time("nylm", "nylm-19700101T000000Z.tar.zst") == 0);
+    CHECK(sysinfo_backup_time("davis", "davis-20261004T123015Z.tar.zst.sha256") == -1);
+    CHECK(sysinfo_backup_time("davis", ".davis-20261004T123015Z.tar.zst.partial") == -1);
+    CHECK(sysinfo_backup_time("davis", "davis-db-20261004T123015Z.tar.zst") == -1);
+    CHECK(sysinfo_backup_time("davis", "davis-20261004T123015.tar.zst") == -1);
+    CHECK(sysinfo_backup_time("davis", "davis-20261304T123015Z.tar.zst") == -1);
+    CHECK(sysinfo_backup_time("davis", "davis-2026100xT123015Z.tar.zst") == -1);
+    CHECK(sysinfo_backup_time("davis", "other-20261004T123015Z.tar.zst") == -1);
+    CHECK(sysinfo_backup_time("davis", "") == -1);
+}
+
 int main(void)
 {
     if (arena_init(4 * 1024 * 1024) != 0 || mkdtemp(tmp) == NULL)
@@ -709,6 +750,7 @@ int main(void)
     test_listening();
     test_wireguard();
     test_updates();
+    test_backup_names();
     static const char *const made[] = {
         "hwmon0/name", "hwmon0/temp1_input", "hwmon0/temp1_label", "hwmon0/temp3_input",
         "hwmon0/temp4_input", "hwmon1/temp1_input", "four", "empty", "hwmon0", "hwmon1",

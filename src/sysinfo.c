@@ -1276,3 +1276,54 @@ long long sysinfo_last_upgrade(const char *text)
     long long offset = (oh * 3600 + om * 60) * (t[19] == '+' ? 1 : -1);
     return days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + se - offset;
 }
+
+/* ---- backups ------------------------------------------------------------- */
+
+int sysinfo_backup_keep(const char *s)
+{
+    if (s == NULL || s[0] < '1' || s[0] > '9' || strlen(s) > 3)
+        return -1;
+    long v = 0;
+    for (const char *p = s; *p != '\0'; p++) {
+        if (*p < '0' || *p > '9')
+            return -1;
+        v = v * 10 + (*p - '0');
+    }
+    return v <= 100 ? (int)v : -1;
+}
+
+int sysinfo_group_valid(const char *s)
+{
+    if (s == NULL || !((s[0] >= 'a' && s[0] <= 'z') || s[0] == '_'))
+        return 0;
+    size_t n = 0;
+    for (; s[n] != '\0'; n++)
+        if (n >= 32 || !((s[n] >= 'a' && s[n] <= 'z') || (s[n] >= '0' && s[n] <= '9') ||
+                         s[n] == '_' || s[n] == '-'))
+            return 0;
+    return 1;
+}
+
+int sysinfo_path_within(const char *a, const char *b)
+{
+    size_t n = strlen(b);
+    return strncmp(a, b, n) == 0 && (a[n] == '\0' || a[n] == '/');
+}
+
+long long sysinfo_backup_time(const char *name, const char *file)
+{
+    size_t n = strlen(name);
+    /* name, "-", 16 for the time, ".tar.zst" */
+    if (strncmp(file, name, n) != 0 || file[n] != '-' || strlen(file) != n + 1 + 16 + 8 ||
+        strcmp(file + n + 17, ".tar.zst") != 0)
+        return -1;
+    const char *t = file + n + 1;
+    if (t[8] != 'T' || t[15] != 'Z')
+        return -1;
+    long long y = digits(t, 4), mo = digits(t + 4, 2), d = digits(t + 6, 2),
+              h = digits(t + 9, 2), mi = digits(t + 11, 2), se = digits(t + 13, 2);
+    if (y < 1970 || mo < 1 || mo > 12 || d < 1 || d > 31 || h < 0 || h > 23 || mi < 0 ||
+        mi > 59 || se < 0 || se > 60)
+        return -1;
+    return days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + se;
+}

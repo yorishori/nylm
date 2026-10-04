@@ -44,7 +44,7 @@ iface_cidr() {
 
 step "packages"
 pacman -S --needed --noconfirm gcc make openssl sqlite cjson taglib libjpeg-turbo libpng \
-    smartmontools wireguard-tools pacman-contrib fakeroot \
+    smartmontools wireguard-tools pacman-contrib fakeroot zstd rsync \
     sudo curl iproute2 util-linux
 
 step "build and test"
@@ -142,6 +142,8 @@ NYLM_ALLOW="$wg $lan"
 #NYLM_UNITS="wg-quick@wg0 docker sshd"
 #NYLM_BACKUP="davis=/var/lib/docker/volumes/davis_data/_data"
 #NYLM_BACKUP_DIR=/mnt/data/backups
+#NYLM_BACKUP_KEEP=2
+#NYLM_BACKUP_GROUP=you
 EOF
     chmod 644 "$CONF"
     echo "wrote $CONF:"

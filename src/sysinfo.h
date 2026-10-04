@@ -80,6 +80,19 @@ cJSON *sysinfo_unit_list(const char *s, const char **why);
  * is repeated or is "nylm" (nylm's own data), or there are too many. */
 cJSON *sysinfo_backup_entries(const char *s, const char **why);
 
+/* NYLM_BACKUP_KEEP: a whole number 1..100 -> it; -1 if invalid. */
+int sysinfo_backup_keep(const char *s);
+
+/* NYLM_BACKUP_GROUP: 1..32 of a-z 0-9 _ -, not starting with a digit or -. */
+int sysinfo_group_valid(const char *s);
+
+/* 1 if path a is b or inside it (both valid paths). */
+int sysinfo_path_within(const char *a, const char *b);
+
+/* A backup's file name "NAME-YYYYMMDDTHHMMSSZ.tar.zst" of entry name ->
+ * its time (unix seconds); -1 if the name is not one. */
+long long sysinfo_backup_time(const char *name, const char *file);
+
 /* ---- systemd and jobs ---------------------------------------------------- */
 
 /*

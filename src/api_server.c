@@ -15,6 +15,7 @@
  */
 #define _POSIX_C_SOURCE 200809L
 
+#include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,6 +43,7 @@
 #define WG_MAX     (256 * 1024)      /* wg-show: interfaces and peers */
 #define PROC_NET_MAX (2 * 1024 * 1024) /* one of /proc/net/{tcp,udp}{,6} */
 #define PEER_NAME_MAX 100            /* bytes */
+#define MAX_BACKUPS_LISTED 200       /* of one entry */
 
 #define BUSY_MESSAGE \
     "another job is running (disk usage, update or backup); try again when it is done"
@@ -50,7 +52,7 @@
 static const char *const nylm_units[] = {
     "nylm.service", "nylm-music-scan.service", "nylm-music-write.service",
     "nylm-music-move.service", "nylm-qobuz.service", "nylm-disk-usage.service",
-    "nylm-updates-check.service", "nylm-update.service",
+    "nylm-updates-check.service", "nylm-update.service", "nylm-backup@nylm.service",
 };
 #define NNYLM_UNITS (sizeof nylm_units / sizeof nylm_units[0])
 
@@ -76,15 +78,59 @@ static cJSON *backup_entries(void)
     return list;
 }
 
-int server_configure(void)
+/* NYLM_BACKUP_DIR, or NULL when it is not set. */
+static const char *backup_dir(void)
 {
     const char *dir = getenv("NYLM_BACKUP_DIR");
-    if (watched_units() == NULL || backup_entries() == NULL)
+    return dir != NULL && *dir != '\0' ? dir : NULL;
+}
+
+/* NYLM_BACKUP_KEEP: how many backups of an entry are kept (2 if unset). */
+static int backup_keep(void)
+{
+    const char *keep = getenv("NYLM_BACKUP_KEEP");
+    return keep != NULL && *keep != '\0' ? sysinfo_backup_keep(keep) : 2;
+}
+
+int server_configure(void)
+{
+    const char *dir = backup_dir();
+    const char *group = getenv("NYLM_BACKUP_GROUP");
+    const char *data = getenv("NYLM_DATA");
+    cJSON *entries = backup_entries();
+    if (watched_units() == NULL || entries == NULL)
         return -1;
-    if (dir != NULL && *dir != '\0' && !sysinfo_path_valid(dir)) {
+    if (backup_keep() < 0) {
+        fprintf(stderr, "server: NYLM_BACKUP_KEEP must be a number from 1 to 100\n");
+        return -1;
+    }
+    if (group != NULL && *group != '\0' && !sysinfo_group_valid(group)) {
+        fprintf(stderr, "server: NYLM_BACKUP_GROUP must be a group name (a-z 0-9 _ -)\n");
+        return -1;
+    }
+    if (dir == NULL)
+        return 0;
+    if (!sysinfo_path_valid(dir)) {
         fprintf(stderr, "server: NYLM_BACKUP_DIR must be an absolute path of A-Z a-z 0-9 "
                         "/ . _ - only\n");
         return -1;
+    }
+    /* A backup must never hold the backups (nor be inside them). */
+    if (data != NULL && (sysinfo_path_within(dir, data) || sysinfo_path_within(data, dir))) {
+        fprintf(stderr, "server: NYLM_BACKUP_DIR and NYLM_DATA must not be inside each other\n");
+        return -1;
+    }
+    const cJSON *entry;
+    cJSON_ArrayForEach(entry, entries) {
+        const cJSON *path;
+        cJSON_ArrayForEach(path, cJSON_GetObjectItemCaseSensitive(entry, "paths")) {
+            if (sysinfo_path_within(dir, path->valuestring) ||
+                sysinfo_path_within(path->valuestring, dir)) {
+                fprintf(stderr, "server: NYLM_BACKUP: %s and NYLM_BACKUP_DIR must not be "
+                                "inside each other\n", path->valuestring);
+                return -1;
+            }
+        }
     }
     return 0;
 }
@@ -183,13 +229,12 @@ static char *unit_log(const char *unit)
  * Starts a job with the password: unless unit (the job's own) is still
  * running or, for a root job (exclusive), another job runs (409), records
  * it in the audit log and runs the action (arg: NULL or checked by the
- * caller). -> 202
+ * caller); body is the request's, with the password. -> 202
  */
-static void start_job(struct request *req, struct response *res, const char *action,
-                      const char *arg, const char *unit, int exclusive)
+static void start_job(struct request *req, struct response *res, const cJSON *body,
+                      const char *action, const char *arg, const char *unit, int exclusive)
 {
-    cJSON *body = json_body(req, res);
-    if (body == NULL || !audit_password_ok(body, res))
+    if (!audit_password_ok(body, res))
         return;
     cJSON *state = unit_state(unit);
     int busy = exclusive ? sysinfo_locked(JOBS_LOCK) : 0;
@@ -404,7 +449,9 @@ void server_disk_usage(struct request *req, struct response *res)
 /* POST /api/server/disk-usage {password}: measures the folders. -> 202 */
 void server_disk_usage_start(struct request *req, struct response *res)
 {
-    start_job(req, res, "disk-usage", NULL, "nylm-disk-usage.service", 1);
+    cJSON *body = json_body(req, res);
+    if (body != NULL)
+        start_job(req, res, body, "disk-usage", NULL, "nylm-disk-usage.service", 1);
 }
 
 /* ---- updates ------------------------------------------------------------- */
@@ -454,13 +501,17 @@ void server_updates(struct request *req, struct response *res)
 /* POST /api/server/updates/check {password}: looks for updates. -> 202 */
 void server_updates_check(struct request *req, struct response *res)
 {
-    start_job(req, res, "updates-check", NULL, "nylm-updates-check.service", 0);
+    cJSON *body = json_body(req, res);
+    if (body != NULL)
+        start_job(req, res, body, "updates-check", NULL, "nylm-updates-check.service", 0);
 }
 
 /* POST /api/server/update {password}: updates every package. -> 202 */
 void server_update(struct request *req, struct response *res)
 {
-    start_job(req, res, "update", NULL, "nylm-update.service", 1);
+    cJSON *body = json_body(req, res);
+    if (body != NULL)
+        start_job(req, res, body, "update", NULL, "nylm-update.service", 1);
 }
 
 /* POST /api/server/reboot {password}: reboots, unless a job runs. -> 202 */
@@ -488,6 +539,153 @@ void server_reboot(struct request *req, struct response *res)
         return;
     }
     json_reply(res, 202, cJSON_CreateObject());
+}
+
+/* ---- backups ------------------------------------------------------------- */
+
+/* The backups of entry name in NYLM_BACKUP_DIR/name, newest first:
+ * [{file, size, time}], at most MAX_BACKUPS_LISTED. NULL if out of memory
+ * or the folder can not be read (logged). */
+static cJSON *backups_of(const char *dir, const char *name)
+{
+    char path[SYSINFO_MAX_PATH + 64];
+    snprintf(path, sizeof path, "%s/%s", dir, name);
+    cJSON *list = cJSON_CreateArray();
+    DIR *d = opendir(path);
+    if (list == NULL || d == NULL) {
+        if (d == NULL && errno == ENOENT)
+            return list; /* no backup yet */
+        if (d == NULL)
+            fprintf(stderr, "server: %s: %s\n", path, strerror(errno));
+        else
+            closedir(d);
+        return NULL;
+    }
+    struct dirent *e;
+    int ok = 1;
+    while (ok && (e = readdir(d)) != NULL && cJSON_GetArraySize(list) < MAX_BACKUPS_LISTED) {
+        long long t = sysinfo_backup_time(name, e->d_name);
+        char file[SYSINFO_MAX_PATH + 400];
+        struct stat sb;
+        if (t < 0)
+            continue;
+        snprintf(file, sizeof file, "%s/%s", path, e->d_name);
+        if (stat(file, &sb) != 0 || !S_ISREG(sb.st_mode))
+            continue;
+        cJSON *b = cJSON_CreateObject();
+        ok = b != NULL && cJSON_AddStringToObject(b, "file", e->d_name) != NULL &&
+             cJSON_AddNumberToObject(b, "size", (double)sb.st_size) != NULL &&
+             cJSON_AddNumberToObject(b, "time", (double)t) != NULL;
+        /* Newest first: before the first one that is older. */
+        cJSON *at;
+        int i = 0;
+        cJSON_ArrayForEach(at, list) {
+            if (cJSON_GetObjectItemCaseSensitive(at, "time")->valuedouble < (double)t)
+                break;
+            i++;
+        }
+        ok = ok && cJSON_InsertItemInArray(list, i, b);
+    }
+    closedir(d);
+    return ok ? list : NULL;
+}
+
+/*
+ * GET /api/server/backups: where backups go and how many are kept, and
+ * each entry (nylm's data first, then NYLM_BACKUP): its paths, its job
+ * and its backups. available: the folder is there (the drive mounted).
+ */
+void server_backups(struct request *req, struct response *res)
+{
+    (void)req;
+    const char *dir = backup_dir();
+    const char *data = getenv("NYLM_DATA");
+    cJSON *entries = backup_entries();
+    cJSON *nylm = cJSON_CreateObject();
+    cJSON *nylm_paths = nylm != NULL ? cJSON_AddArrayToObject(nylm, "paths") : NULL;
+    cJSON *data_path = cJSON_CreateString(data != NULL ? data : "");
+    if (entries == NULL || nylm_paths == NULL || data_path == NULL ||
+        cJSON_AddStringToObject(nylm, "name", "nylm") == NULL ||
+        !cJSON_AddItemToArray(nylm_paths, data_path) ||
+        !cJSON_InsertItemInArray(entries, 0, nylm)) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    const char *units[SYSINFO_MAX_ENTRIES + 1];
+    size_t n = 0;
+    cJSON *e;
+    cJSON_ArrayForEach(e, entries) {
+        char *unit = arena_alloc(64);
+        if (unit == NULL) {
+            json_error(res, 500, "internal error");
+            return;
+        }
+        snprintf(unit, 64, "nylm-backup@%s.service",
+                 cJSON_GetObjectItemCaseSensitive(e, "name")->valuestring);
+        units[n++] = unit;
+    }
+    cJSON *jobs = units_state(units, n);
+    int busy = sysinfo_locked(JOBS_LOCK);
+    struct stat sb;
+    int available = dir != NULL && stat(dir, &sb) == 0 && S_ISDIR(sb.st_mode);
+    if (jobs == NULL || busy < 0) {
+        json_error(res, 500, "can not read the jobs' state; see the server log");
+        return;
+    }
+    cJSON_ArrayForEach(e, entries) {
+        const char *name = cJSON_GetObjectItemCaseSensitive(e, "name")->valuestring;
+        cJSON *list = available ? backups_of(dir, name) : cJSON_CreateArray();
+        if (list == NULL || !cJSON_AddItemToObject(e, "job", cJSON_DetachItemFromArray(jobs, 0)) ||
+            !cJSON_AddItemToObject(e, "backups", list)) {
+            json_error(res, 500, "can not list the backups; see the server log");
+            return;
+        }
+    }
+    const char *group = getenv("NYLM_BACKUP_GROUP");
+    cJSON *out = cJSON_CreateObject();
+    if (out == NULL ||
+        (dir != NULL ? cJSON_AddStringToObject(out, "dir", dir)
+                     : cJSON_AddNullToObject(out, "dir")) == NULL ||
+        cJSON_AddBoolToObject(out, "available", available) == NULL ||
+        cJSON_AddNumberToObject(out, "keep", backup_keep()) == NULL ||
+        (group != NULL && *group != '\0' ? cJSON_AddStringToObject(out, "group", group)
+                                         : cJSON_AddNullToObject(out, "group")) == NULL ||
+        cJSON_AddBoolToObject(out, "busy", busy) == NULL ||
+        !cJSON_AddItemToObject(out, "entries", entries)) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, out);
+}
+
+/* POST /api/server/backups/start {name, password}: backs up one entry
+ * (nylm or a name in NYLM_BACKUP). -> 202 */
+void server_backup_start(struct request *req, struct response *res)
+{
+    cJSON *body = json_body(req, res);
+    const char *name;
+    if (body == NULL)
+        return;
+    if (json_get_string(body, "name", 1, 32, &name) != NULL || !sysinfo_entry_valid(name)) {
+        json_error(res, 400, "'name' must be a backup entry's name");
+        return;
+    }
+    int known = strcmp(name, "nylm") == 0;
+    cJSON *entries = backup_entries();
+    const cJSON *e;
+    cJSON_ArrayForEach(e, entries)
+        known |= strcmp(cJSON_GetObjectItemCaseSensitive(e, "name")->valuestring, name) == 0;
+    if (!known) {
+        json_error(res, 404, "no such backup entry (NYLM_BACKUP in /etc/nylm.conf)");
+        return;
+    }
+    if (backup_dir() == NULL) {
+        json_error(res, 409, "set NYLM_BACKUP_DIR in /etc/nylm.conf first");
+        return;
+    }
+    char unit[64];
+    snprintf(unit, sizeof unit, "nylm-backup@%s.service", name);
+    start_job(req, res, body, "backup", name, unit, 1);
 }
 
 /* ---- services ------------------------------------------------------------ */

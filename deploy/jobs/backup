@@ -1,0 +1,149 @@
+#!/bin/sh
+# Backs up one entry: nylm (nylm's data) or a name in NYLM_BACKUP. Writes
+#   $NYLM_BACKUP_DIR/NAME/NAME-YYYYMMDDTHHMMSSZ.tar.zst   (and its .sha256)
+# Each path is stored without its leading /, owners as numbers. While it
+# is archived, the running containers that use any of its paths are
+# stopped, and started again afterwards (also when something fails).
+# nylm's databases are copied with sqlite3 .backup (safe while nylm runs).
+# The archive is checked before it gets its name; only then are the
+# entry's backups beyond the newest NYLM_BACKUP_KEEP removed.
+# Run by nylm-backup@NAME.service (root). Argument: the entry's name.
+set -eu
+. /usr/local/lib/nylm/lib.sh
+[ "$#" -eq 1 ] || die "takes one entry name"
+name=$1
+
+[ -n "$NYLM_BACKUP_DIR" ] && valid_path "$NYLM_BACKUP_DIR" ||
+    die "NYLM_BACKUP_DIR is not set (or invalid) in /etc/nylm.conf"
+[ -d "$NYLM_BACKUP_DIR" ] || die "$NYLM_BACKUP_DIR does not exist (is the drive mounted?)"
+keep=${NYLM_BACKUP_KEEP:-2}
+valid_keep "$keep" || die "NYLM_BACKUP_KEEP must be a number from 1 to 100"
+if [ -n "$NYLM_BACKUP_GROUP" ]; then
+    valid_group "$NYLM_BACKUP_GROUP" || die "NYLM_BACKUP_GROUP is not a group name"
+    /usr/bin/getent group "$NYLM_BACKUP_GROUP" >/dev/null ||
+        die "NYLM_BACKUP_GROUP: no group $NYLM_BACKUP_GROUP"
+fi
+if [ "$name" = nylm ]; then
+    valid_path "$NYLM_DATA" || die "NYLM_DATA is invalid"
+    paths=$NYLM_DATA
+else
+    valid_entry "$name" || die "not an entry name: $name"
+    paths=$(entry_paths "$name") || die "no backup entry $name in NYLM_BACKUP"
+fi
+for p in $paths; do
+    [ -e "$p" ] || die "$p does not exist"
+    # A backup must never hold the backups.
+    case "$NYLM_BACKUP_DIR/" in
+        "$p/"*) die "$p holds NYLM_BACKUP_DIR: back up its other folders instead" ;;
+    esac
+    case "$p/" in
+        "$NYLM_BACKUP_DIR/"*) die "$p is inside NYLM_BACKUP_DIR" ;;
+    esac
+done
+
+take_lock
+umask 077
+dir=$NYLM_BACKUP_DIR/$name
+/usr/bin/install -d -m 755 -o root -g root "$dir"
+stamp=$(/usr/bin/date -u +%Y%m%dT%H%M%SZ)
+file=$name-$stamp.tar.zst
+partial=$dir/.$file.partial
+staging=$dir/.staging-$stamp
+status=$dir/.$stamp.status
+stopped=
+
+# Whatever happens: the containers run again, nothing half-made is left.
+cleanup() {
+    for id in $stopped; do
+        /usr/bin/docker start "$id" >/dev/null || echo "could not start container $id again" >&2
+    done
+    /usr/bin/rm -rf -- "$partial" "$partial.sha256" "$staging" "$status"
+}
+trap cleanup EXIT
+trap 'exit 1' INT TERM
+
+# The running containers that use one of the paths: a mount inside one of
+# them, or one of them inside a mount.
+if [ "$name" != nylm ] && [ -x /usr/bin/docker ]; then
+    for id in $(/usr/bin/docker ps -q); do
+        sources=$(/usr/bin/docker inspect --type container \
+            --format '{{range .Mounts}}{{.Source}}{{"\n"}}{{end}}' "$id")
+        uses=no
+        old_ifs=$IFS
+        IFS='
+'
+        for s in $sources; do
+            for p in $paths; do
+                case "$s/" in "$p/"*) uses=yes ;; esac
+                case "$p/" in "$s/"*) uses=yes ;; esac
+            done
+        done
+        IFS=$old_ifs
+        if [ "$uses" = yes ]; then
+            cname=$(/usr/bin/docker inspect --type container --format '{{.Name}}' "$id")
+            echo "stopping container ${cname#/}"
+            stopped="$stopped $id"
+            /usr/bin/docker stop "$id" >/dev/null
+        fi
+    done
+fi
+
+# tar's options: each path relative to /; for nylm, its databases from
+# consistent copies in the staging folder, under their own names.
+set --
+if [ "$name" = nylm ]; then
+    data=${NYLM_DATA#/}
+    /usr/bin/install -d -m 700 -o nylm -g nylm "$staging"
+    for db in $(cd "$NYLM_DATA" && /usr/bin/find . -name '*.db' -type f); do
+        valid_path "/${db#./}" || die "unexpected database name: $db"
+        /usr/bin/runuser -u nylm -- /usr/bin/install -d -m 700 "$staging/$(/usr/bin/dirname "$db")"
+        /usr/bin/runuser -u nylm -- /usr/bin/sqlite3 "$NYLM_DATA/$db" ".backup '$staging/$db'"
+    done
+    set -- --anchored --exclude="$data/*.db" --exclude="$data/*.db-wal" \
+        --exclude="$data/*.db-shm" --exclude="$data/*.lock" \
+        --transform="s,^${staging#/},$data," "$data" "${staging#/}"
+else
+    for p in $paths; do
+        set -- "$@" "${p#/}"
+    done
+fi
+
+echo "archiving $paths"
+# In a pipe, set -e does not see tar fail: it writes its status to a file.
+{
+    if /usr/bin/tar --create --file=- --numeric-owner --directory=/ "$@"; then
+        echo 0 >"$status"
+    else
+        echo "$?" >"$status"
+    fi
+} | /usr/bin/zstd -q -19 --long=27 -T0 -o "$partial"
+result=$(/usr/bin/cat "$status")
+/usr/bin/rm -f -- "$status"
+[ "$result" = 0 ] || die "tar failed (exit status $result): see above"
+
+# Containers back as soon as the archive is written.
+for id in $stopped; do
+    /usr/bin/docker start "$id" >/dev/null
+done
+stopped=
+
+/usr/bin/zstd -q -t "$partial" || die "the archive does not read back"
+(cd "$dir" && /usr/bin/sha256sum ".$file.partial" | /usr/bin/sed "s, \.$file\.partial\$, $file," \
+    >".$file.partial.sha256")
+group=${NYLM_BACKUP_GROUP:-root}
+mode=600
+[ "$group" = root ] || mode=640
+/usr/bin/chown "root:$group" "$partial" "$partial.sha256"
+/usr/bin/chmod "$mode" "$partial" "$partial.sha256"
+/usr/bin/mv -- "$partial.sha256" "$dir/$file.sha256"
+/usr/bin/mv -- "$partial" "$dir/$file"
+echo "wrote $dir/$file ($(/usr/bin/stat -c %s "$dir/$file") bytes)"
+
+# Keep the newest $keep (the names sort by time).
+old=$(/usr/bin/find "$dir" -maxdepth 1 -name "$name-*.tar.zst" | /usr/bin/sort -r |
+    /usr/bin/tail -n "+$((keep + 1))")
+for f in $old; do
+    echo "removing the older $f"
+    /usr/bin/rm -f -- "$f" "$f.sha256"
+done
+echo "done"
