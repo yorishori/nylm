@@ -23,6 +23,7 @@ CONF=/etc/nylm.conf
 HOME_DIR=/var/lib/nylm # nylm's home and working directory; holds no data
 SHARE=/usr/local/share/nylm
 ACTIONS=/usr/local/lib/nylm/actions
+JOBS=/usr/local/lib/nylm/jobs
 
 step() { printf '\n==> %s\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -54,7 +55,9 @@ id nylm >/dev/null 2>&1 ||
     useradd --system --home-dir "$HOME_DIR" --shell /usr/bin/nologin nylm
 install -d -m 700 -o nylm -g nylm "$HOME_DIR"
 # Root-owned and not writable by nylm: this folder is nylm's whole privilege.
-install -d -m 755 -o root -g root /usr/local/lib/nylm "$ACTIONS"
+# The jobs (root scripts run by systemd units) and lib.sh sit next to it,
+# where sudo does not reach.
+install -d -m 755 -o root -g root /usr/local/lib/nylm "$ACTIONS" "$JOBS"
 
 step "files"
 install -m 755 nylm /usr/local/bin/nylm
@@ -64,16 +67,16 @@ install -d -m 755 "$SHARE"
 cp -r public "$SHARE/public"
 cp README.md "$SHARE/README.md"
 chmod -R a+rX,go-w "$SHARE"
-if [ -d deploy/actions ]; then
-    for f in deploy/actions/*; do
-        [ -f "$f" ] && install -m 755 -o root -g root "$f" "$ACTIONS/"
-    done
-fi
-install -m 644 deploy/nylm.service /etc/systemd/system/nylm.service
-install -m 644 deploy/nylm-music-scan.service /etc/systemd/system/nylm-music-scan.service
-install -m 644 deploy/nylm-music-write.service /etc/systemd/system/nylm-music-write.service
-install -m 644 deploy/nylm-music-move.service /etc/systemd/system/nylm-music-move.service
-install -m 644 deploy/nylm-qobuz.service /etc/systemd/system/nylm-qobuz.service
+for f in deploy/actions/*; do
+    install -m 755 -o root -g root "$f" "$ACTIONS/"
+done
+for f in deploy/jobs/*; do
+    install -m 755 -o root -g root "$f" "$JOBS/"
+done
+install -m 644 -o root -g root deploy/lib.sh /usr/local/lib/nylm/lib.sh
+for f in deploy/*.service; do
+    install -m 644 "$f" /etc/systemd/system/
+done
 
 step "sudo rule"
 tmp=$(mktemp)
@@ -133,6 +136,11 @@ NYLM_PORT=$PORT
 NYLM_LISTEN="${wg%/*} ${lan%/*}"
 # Client subnets accepted; everything else is closed immediately.
 NYLM_ALLOW="$wg $lan"
+# Server app (see the README): more systemd units to show; the backups:
+# entries name=/path[,/path...], and the folder they are written to.
+#NYLM_UNITS="wg-quick@wg0 docker sshd"
+#NYLM_BACKUP="davis=/var/lib/docker/volumes/davis_data/_data"
+#NYLM_BACKUP_DIR=/mnt/data/backups
 EOF
     chmod 644 "$CONF"
     echo "wrote $CONF:"

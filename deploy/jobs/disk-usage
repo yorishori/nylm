@@ -1,0 +1,34 @@
+#!/bin/sh
+# Measures the folders nylm knows: its data, the music, the backups,
+# Docker's folder and each backup entry's paths. One line each on stdout
+# (the journal), which the web app reads back:
+#   nylm-du<TAB>bytes<TAB>label<TAB>path
+# Run by nylm-disk-usage.service (root). Takes no arguments.
+set -eu
+. /usr/local/lib/nylm/lib.sh
+[ "$#" -eq 0 ] || die "takes no arguments"
+take_lock
+
+# measure LABEL PATH: the size of the folder (on its own filesystem).
+measure() {
+    [ -n "$2" ] || return 0
+    if [ ! -d "$2" ]; then
+        echo "$1: $2 is not a folder" >&2
+        return 0
+    fi
+    size=$(/usr/bin/du -sxb -- "$2" | /usr/bin/cut -f1)
+    printf 'nylm-du\t%s\t%s\t%s\n' "$size" "$1" "$2"
+}
+
+measure "nylm data" "$NYLM_DATA"
+measure music "$NYLM_MUSIC"
+measure backups "$NYLM_BACKUP_DIR"
+measure docker /var/lib/docker
+for e in $NYLM_BACKUP; do
+    name=${e%%=*}
+    paths=$(entry_paths "$name")
+    for p in $paths; do
+        measure "$name" "$p"
+    done
+done
+echo "done"

@@ -46,4 +46,51 @@ int sysinfo_unescape(char *s);
 #define SYSINFO_MAX_TEMPS 64
 cJSON *sysinfo_temperatures(const char *hwmon_dir);
 
+/* ---- configuration ------------------------------------------------------
+ * From /etc/nylm.conf. The root scripts (deploy/lib.sh) check the same
+ * rules: what nylm accepts, root accepts. */
+
+#define SYSINFO_MAX_UNITS        32
+#define SYSINFO_MAX_ENTRIES      32
+#define SYSINFO_MAX_ENTRY_PATHS  16
+#define SYSINFO_MAX_PATH         1024
+
+/* A systemd unit name: 1..128 of A-Z a-z 0-9 @ . _ : -, starting with a
+ * letter or digit. */
+int sysinfo_unit_valid(const char *s);
+
+/* A backup entry's name: 1..32 of a-z 0-9 -, starting with a letter or digit. */
+int sysinfo_entry_valid(const char *s);
+
+/* An absolute path of A-Z a-z 0-9 / . _ -, at most SYSINFO_MAX_PATH bytes,
+ * not "/", without empty, "." or ".." parts and no trailing slash. */
+int sysinfo_path_valid(const char *s);
+
+/* NYLM_UNITS (unit names separated by spaces) -> [names]. NULL (and why)
+ * if a name is invalid or repeated, or there are too many. */
+cJSON *sysinfo_unit_list(const char *s, const char **why);
+
+/* NYLM_BACKUP (entries "name=path[,path...]" separated by spaces) ->
+ * [{name, paths: [...]}]. NULL (and why) if anything is invalid, a name
+ * is repeated or is "nylm" (nylm's own data), or there are too many. */
+cJSON *sysinfo_backup_entries(const char *s, const char **why);
+
+/* ---- systemd and jobs ---------------------------------------------------- */
+
+/*
+ * `systemctl show --timestamp=unix -p ...` of one or more units -> [{unit,
+ * description, load, active, sub, result, status, started, ended, since}],
+ * timestamps in unix seconds or null.
+ */
+cJSON *sysinfo_units(const char *text);
+
+/* The disk usage job's log -> [{label, path, bytes}] from its lines
+ * "nylm-du<TAB>bytes<TAB>label<TAB>path" (anything before the marker, such
+ * as the journal's prefix, is skipped). */
+cJSON *sysinfo_du(const char *log);
+
+/* 1 if someone holds an exclusive flock on path, 0 if not (or path does
+ * not exist), -1 on error (logged). */
+int sysinfo_locked(const char *path);
+
 #endif

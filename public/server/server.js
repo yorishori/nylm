@@ -3,16 +3,21 @@
 /*
  * Server app (/server/). Sections by URL hash:
  *   #/system   the host (uptime, load, memory, temperatures, whether a
- *              reboot is needed), its disks, and the latest actions
+ *              reboot is needed), its disks, what takes the room on them,
+ *              and the latest actions
  *
  * Reads never ask for anything; every button that changes the machine
  * asks for the password again, and the server records it (latest actions).
+ * Long work is a job (a systemd unit): the page shows its state, checks
+ * back while it runs, and shows its log.
  */
 
 const TABS = [["system", "System"]];
 
 /* What each recorded action was, by its name in the audit log. */
-const ACTION_TEXT = {};
+const ACTION_TEXT = {
+  "disk-usage": "Measure disk usage",
+};
 
 function shell(active, ...content) {
   return el("section", { class: "page" },
@@ -56,6 +61,82 @@ function table(cols, rows) {
 function facts(pairs) {
   return el("dl", { class: "facts" },
     pairs.filter(Boolean).flatMap(([term, value]) => [el("dt", {}, term), el("dd", {}, value)]));
+}
+
+/* ---- jobs and logs ------------------------------------------------------- */
+
+function running(job) {
+  return ["active", "activating", "deactivating", "reloading"].includes(job.active);
+}
+
+/* One line on a job (a systemd unit): running, how its last run ended,
+ * or that it has not run since the server started. */
+function jobState(job) {
+  if (job.load === "not-found") {
+    return el("p", { class: "bad" }, "Not installed: run deploy/install.sh on the server.");
+  }
+  if (running(job)) {
+    return el("p", { class: "warn" }, `Running since ${showTime(job.started)}…`);
+  }
+  if (!job.started) return el("p", { class: "muted" }, "Not run since the server started.");
+  if (job.result === "success") {
+    return el("p", { class: "ok" }, `Done ${showTime(job.ended || job.started)}.`);
+  }
+  return el("p", { class: "bad" },
+    `Failed ${showTime(job.ended || job.started)} (${job.result}` +
+    `${job.status ? `, exit status ${job.status}` : ""}): see its log.`);
+}
+
+/* A button that shows the last run's log of unit under it, with a button
+ * to close it again. */
+function logPanel(unit, label) {
+  const panel = el("div", { class: "stack", hidden: true });
+  const open = el("button", { class: "btn", type: "button", onclick: async () => {
+    open.disabled = true;
+    try {
+      const r = await api("GET", `/api/server/log?unit=${encodeURIComponent(unit)}`);
+      panel.replaceChildren(
+        r.log ? el("pre", { class: "log" }, r.log)
+              : el("p", { class: "empty" }, "No log: it has not run since the server started."),
+        el("div", { class: "actions" },
+          el("button", { class: "btn", type: "button", onclick: () => {
+            panel.hidden = true;
+            open.hidden = false;
+          } }, "Close log")));
+      panel.hidden = false;
+      open.hidden = true;
+    } catch (err) {
+      handleError(err);
+    } finally {
+      open.disabled = false;
+    }
+  } }, label || "Log");
+  return { button: open, panel };
+}
+
+/*
+ * While job runs, checks back every few seconds (get() -> the job's new
+ * state) and shows the page again when it ends. Stops when node is no
+ * longer on the page.
+ */
+function watchJob(job, node, get, doneText) {
+  if (!running(job)) return;
+  const poll = async () => {
+    if (!node.isConnected) return;
+    try {
+      const now = await get();
+      if (!node.isConnected) return;
+      if (running(now)) {
+        setTimeout(poll, POLL_MS);
+      } else {
+        setStatus(doneText);
+        refresh();
+      }
+    } catch (err) {
+      handleError(err);
+    }
+  };
+  setTimeout(poll, POLL_MS);
 }
 
 /* ---- system -------------------------------------------------------------- */
@@ -116,6 +197,39 @@ function disksCard(mounts) {
           mounts.map(mountRow)));
 }
 
+const DU_LABELS = { "nylm data": "nylm's data", music: "Music", backups: "Backups",
+                    docker: "Docker (images, containers, volumes)" };
+
+function usageCard(du) {
+  const job = du.job;
+  const measure = passwordForm("/api/server/disk-usage", {},
+    "Measures nylm's data, the music, the backups, Docker's folder and each backup " +
+    "entry. On large folders this takes a while.",
+    "Measure", "Measuring disk usage…");
+  const log = logPanel(job.unit);
+  const sizes = (du.sizes || []).slice().sort((a, b) => b.bytes - a.bytes);
+  const card = el("section", { class: "card stack" },
+    el("h2", {}, "Disk usage"),
+    jobState(job),
+    du.sizes == null || running(job) ? null
+      : sizes.length
+        ? table([["Folder"], ["Size", "num"]], sizes.map((s) => el("tr", {},
+            el("td", {}, DU_LABELS[s.label] || `Backup entry ${s.label}`,
+               el("div", { class: "path muted small" }, s.path)),
+            el("td", { class: "num" }, showSize(s.bytes)))))
+        : el("p", { class: "empty" }, "Nothing was measured: see its log."),
+    el("div", { class: "actions" },
+      el("button", { class: "btn go", type: "button", disabled: running(job) || du.busy,
+                     onclick: () => measure.open() }, "Measure"),
+      job.started ? log.button : null),
+    du.busy && !running(job) ? el("p", { class: "muted" }, "Another job is running.") : null,
+    measure,
+    log.panel);
+  watchJob(job, card, async () => (await api("GET", "/api/server/disk-usage")).job,
+           "Disk usage measured");
+  return card;
+}
+
 function actionItem(a) {
   const failed = !a.result.startsWith("ok") && a.result !== "started";
   return el("li", { class: "card stack" },
@@ -135,11 +249,13 @@ function actionsSection(actions) {
 }
 
 async function systemPage() {
-  const [h, audit] = await Promise.all([api("GET", "/api/server"),
-                                         api("GET", "/api/server/audit")]);
+  const [h, du, audit] = await Promise.all([api("GET", "/api/server"),
+                                             api("GET", "/api/server/disk-usage"),
+                                             api("GET", "/api/server/audit")]);
   return shell("system",
     el("div", { class: "columns" }, hostCard(h), temperaturesCard(h.temperatures)),
     disksCard(h.mounts),
+    usageCard(du),
     actionsSection(audit.actions));
 }
 

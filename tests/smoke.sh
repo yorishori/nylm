@@ -18,6 +18,9 @@ cleanup() {
 trap cleanup EXIT
 
 export NYLM_DATA="$TMP/data" NYLM_PUBLIC=public NYLM_PORT=$PORT
+# The server app's settings, as /etc/nylm.conf would have them.
+export NYLM_UNITS="docker.service wg-quick@wg0" \
+       NYLM_BACKUP="davis=/srv/davis immich=/srv/immich,/srv/immich-db"
 
 # expect STATUS DESCRIPTION curl-args...
 expect() {
@@ -1203,14 +1206,15 @@ logged "NYLM_MUSIC is not set" "nylm-qobuz says why"
 # ---- server ------------------------------------------------------------------
 
 # Every route of the server app needs a login.
-for route in "GET /api/server" "GET /api/server/audit"; do
+for route in "GET /api/server" "GET /api/server/audit" "GET /api/server/log?unit=nylm.service" \
+             "GET /api/server/disk-usage" "POST /api/server/disk-usage"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
 # The host, read from /proc, /sys and statvfs (this machine's).
 expect 200 "server host"         -b "$JAR" "$B/api/server"
 for key in '"hostname":"' '"kernel":"' '"uptime":' '"load":[' '"cpus":' '"memory":{"total":' \
-           '"temperatures":[' '"reboot_needed":false' '"mounts":[{"path":"' '"used":'; do
+           '"temperatures":[' '"reboot_needed":' '"mounts":[{"path":"' '"used":'; do
     expect_body "$key" "server host has $key"
 done
 expect 200 "server audit, empty" -b "$JAR" "$B/api/server/audit"
@@ -1221,6 +1225,45 @@ expect 200 "server audit"        -b "$JAR" "$B/api/server/audit"
 expect_body '"client":"127.0.0.1","action":"reboot","detail":"","result":"ok: started"}]}' "an action"
 expect 405 "server is GET only"  -b "$JAR" -X POST -H "$J" "$B/api/server"
 
+# expect_either A B DESCRIPTION curl-args...: the status is A or B (what
+# depends on the machine: whether the root actions are installed).
+expect_either() {
+    a=$1 b=$2 desc=$3
+    shift 3
+    got=$(curl -s -o "$TMP/body" -w '%{http_code}' --max-time 40 "$@")
+    if [ "$got" = "$a" ] || [ "$got" = "$b" ]; then PASSED=$((PASSED + 1)); else
+        FAILED=$((FAILED + 1)); echo "FAIL: $desc: want $a or $b, got $got ($(head -c 200 "$TMP/body"))"
+    fi
+}
+
+# Logs: only of units nylm shows (its own, NYLM_UNITS, the backup jobs).
+L="$B/api/server/log"
+expect 400 "log without unit"    -b "$JAR" "$L"
+expect 400 "log, bad unit"       -b "$JAR" "$L?unit=a%20b"
+expect 400 "log, option"         -b "$JAR" "$L?unit=-x"
+expect 400 "log, bad escape"     -b "$JAR" "$L?unit=%zz"
+expect 404 "log, other unit"     -b "$JAR" "$L?unit=sshd.service"
+expect_body "NYLM_UNITS" "log says how to show a unit"
+expect 404 "log, unknown entry"  -b "$JAR" "$L?unit=nylm-backup@other.service"
+expect 404 "log, by prefix"      -b "$JAR" "$L?unit=docker"
+for unit in nylm.service docker.service wg-quick@wg0 nylm-backup@immich.service; do
+    expect_either 200 502 "log of $unit" -b "$JAR" "$L?unit=$unit"
+done
+
+# The disk usage job: its state from systemd; starting it needs the password.
+# (The right password is not tried: on a server it would start the job.)
+DU=/api/server/disk-usage
+expect 200 "disk usage"          -b "$JAR" "$B$DU"
+expect_body '"job":{"unit":"nylm-disk-usage.service"' "disk usage job state"
+expect_body '"busy":' "disk usage says whether a job runs"
+post "disk usage, no password"   400 $DU '{}'
+post "disk usage, wrong password" 403 $DU '{"password":"nope"}'
+expect 415 "disk usage needs json" -b "$JAR" -d '{"password":"x"}' "$B$DU"
+expect 200 "audit after refusals" -b "$JAR" "$B/api/server/audit"
+if grep -q '"action":"disk-usage"' "$TMP/body"; then
+    FAILED=$((FAILED + 1)); echo "FAIL: a refused start was recorded"
+else PASSED=$((PASSED + 1)); fi
+
 expect 200 "server page"         "$B/server/"
 expect 200 "server script"       "$B/server/server.js"
 
@@ -1228,6 +1271,102 @@ expect 204 "logout"            -b "$JAR" -c "$JAR" -X POST "$B/api/logout"
 expect 401 "after logout"       -b "$JAR" "$B/api/session"
 
 stop
+
+# Invalid server app settings: nylm says which and does not start.
+# refuses_setting DESCRIPTION VAR=VALUE TEXT
+refuses_setting() {
+    if env "$2" "$BIN" >"$TMP/log" 2>&1 </dev/null; then
+        FAILED=$((FAILED + 1)); echo "FAIL: $1: started anyway"
+    elif grep -q "$3" "$TMP/log"; then
+        PASSED=$((PASSED + 1))
+    else
+        FAILED=$((FAILED + 1)); echo "FAIL: $1: unclear error: $(cat "$TMP/log")"
+    fi
+}
+refuses_setting "bad unit"          'NYLM_UNITS=docker a;b'           "NYLM_UNITS"
+refuses_setting "unit twice"        'NYLM_UNITS=docker docker'        "NYLM_UNITS"
+refuses_setting "entry no path"     'NYLM_BACKUP=davis'               "NYLM_BACKUP"
+refuses_setting "entry bad path"    'NYLM_BACKUP=davis=/srv/../etc'   "NYLM_BACKUP"
+refuses_setting "entry named nylm"  'NYLM_BACKUP=nylm=/srv/x'         "NYLM_BACKUP"
+refuses_setting "backup dir"        'NYLM_BACKUP_DIR=backups'         "NYLM_BACKUP_DIR"
+
+# ---- root scripts ------------------------------------------------------------
+
+# Every action and job: a shell script that stops at the first error.
+for f in deploy/actions/* deploy/jobs/*; do
+    if [ "$(head -n 1 "$f")" = "#!/bin/sh" ] && grep -q '^set -eu$' "$f" && [ -x "$f" ]; then
+        PASSED=$((PASSED + 1))
+    else
+        FAILED=$((FAILED + 1)); echo "FAIL: $f: not an executable #!/bin/sh script with set -eu"
+    fi
+done
+
+# deploy/lib.sh's rules, on a copy that reads a test configuration and lock.
+cat >"$TMP/nylm.conf" <<'EOF'
+NYLM_UNITS="docker.service wg-quick@wg0"
+NYLM_BACKUP="davis=/srv/davis immich=/srv/immich,/srv/immich-db"
+EOF
+mkdir "$TMP/jobs"
+sed -e "s#/etc/nylm.conf#$TMP/nylm.conf#" -e "s#^JOBS_LOCK=.*#JOBS_LOCK=$TMP/jobs#" \
+    deploy/lib.sh >"$TMP/lib.sh"
+# lib WANT DESCRIPTION CODE: shell CODE with lib.sh loaded exits 0 (WANT ok)
+# or not (WANT no); its output is in $TMP/lib.out.
+lib() {
+    if sh -c ". '$TMP/lib.sh'; $3" >"$TMP/lib.out" 2>&1; then got=ok; else got=no; fi
+    if [ "$got" = "$1" ]; then PASSED=$((PASSED + 1)); else
+        FAILED=$((FAILED + 1)); echo "FAIL: lib.sh: $2: want $1, got $got ($(cat "$TMP/lib.out"))"
+    fi
+}
+lib ok "unit"               'valid_unit docker.service'
+lib ok "unit with @"        'valid_unit wg-quick@wg0'
+lib no "unit, option"       'valid_unit -x'
+lib no "unit, space"        'valid_unit "a b"'
+lib no "unit, slash"        'valid_unit a/b'
+lib no "unit, empty"        'valid_unit ""'
+lib ok "unit, 128"          "valid_unit $(printf '%0128d' 0)"
+lib no "unit, 129"          "valid_unit $(printf '%0129d' 0)"
+lib ok "entry"              'valid_entry immich-db2'
+lib no "entry, upper case"  'valid_entry Davis'
+lib no "entry, dash first"  'valid_entry -a'
+lib ok "entry, 32"          "valid_entry $(printf '%032d' 0)"
+lib no "entry, 33"          "valid_entry $(printf '%033d' 0)"
+lib ok "path"               'valid_path /var/lib/docker/volumes/davis_data/_data'
+lib ok "path, hidden part"  'valid_path /a/.hidden/b-c'
+lib no "path, root"         'valid_path /'
+lib no "path, relative"     'valid_path srv/a'
+lib no "path, trailing /"   'valid_path /a/'
+lib no "path, //"           'valid_path /a//b'
+lib no "path, ."            'valid_path /a/./b'
+lib no "path, .."           'valid_path /a/../b'
+lib no "path, ends in .."   'valid_path /a/..'
+lib no "path, space"        'valid_path "/a b"'
+lib no "path, comma"        'valid_path /a,b'
+lib no "path, glob"         'valid_path "/a*"'
+lib ok "path, 1024"         "valid_path /$(printf '%01023d' 0)"
+lib no "path, 1025"         "valid_path /$(printf '%01024d' 0)"
+lib ok "shown, own"         'unit_shown nylm-disk-usage.service'
+lib ok "shown, NYLM_UNITS"  'unit_shown wg-quick@wg0'
+lib ok "shown, backup job"  'unit_shown nylm-backup@immich.service'
+lib no "shown, other"       'unit_shown sshd.service'
+lib no "shown, by prefix"   'unit_shown docker'
+lib no "shown, other entry" 'unit_shown nylm-backup@other.service'
+lib ok "entry paths"        '[ "$(entry_paths immich)" = "$(printf "/srv/immich\n/srv/immich-db")" ]'
+lib no "entry paths, none"  'entry_paths other'
+lib no "entry paths, nylm"  'NYLM_BACKUP="nylm=/srv/x"; entry_paths nylm'
+for bad in 'davis' 'davis=' 'davis=/srv/a,' 'davis=,/srv/a' 'davis=/srv/a,,/srv/b' \
+           'davis=/srv/../etc' 'davis=srv' 'Davis=/srv/a'; do
+    name=${bad%%=*}
+    lib no "entry paths, $bad" "NYLM_BACKUP='$bad'; entry_paths $name"
+done
+lib ok "lock"               'take_lock'
+flock "$TMP/jobs" sleep 5 &
+LOCKER=$!
+sleep 0.3
+lib no "lock, taken"        'take_lock'
+if grep -q "another nylm job is running" "$TMP/lib.out"; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: lib.sh: busy lock not explained"; fi
+kill "$LOCKER" 2>/dev/null
+wait "$LOCKER" 2>/dev/null
 
 # ---- listen addresses and client allowlist ----------------------------------
 

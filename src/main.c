@@ -8,6 +8,7 @@
 #include <termios.h>
 #include <unistd.h>
 
+#include "api.h"
 #include "arena.h"
 #include "auth.h"
 #include "db.h"
@@ -157,6 +158,10 @@ static int cmd_serve(void)
         return 1;
     }
     json_init();
+    int configured = server_configure();
+    arena_reset();
+    if (configured != 0)
+        return 1;
 
     /* A client closing early must not kill the server. */
     signal(SIGPIPE, SIG_IGN);
@@ -179,6 +184,10 @@ static void usage(void)
             "  NYLM_DATA    (required)     data folder; must exist. Each app gets its own\n"
             "                              subfolder and database in it\n"
             "  NYLM_MUSIC   (none)         music library folder; unset: no music app\n"
+            "  NYLM_UNITS   (none)         more systemd units the server app shows, e.g.\n"
+            "                              \"wg-quick@wg0 docker sshd\"\n"
+            "  NYLM_BACKUP  (none)         backup entries: \"name=/path[,/path] ...\"\n"
+            "  NYLM_BACKUP_DIR (none)      where backups are written\n"
             "  NYLM_PUBLIC  [public]       static files directory\n"
             "  NYLM_PORT    [8080]         port to listen on\n"
             "  NYLM_LISTEN  [127.0.0.1]    addresses to listen on, e.g. \"10.0.0.1 192.168.1.5\"\n"

@@ -30,6 +30,19 @@
 
 .grid td.col-meter { min-width: 6rem; }
 
+/* A job's or unit's log: scrolls inside its box, keeps its lines. */
+.log {
+  margin: 0;
+  max-height: 28rem;
+  overflow: auto;
+  padding: 0.75rem;
+  border-radius: 14px;
+  box-shadow: var(--pressed);
+  font-size: 0.75rem;
+  line-height: 1.4;
+  white-space: pre;
+}
+
 .columns { display: grid; gap: var(--gap); align-content: start; }
 @media (min-width: 56rem) {
   .columns { grid-template-columns: 1fr 1fr; }

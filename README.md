@@ -281,6 +281,33 @@ vfat, ...; each device once), its size and free space; network and pseudo
 filesystems are left out (a network mount that is gone would hang the
 server). Rose from 90 % used, peach from 80 %.
 
+Long work is a job: a root script in `/usr/local/lib/nylm/jobs/` (from
+`deploy/jobs/`) run by its own systemd unit, which a root action starts.
+Every job holds an exclusive flock on that folder while it runs, so only
+one runs at a time (the web app answers 409 meanwhile). The page shows the
+unit's state (`systemctl show`, no root) and its last run's log (action
+`unit-log`, which shows only nylm's own units, those in `NYLM_UNITS` and
+the backup jobs). The actions and jobs read `/etc/nylm.conf` through
+`deploy/lib.sh` (installed as `/usr/local/lib/nylm/lib.sh`), which checks
+its values by the same rules as nylm; nylm refuses to start when a value
+is invalid.
+
+Disk usage (`nylm-disk-usage.service`): Measure (password) sizes nylm's
+data, the music, the backups, `/var/lib/docker` and each backup entry
+with `du -sxb`, one line each in the journal, which the page reads back.
+
+Settings in `/etc/nylm.conf` (restart nylm after changing them):
+
+```sh
+NYLM_UNITS="wg-quick@wg0 docker.service sshd.service"  # more units to show
+NYLM_BACKUP="davis=/var/lib/docker/volumes/davis_data/_data immich=/srv/immich,/srv/immich-db"
+NYLM_BACKUP_DIR=/mnt/data/backups
+```
+
+Units are named as systemd names them (A-Z a-z 0-9 @ . _ : -). A backup
+entry is `name=/path[,/path...]`: a name of a-z 0-9 - (not `nylm`, which is
+nylm's own data) and absolute paths of A-Z a-z 0-9 / . _ - only.
+
 ## Commands
 
 On the server (the deployed app, run as user `nylm` by systemd):
@@ -296,6 +323,8 @@ sudo systemctl start nylm-qobuz        # Qobuz: what the web app queued
 sudo -u nylm env NYLM_DATA=/mnt/data/nylm NYLM_MUSIC=/mnt/data/music \
     nylm music-scan /mnt/data/music/Some/Album   # scan one folder or file
 journalctl -u nylm-music-scan -u nylm-music-write -u nylm-music-move -u nylm-qobuz
+sudo systemctl start nylm-disk-usage    # measure the folders (see the System tab)
+journalctl -u nylm-disk-usage
 ```
 
 In a checkout (a debug build with sanitizers, data in `./dev-data`):

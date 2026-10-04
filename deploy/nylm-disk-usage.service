@@ -1,0 +1,14 @@
+[Unit]
+Description=nylm disk usage
+Documentation=file:///usr/local/share/nylm/README.md
+
+# Started from the web app (action disk-usage) or by hand:
+#   sudo systemctl start nylm-disk-usage
+# Measures nylm's data, the music, the backups, Docker's folder and each
+# backup entry; the sizes go to the journal. Never runs together with
+# another nylm job (update, backup).
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/nylm/jobs/disk-usage
+Nice=10
+IOSchedulingClass=idle

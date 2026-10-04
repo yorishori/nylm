@@ -3,6 +3,8 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -173,6 +175,196 @@ static void test_read_file(void)
     CHECK(sysinfo_read_file("/nonexistent/x", 10) == NULL);
 }
 
+static void test_names(void)
+{
+    CHECK(sysinfo_unit_valid("docker.service"));
+    CHECK(sysinfo_unit_valid("wg-quick@wg0"));
+    CHECK(sysinfo_unit_valid("a"));
+    CHECK(!sysinfo_unit_valid(""));
+    CHECK(!sysinfo_unit_valid(NULL));
+    CHECK(!sysinfo_unit_valid("-x"));
+    CHECK(!sysinfo_unit_valid("@x"));
+    CHECK(!sysinfo_unit_valid("a b"));
+    CHECK(!sysinfo_unit_valid("a/b"));
+    CHECK(!sysinfo_unit_valid("a;b"));
+    char s[131];
+    memset(s, 'u', sizeof s);
+    s[128] = '\0';
+    CHECK(sysinfo_unit_valid(s)); /* 128 */
+    s[128] = 'u';
+    s[129] = '\0';
+    CHECK(!sysinfo_unit_valid(s));
+
+    CHECK(sysinfo_entry_valid("davis"));
+    CHECK(sysinfo_entry_valid("immich-db2"));
+    CHECK(sysinfo_entry_valid("0"));
+    CHECK(!sysinfo_entry_valid(""));
+    CHECK(!sysinfo_entry_valid("-a"));
+    CHECK(!sysinfo_entry_valid("Davis"));
+    CHECK(!sysinfo_entry_valid("a_b"));
+    CHECK(!sysinfo_entry_valid("a.b"));
+    memset(s, 'e', sizeof s);
+    s[32] = '\0';
+    CHECK(sysinfo_entry_valid(s)); /* 32 */
+    s[32] = 'e';
+    s[33] = '\0';
+    CHECK(!sysinfo_entry_valid(s));
+
+    CHECK(sysinfo_path_valid("/mnt/data/docker/davis"));
+    CHECK(sysinfo_path_valid("/var/lib/docker/volumes/davis_data/_data"));
+    CHECK(sysinfo_path_valid("/a/.hidden/b-c"));
+    CHECK(!sysinfo_path_valid("/"));
+    CHECK(!sysinfo_path_valid(""));
+    CHECK(!sysinfo_path_valid("relative/path"));
+    CHECK(!sysinfo_path_valid("/a/"));
+    CHECK(!sysinfo_path_valid("/a//b"));
+    CHECK(!sysinfo_path_valid("/a/./b"));
+    CHECK(!sysinfo_path_valid("/a/../b"));
+    CHECK(!sysinfo_path_valid("/a/.."));
+    CHECK(!sysinfo_path_valid("/a b"));
+    CHECK(!sysinfo_path_valid("/a,b"));
+    CHECK(!sysinfo_path_valid("/a=b"));
+    CHECK(!sysinfo_path_valid("/a$b"));
+    char p[1030];
+    memset(p, 'p', sizeof p);
+    p[0] = '/';
+    p[1024] = '\0';
+    CHECK(sysinfo_path_valid(p)); /* 1024 */
+    p[1024] = 'p';
+    p[1025] = '\0';
+    CHECK(!sysinfo_path_valid(p));
+}
+
+static void test_config(void)
+{
+    const char *why = NULL;
+    cJSON *u = sysinfo_unit_list(" docker  wg-quick@wg0\tsshd.service\n", &why);
+    CHECK(cJSON_GetArraySize(u) == 3);
+    CHECK_STR(cJSON_GetArrayItem(u, 1)->valuestring, "wg-quick@wg0");
+    u = sysinfo_unit_list(NULL, &why);
+    CHECK(u != NULL && cJSON_GetArraySize(u) == 0);
+    u = sysinfo_unit_list("", &why);
+    CHECK(u != NULL && cJSON_GetArraySize(u) == 0);
+    CHECK(sysinfo_unit_list("docker docker", &why) == NULL);
+    CHECK(why != NULL && strstr(why, "twice") != NULL);
+    CHECK(sysinfo_unit_list("docker $(x)", &why) == NULL);
+    char many[33 * 4 + 1];
+    size_t used = 0;
+    for (int i = 0; i < 33; i++)
+        used += (size_t)snprintf(many + used, sizeof many - used, "u%02d ", i);
+    CHECK(sysinfo_unit_list(many, &why) == NULL); /* 33 */
+    many[32 * 4] = '\0';
+    CHECK(cJSON_GetArraySize(sysinfo_unit_list(many, &why)) == 32);
+
+    cJSON *b = sysinfo_backup_entries(
+        "davis=/var/lib/docker/volumes/davis_data/_data immich=/srv/immich,/srv/immich-db\n"
+        "compose=/home/yori/docker", &why);
+    CHECK(cJSON_GetArraySize(b) == 3);
+    cJSON *e = cJSON_GetArrayItem(b, 1);
+    CHECK_STR(str(e, "name"), "immich");
+    cJSON *paths = cJSON_GetObjectItemCaseSensitive(e, "paths");
+    CHECK(cJSON_GetArraySize(paths) == 2);
+    CHECK_STR(cJSON_GetArrayItem(paths, 1)->valuestring, "/srv/immich-db");
+    b = sysinfo_backup_entries(NULL, &why);
+    CHECK(b != NULL && cJSON_GetArraySize(b) == 0);
+
+    CHECK(sysinfo_backup_entries("davis", &why) == NULL);
+    CHECK(sysinfo_backup_entries("davis=", &why) == NULL);
+    CHECK(sysinfo_backup_entries("=/srv/a", &why) == NULL);
+    CHECK(sysinfo_backup_entries("Davis=/srv/a", &why) == NULL);
+    CHECK(sysinfo_backup_entries("nylm=/srv/a", &why) == NULL);
+    CHECK(why != NULL && strstr(why, "nylm") != NULL);
+    CHECK(sysinfo_backup_entries("a=/srv/a,", &why) == NULL);
+    CHECK(sysinfo_backup_entries("a=/srv/a,,/srv/b", &why) == NULL);
+    CHECK(sysinfo_backup_entries("a=srv/a", &why) == NULL);
+    CHECK(sysinfo_backup_entries("a=/srv/../etc", &why) == NULL);
+    CHECK(sysinfo_backup_entries("a=/srv/a,/srv/a", &why) == NULL);
+    CHECK(sysinfo_backup_entries("a=/srv/a a=/srv/b", &why) == NULL);
+    CHECK(why != NULL && strstr(why, "twice") != NULL);
+
+    /* 16 paths in an entry, not 17; 32 entries, not 33. */
+    char line[400];
+    used = (size_t)snprintf(line, sizeof line, "a=/p0");
+    for (int i = 1; i < 16; i++)
+        used += (size_t)snprintf(line + used, sizeof line - used, ",/p%d", i);
+    CHECK(sysinfo_backup_entries(line, &why) != NULL);
+    snprintf(line + used, sizeof line - used, ",/p16");
+    CHECK(sysinfo_backup_entries(line, &why) == NULL);
+    char entries[33 * 10 + 1];
+    used = 0;
+    for (int i = 0; i < 33; i++)
+        used += (size_t)snprintf(entries + used, sizeof entries - used, "e%02d=/s%02d ", i, i);
+    CHECK(sysinfo_backup_entries(entries, &why) == NULL);
+    entries[32 * 9] = '\0';
+    CHECK(cJSON_GetArraySize(sysinfo_backup_entries(entries, &why)) == 32);
+}
+
+static void test_units(void)
+{
+    cJSON *u = sysinfo_units(
+        "Id=docker.service\nDescription=Docker Application Container Engine\n"
+        "LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\n"
+        "ExecMainStatus=0\nExecMainStartTimestamp=@1700000000\nExecMainExitTimestamp=\n"
+        "ActiveEnterTimestamp=@1700000001\nSomethingElse=x=y\n"
+        "\n"
+        "Id=nylm-disk-usage.service\nLoadState=not-found\nActiveState=inactive\n"
+        "ExecMainStatus=\nExecMainStartTimestamp=n/a\n");
+    CHECK(cJSON_GetArraySize(u) == 2);
+    cJSON *a = cJSON_GetArrayItem(u, 0), *b = cJSON_GetArrayItem(u, 1);
+    CHECK_STR(str(a, "unit"), "docker.service");
+    CHECK_STR(str(a, "active"), "active");
+    CHECK_STR(str(a, "sub"), "running");
+    CHECK(num(a, "status") == 0);
+    CHECK(num(a, "started") == 1700000000);
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(a, "ended")));
+    CHECK(num(a, "since") == 1700000001);
+    CHECK(cJSON_GetObjectItemCaseSensitive(a, "SomethingElse") == NULL);
+    CHECK_STR(str(b, "load"), "not-found");
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(b, "status")));
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(b, "started")));
+
+    u = sysinfo_units("");
+    CHECK(u != NULL && cJSON_GetArraySize(u) == 0);
+    CHECK(sysinfo_units("ActiveState=active\n") == NULL); /* no Id */
+    CHECK(sysinfo_units("Id=x\nnot a property\n") == NULL);
+}
+
+static void test_du(void)
+{
+    cJSON *d = sysinfo_du(
+        "2026-10-04T12:00:00+0200 koi disk-usage[12]: nylm-du\t1234\tdata\t/mnt/data/nylm\n"
+        "2026-10-04T12:00:01+0200 koi disk-usage[12]: something else\n"
+        "nylm-du\t0\tbackup:davis\t/srv/davis\n"
+        "nylm-du\tx\tbad\t/x\n"
+        "nylm-du\t1\ttoo\tmany\tparts\n"
+        "nylm-du\t5\tlast\t/no-newline");
+    CHECK(cJSON_GetArraySize(d) == 3);
+    cJSON *a = cJSON_GetArrayItem(d, 0);
+    CHECK_STR(str(a, "label"), "data");
+    CHECK_STR(str(a, "path"), "/mnt/data/nylm");
+    CHECK(num(a, "bytes") == 1234);
+    CHECK_STR(str(cJSON_GetArrayItem(d, 1), "label"), "backup:davis");
+    CHECK_STR(str(cJSON_GetArrayItem(d, 2), "path"), "/no-newline");
+    d = sysinfo_du("");
+    CHECK(d != NULL && cJSON_GetArraySize(d) == 0);
+}
+
+static void test_locked(void)
+{
+    char path[512];
+    snprintf(path, sizeof path, "%s/lock", tmp);
+    CHECK(sysinfo_locked(path) == 0); /* not there */
+    write_file(tmp, "lock", "");
+    CHECK(sysinfo_locked(path) == 0);
+    int fd = open(path, O_RDONLY);
+    CHECK(fd >= 0 && flock(fd, LOCK_EX) == 0);
+    CHECK(sysinfo_locked(path) == 1);
+    CHECK(sysinfo_locked(tmp) == 0); /* a folder can be locked too */
+    close(fd);
+    CHECK(sysinfo_locked(path) == 0);
+    CHECK(remove(path) == 0);
+}
+
 int main(void)
 {
     if (arena_init(4 * 1024 * 1024) != 0 || mkdtemp(tmp) == NULL)
@@ -184,6 +376,11 @@ int main(void)
     test_mounts();
     test_temperatures();
     test_read_file();
+    test_names();
+    test_config();
+    test_units();
+    test_du();
+    test_locked();
     static const char *const made[] = {
         "hwmon0/name", "hwmon0/temp1_input", "hwmon0/temp1_label", "hwmon0/temp3_input",
         "hwmon0/temp4_input", "hwmon1/temp1_input", "four", "empty", "hwmon0", "hwmon1",
