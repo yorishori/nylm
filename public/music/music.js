@@ -51,6 +51,8 @@ const FIELDS = {
 const ALBUM_COLUMNS = ["album", "albumartist", "date", "composer", "genre", "compilation"];
 /* The album page's tag columns (the sort tags and Navidrome id are not shown). */
 const TRACK_COLUMNS = Object.keys(FIELDS);
+/* Tags each track has its own: the album line leaves them blank. */
+const PER_TRACK = ["discnumber", "tracknumber", "title", "bpm", "isrc", "musicbrainz_trackid"];
 
 const MAX_BYTES = 500;
 const MAX_VALUES = 64;
@@ -1113,6 +1115,26 @@ async function albumPage(id) {
     await redraw(key);
   };
 
+  /* The album line: each tag the tracks share, edited for all at once
+   * ("mixed" where they differ). */
+  const albumLine = el("tr", { class: "album-line" },
+    ...TRACK_COLUMNS.map((f) => {
+      if (f === "title") return el("th", { scope: "row", class: "col-title" }, "All tracks");
+      if (PER_TRACK.includes(f)) return el("td", { class: `col-${f}` });
+      const values = new Set(tracks.map((t) => JSON.stringify(planned(t, f) ?? null)));
+      const mixed = values.size > 1;
+      const key = `album:${f}`;
+      return editCell({
+        field: f, value: mixed ? null : planned(tracks[0], f), mixed, key, disabled: readOnly,
+        marks: tracks.some((t) => f in t.pending) ? ["edited"] : [],
+        save: async (v) => {
+          await queue({ album: id, set: { [f]: v } });
+          await redraw(key);
+        },
+      });
+    }),
+    el("td", { colspan: "5", class: "muted small" }, "Edits here change every track."));
+
   const rows = tracks.map((t) => el("tr", { class: Object.keys(t.pending).length ? "pending" : "" },
     ...TRACK_COLUMNS.map((f) => {
       const value = planned(t, f);
@@ -1170,7 +1192,7 @@ async function albumPage(id) {
           el("th", { scope: "col" }, "Size"),
           el("th", { scope: "col" }, "Pictures"),
           el("th", { scope: "col" }, "Scanned"))),
-        el("tbody", {}, rows))));
+        el("tbody", {}, albumLine, rows))));
 }
 
 /* Buttons that search other sites for the album, each in a new tab. */

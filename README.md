@@ -149,7 +149,9 @@ albums edited in place: the cover, album, album artist, date, composers,
 genres, compilation, for every track at once. The tracks count opens the
 album: buttons that search RateYourMusic, Wikipedia and MusicBrainz for it
 (in a new tab), its pictures (each once: type, size, on how many tracks, full
-size) with Set cover, then every track with every tag, edited in place;
+size) with Set cover, then every track with every tag, edited in place, under an album line
+that sets a tag for every track at once (not the tags each track has its
+own: disc, track, title, BPM, ISRC, MusicBrainz track);
 a value that differs from the rest of the album is ringed rose. Set
 cover reads a picture file in the browser, scales it to at most 1200
 pixels on a canvas and makes it a JPEG of at most 700 KiB, shows it, and
