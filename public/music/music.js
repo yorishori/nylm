@@ -1741,20 +1741,77 @@ async function duplicatesPage() {
 
 const STATE_TEXT = { done: "Done", warning: "Done, with a warning", failed: "Failed" };
 
-/* One written (or failed) change. Rose failed, peach warning. */
+/* One written (or failed) change, in its track's group. Rose failed,
+ * peach warning. */
 function historyItem(c) {
   const tone = c.state === "failed" ? "late" : c.state === "warning" ? "today" : "";
   const cover = c.field === COVER_FIELD;
   const value = cover ? c.value : fromStored(c.field, c.value);
-  return el("li", { class: "card stack history" },
+  const d = new Date(c.finished * 1000);
+  return el("li", { class: "stack history" },
     el("header", {},
       el("span", { class: tone ? `due ${tone}` : "muted" }, STATE_TEXT[c.state] || c.state),
-      el("span", { class: "muted" }, showTime(c.finished))),
-    el("strong", { class: "path" }, relative(c.path)),
+      el("span", { class: "muted" }, c.finished ? `${pad2(d.getHours())}:${pad2(d.getMinutes())}` : "—")),
     el("p", {},
       el("span", { class: "muted" }, `${fieldLabel(c.field)}: `),
       cover ? thumbList([value], "Cover") : value === "" ? "(removed)" : showValue(c.field, value)),
     c.note ? el("p", { class: "note" }, c.note) : null);
+}
+
+/* list grouped by key(item) in the order the keys first come: [[key,
+ * items]]. */
+function groupBy(list, key) {
+  const groups = new Map();
+  for (const item of list) {
+    const k = key(item);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(item);
+  }
+  return [...groups];
+}
+
+/* A group of written changes that opens and closes: a button with the
+ * label, how many changes and how many failed or warned, and the content
+ * it shows (made when it first opens). */
+function historyGroup(label, changes, content) {
+  const failed = changes.filter((c) => c.state === "failed").length;
+  const warned = changes.filter((c) => c.state === "warning").length;
+  const body = el("div", { class: "fold-body stack", hidden: true });
+  const button = el("button", { class: "btn fold", type: "button", "aria-expanded": "false",
+                                onclick: () => {
+    if (!body.firstChild) body.append(content());
+    body.hidden = !body.hidden;
+    button.setAttribute("aria-expanded", String(!body.hidden));
+  } },
+    el("span", { class: "fold-label" }, label), " ",
+    el("span", { class: "count" }, String(changes.length)),
+    failed ? el("span", { class: "due late" }, ` ${failed} failed`) : null,
+    warned ? el("span", { class: "due today" }, ` ${warned} warned`) : null);
+  return el("li", { class: "stack" }, button, body);
+}
+
+/* The written changes by day, then album, then track; each opens and
+ * closes. A track a scan removed is in "No longer in the library". */
+function historyList(history) {
+  const day = (c) => {
+    if (!c.finished) return "—";
+    const d = new Date(c.finished * 1000);
+    return showDate(isoDate(d.getFullYear(), d.getMonth() + 1, d.getDate()));
+  };
+  const album = (c) => (c.track == null ? "" : JSON.stringify([c.album, c.albumartist]));
+  const tracks = (list) => el("ul", { class: "fold-list" },
+    groupBy(list, (c) => c.track).map(([track, changes]) => historyGroup(
+      track == null ? "Removed tracks" : changes[0].title ?? relative(changes[0].path), changes,
+      () => el("div", { class: "stack" },
+        track == null ? null : el("div", { class: "path muted small" }, relative(changes[0].path)),
+        el("ul", { class: "fold-list" }, changes.map(historyItem))))));
+  const albums = (list) => el("ul", { class: "fold-list" },
+    groupBy(list, album).map(([key, changes]) => historyGroup(
+      key === "" ? "No longer in the library"
+                 : `${changes[0].album ?? "No album name"} · ${changes[0].albumartist ?? "No album artist"}`,
+      changes, () => tracks(changes))));
+  return el("ul", { class: "fold-list" },
+    groupBy(history, day).map(([d, changes]) => historyGroup(d, changes, () => albums(changes))));
 }
 
 const RULES = [
@@ -1904,7 +1961,7 @@ async function infoPage() {
     el("section", { class: "section" },
       el("header", {}, el("h2", {}, "Written changes ", el("span", { class: "count" }, ch.history.length))),
       ch.history.length
-        ? el("ul", { class: "list cols" }, ch.history.map(historyItem))
+        ? el("div", { class: "card" }, historyList(ch.history))
         : el("p", { class: "empty" }, "Nothing written yet.")));
 }
 

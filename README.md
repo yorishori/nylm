@@ -185,7 +185,8 @@ the moves did (`GET /api/music/moves`). Qobuz: connect, download albums,
 and what came of each download. Info: library
 counts, albums by genre (a donut of the 12 largest, the rest as "other",
 and every genre in a table) and by year (`GET /api/music/charts`, from the
-files' tags), the rules, and the written changes with their results.
+files' tags), the rules, and the written changes with their results, by
+day, then album, then track, each opening on its own.
 
 The rules for a value: required are title, album, artist, album artist,
 track and disc number, date, genre, composer and compilation; text is

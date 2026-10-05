@@ -842,8 +842,9 @@ static int add_blocked(cJSON *blocked, const cJSON *pending)
  * files' album and album artist), track and change; now is the file's
  * value), how many there are, the listed tracks the write service would
  * refuse (add_blocked()), and the latest written ones (done, warning,
- * failed) with their notes. track and path are null when a scan removed
- * the track. Genre and composer values are JSON arrays.
+ * failed) with their notes and the track's album, album artist and title
+ * now. track and path are null when a scan removed the track. Genre and
+ * composer values are JSON arrays.
  */
 void music_changes(struct request *req, struct response *res)
 {
@@ -858,12 +859,13 @@ void music_changes(struct request *req, struct response *res)
         " WHERE c.state = 'pending' ORDER BY t.id IS NULL, t.albumartist COLLATE NOCASE,"
         " t.album COLLATE NOCASE, t.albumartist, t.album, t.path, c.id");
     sqlite3_stmt *b = history == NULL ? NULL : db_prepare(music_db,
-        "SELECT c.id, c.batch, c.track_id AS track, t.path, c.field, c.value, c.started,"
-        " c.finished, c.state, c.note FROM changes c LEFT JOIN tracks t ON t.id = c.track_id"
+        "SELECT c.id, c.batch, c.track_id AS track, t.path, t.album, t.albumartist, t.title,"
+        " c.field, c.value, c.started, c.finished, c.state, c.note FROM changes c"
+        " LEFT JOIN tracks t ON t.id = c.track_id"
         " WHERE c.done = 1 ORDER BY c.finished DESC, c.id DESC LIMIT 300");
     int ok = a != NULL && b != NULL && count >= 0 &&
              cJSON_AddNumberToObject(obj, "count", (double)count) != NULL &&
-             add_rows(pending, a, 9, MAX_LIST) == 0 && add_rows(history, b, 10, MAX_HISTORY) == 0;
+             add_rows(pending, a, 9, MAX_LIST) == 0 && add_rows(history, b, 13, MAX_HISTORY) == 0;
     sqlite3_finalize(a);
     sqlite3_finalize(b);
     cJSON *blocked = ok ? cJSON_AddArrayToObject(obj, "blocked") : NULL;

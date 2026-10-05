@@ -848,7 +848,7 @@ expect_body '"genre":["rock","pop"],"composer":["Bach","Händel"]},"pending":{},
 expect_body '"title":"Song Three"' "several titles replaced by one"
 expect 200 "changes after write" -b "$JAR" "$B/api/music/changes"
 expect_body '"pending":[],' "nothing pending after the write"
-expect_body '"field":"title","value":"New Title",' "history keeps the change"
+expect_body '"album":"Some Album","albumartist":"Some Artist","title":"New Title","field":"title","value":"New Title",' "history keeps the change, with the track's album and title"
 expect_body '"state":"warning","note":"disc number set to 1/1"' "history notes the warning"
 query "14|14|0" "written changes are finished, with times" \
     "SELECT count(*), sum(done), sum(started IS NULL OR finished IS NULL) FROM changes"
@@ -888,7 +888,7 @@ logged " read, 1 removed, 1 failed" "removed file counted"
 service 0 "music-write, file gone" music-write
 logged "0 tracks written; 0 changes done, 0 with warnings, 1 failed" "changes for a removed track fail"
 expect 200 "changes after removal" -b "$JAR" "$B/api/music/changes"
-expect_body '"track":null,"path":null,"field":"mood","value":"calm",' "removed track in the history"
+expect_body '"track":null,"path":null,"album":null,"albumartist":null,"title":null,"field":"mood","value":"calm",' "removed track in the history"
 expect_body '"note":"the track is no longer in the library"' "removal note"
 mv "$TMP/multi.away" "$M/Artist/Multi"
 
