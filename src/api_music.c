@@ -790,11 +790,60 @@ void music_charts(struct request *req, struct response *res)
     "  WHERE v.track_id = t.id AND v.field = c.field) END"
 
 /*
+ * Adds to blocked a {track, fields} for each track in pending (the listed
+ * changes, by track) whose changes the write service would refuse: its
+ * planned tags, made ready as it does (tags_prepare()), break a rule
+ * (tags_check()) in fields. 0 or -1 (logged).
+ */
+static int add_blocked(cJSON *blocked, const cJSON *pending)
+{
+    sqlite3_stmt *st = db_prepare(music_db,
+        "SELECT " MUSIC_TAG_COLUMNS " FROM tracks t WHERE t.id = ?");
+    sqlite3_stmt *changes = st != NULL ? db_prepare(music_db, PENDING_SQL) : NULL;
+    int ok = changes != NULL;
+    long long last = -1;
+    const cJSON *c;
+    cJSON_ArrayForEach(c, pending) {
+        const cJSON *track = cJSON_GetObjectItemCaseSensitive(c, "track");
+        if (!ok)
+            break;
+        if (!cJSON_IsNumber(track) || (long long)track->valuedouble == last)
+            continue; /* removed by a scan, or done */
+        long long id = last = (long long)track->valuedouble;
+        int rc = sqlite3_bind_int64(st, 1, id) == SQLITE_OK ? sqlite3_step(st) : SQLITE_ERROR;
+        size_t mark = arena_mark();
+        struct tags t;
+        unsigned changed, bad = 0;
+        char note[TAGS_MAX_NOTE] = "";
+        ok = rc == SQLITE_ROW && planned_tags(st, 0, id, changes, &t, &changed) == 0 &&
+             tags_prepare(&t, changed, note, sizeof note) == 0;
+        for (int f = 0; ok && f < TAG_FIELDS; f++)
+            bad |= tags_check((enum tag_field)f, &t.value[f]) != NULL ? 1u << f : 0;
+        arena_rewind(mark);
+        sqlite3_reset(st);
+        if (!ok) {
+            fprintf(stderr, "music: track %lld: can not check its pending changes\n", id);
+            break;
+        }
+        if (bad == 0)
+            continue;
+        cJSON *o = cJSON_CreateObject();
+        ok = o != NULL && cJSON_AddItemToArray(blocked, o) &&
+             cJSON_AddNumberToObject(o, "track", (double)id) != NULL &&
+             add_field_names(o, "fields", bad) != NULL;
+    }
+    sqlite3_finalize(st);
+    sqlite3_finalize(changes);
+    return ok ? 0 : -1;
+}
+
+/*
  * GET /api/music/changes: the pending changes (at most 5000, by album (the
  * files' album and album artist), track and change; now is the file's
- * value), how many there are, and the latest written ones
- * (done, warning, failed) with their notes. track and path are null when
- * a scan removed the track. Genre and composer values are JSON arrays.
+ * value), how many there are, the listed tracks the write service would
+ * refuse (add_blocked()), and the latest written ones (done, warning,
+ * failed) with their notes. track and path are null when a scan removed
+ * the track. Genre and composer values are JSON arrays.
  */
 void music_changes(struct request *req, struct response *res)
 {
@@ -817,6 +866,8 @@ void music_changes(struct request *req, struct response *res)
              add_rows(pending, a, 9, MAX_LIST) == 0 && add_rows(history, b, 10, MAX_HISTORY) == 0;
     sqlite3_finalize(a);
     sqlite3_finalize(b);
+    cJSON *blocked = ok ? cJSON_AddArrayToObject(obj, "blocked") : NULL;
+    ok = blocked != NULL && add_blocked(blocked, pending) == 0;
     if (!ok) {
         json_error(res, 500, "internal error");
         return;

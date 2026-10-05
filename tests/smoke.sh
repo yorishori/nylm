@@ -773,6 +773,7 @@ expect 200 "changes"           -b "$JAR" "$B/api/music/changes"
 expect_body "\"track\":$T1,\"path\":\"$M/Artist/Album/01.mp3\",\"album\":\"Some Album\",\"albumartist\":\"Some Artist\",\"title\":\"Song One\",\"field\":\"date\",\"value\":\"1999\",\"now\":\"2001\"" "pending change with its album and the file's value"
 expect_body '"field":"genre","value":"[\"rock\",\"pop\"]","now":"[\"Rock\"]"' "list values as JSON"
 expect_body '"history":[],"count":17' "count and empty history"
+expect_body '"blocked":[]' "the write would refuse no track (a missing disc number becomes 1/1)"
 D=/api/music/discard
 post "isrc back as in the files" 200 $Q "{\"album\":$T1,\"set\":{\"isrc\":\"\"}}"
 expect_body '"queued":0,"dropped":3' "back to the files' value drops the changes"
@@ -874,6 +875,8 @@ logged "not written: DATE must be a year" "service validates values"
 query "1999" "invalid value not written" "SELECT date FROM tracks WHERE id = $T1"
 # ... and a track with an invalid track number is not written at all.
 post "queue on a bad track"    200 $Q "{\"edits\":[{\"track\":$T2,\"field\":\"bpm\",\"value\":\"120\"}]}"
+expect 200 "changes, a bad track" -b "$JAR" "$B/api/music/changes"
+expect_body "\"blocked\":[{\"track\":$T2,\"fields\":[\"tracknumber\",\"genre\",\"composer\"]}]" "the changes list the track the write refuses, and why"
 service 0 "music-write, bad track number" music-write
 logged "not written: TRACKNUMBER must be two positive whole numbers" "track number blocks the track"
 

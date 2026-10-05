@@ -166,7 +166,9 @@ missing X gets the lowest free number). Every edit is queued at once as
 one batch (`changes` table), and colours what will change. Changes: the
 pending changes by album, then track (those of tracks a scan removed in
 one group), a search over every field, Discard for an album, a track or
-all, and Write. Duplicates (`GET /api/music/duplicates`, by the planned
+all, and Write; a track whose changes the write would refuse (another tag
+breaks a rule, after the write's own fixes such as the disc number) is
+marked ⚠, a button to its album. Duplicates (`GET /api/music/duplicates`, by the planned
 tags; at most 500 rows a list): tracks with the same MusicBrainz track
 id, ISRC, or artist and title; albums (the tracks of one album and album
 artist in one folder) with the same MusicBrainz album id, barcode, album
