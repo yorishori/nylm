@@ -313,10 +313,14 @@ order of the albums list, whose tracks without a genre all have one
 planned MusicBrainz album id (one queued by `ids` counts). It asks for
 the release, then its release group: the genres MusicBrainz's users voted
 for the group, else for the release; the 5 with the most votes that fit
-the genre rule (and are at most 100 bytes), then the release's language
-as a genre (`spanish`, `instrumental` for no lyrics; left out when it has
-several or one not in nylm's list, and when `instrumental` is among the
-voted genres: MusicBrainz's language is that of the release's text). They are queued for the tracks that
+the genre rule (and are at most 100 bytes), then the languages of the
+lyrics as genres (`spanish`, `japanese`): those of the tracks' works (the
+same request), any sung on at least one track, the 3 on the most tracks;
+`instrumental` when no track is sung and a work has no lyrics. When no
+work says, the release's language instead (that of its titles, so
+English-titled albums sung in Japanese say only `english`). Languages
+not in nylm's list or "several" are left out, and all of them when
+`instrumental` is among the voted genres. They are queued for the tracks that
 still have no genre. Recorded in `musicbrainz_lookups`: queued, none,
 not_found, failed, skipped (the album got a genre meanwhile). An album
 whose id was queued, none or not_found is not asked again; failed and

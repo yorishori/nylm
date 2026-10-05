@@ -105,7 +105,7 @@ void mb_add_genre(struct mb_genres *g, const char *name)
     for (size_t k = 0; k < g->n; k++)
         if (strcmp(g->name[k], name) == 0)
             return;
-    if (g->n == MB_GENRES + 1)
+    if (g->n == MB_ALL_GENRES)
         return;
     snprintf(g->name[g->n], sizeof g->name[g->n], "%s", name);
     g->v[g->n] = g->name[g->n];
@@ -144,19 +144,88 @@ static const char *const languages[][2] = {
 };
 #define NLANGUAGES (sizeof languages / sizeof languages[0])
 
+/* The index in languages of code (a JSON item), or -1 if it is not a
+ * string of 3 lowercase letters (*valid 0) or not in the list. */
+static int language_index(const cJSON *code, int *valid)
+{
+    const char *s = cJSON_IsString(code) ? code->valuestring : NULL;
+    int ok = s != NULL && strlen(s) == 3;
+    for (int i = 0; ok && i < 3; i++)
+        ok = s[i] >= 'a' && s[i] <= 'z';
+    *valid = ok;
+    for (size_t i = 0; ok && i < NLANGUAGES; i++)
+        if (strcmp(languages[i][0], s) == 0)
+            return (int)i;
+    return -1;
+}
+
 const char *mb_language(const cJSON *release, const char **code)
 {
     const cJSON *text = cJSON_GetObjectItemCaseSensitive(release, "text-representation");
     const cJSON *lang = cJSON_GetObjectItemCaseSensitive(text, "language");
-    const char *s = cJSON_IsString(lang) ? lang->valuestring : NULL;
-    int ok = s != NULL && strlen(s) == 3;
-    for (int i = 0; ok && i < 3; i++)
-        ok = s[i] >= 'a' && s[i] <= 'z';
-    *code = ok ? s : NULL;
-    for (size_t i = 0; ok && i < NLANGUAGES; i++)
-        if (strcmp(languages[i][0], s) == 0)
-            return languages[i][1];
-    return NULL;
+    int valid;
+    int i = language_index(lang, &valid);
+    *code = valid ? lang->valuestring : NULL;
+    return i >= 0 ? languages[i][1] : NULL;
+}
+
+size_t mb_lyrics_languages(const cJSON *release, const char *out[MB_LANGUAGES])
+{
+    int tracks[NLANGUAGES] = { 0 };  /* tracks sung in each language */
+    int first[NLANGUAGES] = { 0 };   /* the order they were first sung in */
+    int order = 0, read = 0;
+    size_t zxx = NLANGUAGES;         /* the index of "no lyrics" */
+    for (size_t i = 0; i < NLANGUAGES; i++)
+        if (strcmp(languages[i][0], "zxx") == 0)
+            zxx = i;
+    const cJSON *media = cJSON_GetObjectItemCaseSensitive(release, "media");
+    const cJSON *medium, *track, *rel, *code;
+    cJSON_ArrayForEach(medium, media) {
+        const cJSON *list = cJSON_GetObjectItemCaseSensitive(medium, "tracks");
+        cJSON_ArrayForEach(track, list) {
+            if (read++ == MB_TRACKS)
+                break;
+            /* A track counts once for each language, whatever its works. */
+            int here[NLANGUAGES] = { 0 };
+            const cJSON *rec = cJSON_GetObjectItemCaseSensitive(track, "recording");
+            const cJSON *rels = cJSON_GetObjectItemCaseSensitive(rec, "relations");
+            cJSON_ArrayForEach(rel, rels) {
+                const cJSON *type = cJSON_GetObjectItemCaseSensitive(rel, "type");
+                const cJSON *work = cJSON_GetObjectItemCaseSensitive(rel, "work");
+                if (!cJSON_IsString(type) || strcmp(type->valuestring, "performance") != 0)
+                    continue;
+                const cJSON *codes = cJSON_GetObjectItemCaseSensitive(work, "languages");
+                cJSON_ArrayForEach(code, codes) {
+                    int valid;
+                    int i = language_index(code, &valid);
+                    if (i >= 0)
+                        here[i] = 1;
+                }
+            }
+            for (size_t i = 0; i < NLANGUAGES; i++)
+                if (here[i] && tracks[i]++ == 0)
+                    first[i] = order++;
+        }
+    }
+    /* Sung languages first; "instrumental" only when none is sung. */
+    size_t n = 0;
+    int sung = 0;
+    for (size_t i = 0; i < NLANGUAGES; i++)
+        sung |= i != zxx && tracks[i] > 0;
+    if (sung && zxx < NLANGUAGES)
+        tracks[zxx] = 0;
+    while (n < MB_LANGUAGES) {
+        int best = -1;
+        for (size_t i = 0; i < NLANGUAGES; i++)
+            if (tracks[i] > 0 && (best < 0 || tracks[i] > tracks[best] ||
+                                  (tracks[i] == tracks[best] && first[i] < first[best])))
+                best = (int)i;
+        if (best < 0)
+            break;
+        out[n++] = languages[best][1];
+        tracks[best] = 0;
+    }
+    return n;
 }
 
 const char *mb_release_group(const cJSON *release)
@@ -476,7 +545,7 @@ int mb_next_unidentified(struct mb_album *out, int max)
  * memory. */
 static const char *genres_json(const struct mb_genres *g)
 {
-    const char *names[MB_GENRES + 1];
+    const char *names[MB_ALL_GENRES];
     struct tag_values v = { 0, names };
     for (size_t i = 0; g != NULL && i < g->n; i++)
         names[v.n++] = g->name[i];
@@ -649,7 +718,9 @@ static const char *lookup(const char *mbid, struct mb_genres *g, char *note, siz
     char path[128], group[MB_ID_LEN + 1] = "";
     cJSON *release = NULL, *rg = NULL;
     g->n = 0;
-    snprintf(path, sizeof path, "release/%s?inc=genres+release-groups&fmt=json", mbid);
+    snprintf(path, sizeof path,
+             "release/%s?inc=genres+release-groups+recordings+work-rels+recording-level-rels"
+             "&fmt=json", mbid);
     int r = get(path, &release, note, notelen);
     const char *state = r < 0 ? "failed" : r == 0 ? "not_found" : NULL;
     if (r == 0)
@@ -670,18 +741,24 @@ static const char *lookup(const char *mbid, struct mb_genres *g, char *note, siz
     if (state == NULL && g->n == 0)
         snprintf(note, notelen, "no genres that nylm can use");
     if (state == NULL) {
-        const char *code;
-        const char *language = mb_language(release, &code);
+        const char *code = NULL, *sung[MB_LANGUAGES];
+        size_t nsung = mb_lyrics_languages(release, sung);
+        const char *language = nsung == 0 ? mb_language(release, &code) : NULL;
         size_t len = strlen(note);
-        int added = language != NULL && mb_add_language(g, language);
+        int added = 0;
+        for (size_t i = 0; i < nsung; i++)
+            added |= mb_add_language(g, sung[i]);
+        if (language != NULL)
+            added = mb_add_language(g, language);
         snprintf(note + len, notelen - len, "%s",
-                 added                            ? ", and the release's language"
-                 : language != NULL               ? ", instrumental (no language)"
+                 added && nsung > 0               ? ", and the lyrics' languages"
+                 : added                          ? ", and the release's language"
+                 : nsung > 0 || language != NULL  ? ", instrumental (no language)"
                  : code == NULL                   ? ", no language"
                  : strcmp(code, "mul") == 0       ? ", several languages (left out)"
                                                   : ", a language nylm does not know: ");
         len = strlen(note);
-        if (language == NULL && code != NULL && strcmp(code, "mul") != 0)
+        if (nsung == 0 && language == NULL && code != NULL && strcmp(code, "mul") != 0)
             snprintf(note + len, notelen - len, "%s", code);
         if (g->n == 0)
             state = "none";

@@ -17,6 +17,8 @@
 #define MB_ID_LEN    36  /* a MusicBrainz id: lowercase hex 8-4-4-4-12 */
 #define MB_ALBUMS    10  /* albums looked up in one run */
 #define MB_GENRES    5   /* genres taken from MusicBrainz's votes, at most */
+#define MB_LANGUAGES 3   /* languages of the lyrics taken, at most */
+#define MB_TRACKS    1000 /* tracks of a release read, at most */
 #define MB_MAX_GENRE 100 /* bytes in a genre taken from MusicBrainz */
 #define MB_MAX_NAME  2048 /* bytes in a name compared (album, artist credit) */
 #define MB_MAX_QUERY 6400 /* bytes in a search's path, percent-encoded */
@@ -25,11 +27,12 @@
 int mb_id_valid(const char *s);
 
 /* Genres chosen from MusicBrainz: name[i] for i < n; v points at them.
- * The voted ones, then the language. */
+ * The voted ones, then the languages. */
+#define MB_ALL_GENRES (MB_GENRES + MB_LANGUAGES)
 struct mb_genres {
     size_t n;
-    char name[MB_GENRES + 1][MB_MAX_GENRE + 1];
-    const char *v[MB_GENRES + 1];
+    char name[MB_ALL_GENRES][MB_MAX_GENRE + 1];
+    const char *v[MB_ALL_GENRES];
 };
 
 /* Adds name to g unless it is there already or g is full. */
@@ -57,6 +60,17 @@ int mb_add_language(struct mb_genres *g, const char *language);
  * not 3 lowercase letters).
  */
 const char *mb_language(const cJSON *release, const char **code);
+
+/*
+ * The languages of a release's lyrics (its JSON with
+ * inc=recordings+work-rels+recording-level-rels: each track's recording's
+ * performance relations to works, whose "languages" are ISO 639-3 codes)
+ * as genres into out: those in nylm's list sung on at least one track
+ * (of the first MB_TRACKS), the MB_LANGUAGES on the most tracks (between
+ * equal counts the first sung first); "instrumental" only when no track is
+ * sung and a work has no lyrics (zxx). The count; 0 if no work says.
+ */
+size_t mb_lyrics_languages(const cJSON *release, const char *out[MB_LANGUAGES]);
 
 /* The id of a release's release group (its JSON); NULL if none or not an id. */
 const char *mb_release_group(const cJSON *release);

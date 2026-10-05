@@ -136,19 +136,117 @@ static void test_language(void)
     CHECK_STR(language("{}"), "- -");
 }
 
-/* Adding genres: no name twice, and no more than MB_GENRES + 1. */
+/* A track whose recording performs works with the languages given (a JSON
+ * list of lists of codes). */
+static void add_track(char *json, size_t size, const char *works)
+{
+    cJSON *langs = cJSON_Parse(works);
+    size_t len = strlen(json);
+    len += (size_t)snprintf(json + len, size - len, "%s{\"recording\":{\"relations\":[",
+                            json[len - 1] == '[' ? "" : ",");
+    const cJSON *w;
+    int i = 0;
+    cJSON_ArrayForEach(w, langs) {
+        char *codes = cJSON_PrintUnformatted(w);
+        len += (size_t)snprintf(json + len, size - len,
+                                "%s{\"type\":\"performance\",\"work\":{\"languages\":%s}}",
+                                i++ > 0 ? "," : "", codes);
+    }
+    snprintf(json + len, size - len, "]}}");
+    cJSON_Delete(langs);
+}
+
+/* The lyrics' languages of a release whose tracks are tracks (each a
+ * JSON list of works' language lists), joined by "|". */
+static const char *sung(int ntracks, const char *const *tracks)
+{
+    static char json[65536], out[256];
+    snprintf(json, sizeof json, "{\"media\":[{\"tracks\":[");
+    for (int i = 0; i < ntracks; i++)
+        add_track(json, sizeof json, tracks[i]);
+    size_t len = strlen(json);
+    snprintf(json + len, sizeof json - len, "]}]}");
+    cJSON *obj = cJSON_Parse(json);
+    const char *names[MB_LANGUAGES];
+    size_t n = obj != NULL ? mb_lyrics_languages(obj, names) : 0;
+    out[0] = '\0';
+    for (size_t i = 0; i < n; i++) {
+        len = strlen(out);
+        snprintf(out + len, sizeof out - len, "%s%s", i > 0 ? "|" : "", names[i]);
+    }
+    cJSON_Delete(obj);
+    return obj != NULL ? out : "bad json";
+}
+
+#define SUNG(...) sung(sizeof (const char *[]){ __VA_ARGS__ } / sizeof (const char *), \
+                       (const char *[]){ __VA_ARGS__ })
+
+static void test_lyrics_languages(void)
+{
+    /* Bonito Generation: any track counts, the most sung first */
+    CHECK_STR(SUNG("[[\"eng\"]]", "[[\"eng\"]]", "[[\"eng\",\"jpn\"]]", "[[\"jpn\"]]"),
+              "english|japanese");
+    CHECK_STR(SUNG("[[\"jpn\"]]", "[[\"eng\"]]", "[[\"eng\"]]"), "english|japanese");
+    /* equal counts: the first sung first */
+    CHECK_STR(SUNG("[[\"spa\"]]", "[[\"eng\"]]"), "spanish|english");
+    /* at most MB_LANGUAGES */
+    CHECK_STR(SUNG("[[\"fra\"]]", "[[\"spa\",\"eng\"]]", "[[\"eng\",\"deu\"]]",
+                   "[[\"eng\",\"spa\"]]"),
+              "english|spanish|french");
+    /* a track counts once for a language, however many of its works have it */
+    CHECK_STR(SUNG("[[\"eng\"],[\"eng\"],[\"eng\"]]", "[[\"spa\"]]", "[[\"spa\"]]"),
+              "spanish|english");
+    /* instrumental only when nothing is sung */
+    CHECK_STR(SUNG("[[\"zxx\"]]", "[[\"zxx\"]]"), "instrumental");
+    CHECK_STR(SUNG("[[\"zxx\"]]", "[[\"zxx\"]]", "[[\"eng\"]]"), "english");
+    /* unknown, several (mul), not a code: left out */
+    CHECK_STR(SUNG("[[\"mul\"]]", "[[\"xyz\"]]", "[[\"ENG\"]]", "[[1]]", "[[\"\"]]"), "");
+    CHECK_STR(SUNG("[[\"mul\",\"kor\"]]"), "korean");
+    /* no works, or works without languages */
+    CHECK_STR(SUNG("[]", "[[]]"), "");
+    CHECK_STR(sung(0, NULL), "");
+    /* only performance relations count */
+    cJSON *r = cJSON_Parse("{\"media\":[{\"tracks\":[{\"recording\":{\"relations\":["
+                           "{\"type\":\"samples material\",\"work\":{\"languages\":[\"eng\"]}},"
+                           "{\"work\":{\"languages\":[\"spa\"]}},"
+                           "{\"type\":\"performance\",\"work\":{\"languages\":[\"jpn\"]}}]}}]}]}");
+    const char *names[MB_LANGUAGES];
+    CHECK(mb_lyrics_languages(r, names) == 1 && strcmp(names[0], "japanese") == 0);
+    cJSON_Delete(r);
+    /* not shaped as expected */
+    const char *odd[] = { "{}", "{\"media\":{}}", "{\"media\":[{}]}", "{\"media\":[{\"tracks\":[{}]}]}",
+                          "{\"media\":[{\"tracks\":[{\"recording\":{\"relations\":[{\"type\":"
+                          "\"performance\",\"work\":{\"languages\":\"eng\"}}]}}]}]}" };
+    for (size_t i = 0; i < sizeof odd / sizeof odd[0]; i++) {
+        r = cJSON_Parse(odd[i]);
+        CHECK(r != NULL && mb_lyrics_languages(r, names) == 0);
+        cJSON_Delete(r);
+    }
+    /* only the first MB_TRACKS tracks are read, across media */
+    static char many[MB_TRACKS * 120];
+    size_t len = (size_t)snprintf(many, sizeof many, "{\"media\":[{\"tracks\":[");
+    for (int i = 0; i < MB_TRACKS; i++)
+        len += (size_t)snprintf(many + len, sizeof many - len, "%s{}", i > 0 ? "," : "");
+    snprintf(many + len, sizeof many - len, "]},{\"tracks\":[{\"recording\":{\"relations\":["
+             "{\"type\":\"performance\",\"work\":{\"languages\":[\"eng\"]}}]}}]}]}");
+    r = cJSON_Parse(many);
+    CHECK(r != NULL && mb_lyrics_languages(r, names) == 0);
+    cJSON_Delete(r);
+}
+
+/* Adding genres: no name twice, and no more than MB_ALL_GENRES. */
 static void test_add_genre(void)
 {
     struct mb_genres g = { .n = 0 };
     mb_add_genre(&g, "rock");
     mb_add_genre(&g, "rock");
     CHECK(g.n == 1);
-    const char *names[] = { "a", "b", "c", "d", "e", "f", "g" };
+    const char *names[] = { "a", "b", "c", "d", "e", "f", "g", "h", "i" };
     for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
         mb_add_genre(&g, names[i]);
-    CHECK(g.n == MB_GENRES + 1);
+    CHECK(g.n == MB_ALL_GENRES);
     CHECK_STR(g.v[0], "rock");
-    CHECK_STR(g.v[MB_GENRES], "e");
+    CHECK_STR(g.v[MB_ALL_GENRES - 1], "g");
 }
 
 /* The language after the voted genres: left out when "instrumental" is
@@ -583,6 +681,7 @@ int main(void)
     test_language();
     test_add_genre();
     test_add_language();
+    test_lyrics_languages();
     test_release_group();
     test_normalize();
     test_search_path();

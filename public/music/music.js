@@ -1945,8 +1945,8 @@ async function fixesPage() {
       `Looks up the next ${FIX_ALBUMS} albums without a genre whose tracks share one ` +
       "MusicBrainz album id (a queued one counts): the genres MusicBrainz's users voted for the " +
       `release group (else the release), the ${MB_GENRES} with the most votes that fit the ` +
-      "rules, and the release's language (\"spanish\", \"instrumental\"; none when the votes " +
-      "already say instrumental), queued for the " +
+      "rules, and up to 3 languages of the lyrics (\"spanish\", \"instrumental\"; else the " +
+      "release's language; none when the votes already say instrumental), queued for the " +
       "tracks without a genre. Each album is looked up once; a failed lookup is tried again " +
       "next time.",
       `Look up genres for ${FIX_ALBUMS} albums`, mb.lookups,
