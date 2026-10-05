@@ -44,6 +44,11 @@ void mb_add_genre(struct mb_genres *g, const char *name);
  */
 size_t mb_genres(const cJSON *entity, struct mb_genres *out);
 
+/* Adds language (from mb_language()) to g, unless g holds "instrumental"
+ * (MusicBrainz's language is that of the release's text, not of lyrics).
+ * 1 if it was added (or was there), 0 if not. */
+int mb_add_language(struct mb_genres *g, const char *language);
+
 /*
  * The language of a release (its JSON, "text-representation": {"language"},
  * an ISO 639-3 code) as a genre: its English name ("spanish"),

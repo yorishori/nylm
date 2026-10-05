@@ -315,7 +315,8 @@ the release, then its release group: the genres MusicBrainz's users voted
 for the group, else for the release; the 5 with the most votes that fit
 the genre rule (and are at most 100 bytes), then the release's language
 as a genre (`spanish`, `instrumental` for no lyrics; left out when it has
-several or one not in nylm's list). They are queued for the tracks that
+several or one not in nylm's list, and when `instrumental` is among the
+voted genres: MusicBrainz's language is that of the release's text). They are queued for the tracks that
 still have no genre. Recorded in `musicbrainz_lookups`: queued, none,
 not_found, failed, skipped (the album got a genre meanwhile). An album
 whose id was queued, none or not_found is not asked again; failed and

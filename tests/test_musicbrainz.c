@@ -151,6 +151,30 @@ static void test_add_genre(void)
     CHECK_STR(g.v[MB_GENRES], "e");
 }
 
+/* The language after the voted genres: left out when "instrumental" is
+ * among them. */
+static void test_add_language(void)
+{
+    struct mb_genres g = { .n = 0 };
+    CHECK(mb_add_language(&g, "english") == 1);                /* no genres */
+    CHECK(g.n == 1 && strcmp(g.v[0], "english") == 0);
+    g.n = 0;
+    mb_add_genre(&g, "ambient");
+    mb_add_genre(&g, "instrumental");
+    CHECK(mb_add_language(&g, "english") == 0);
+    CHECK(g.n == 2);
+    CHECK(mb_add_language(&g, "instrumental") == 0);           /* zxx, already there */
+    CHECK(g.n == 2);
+    g.n = 0;
+    mb_add_genre(&g, "instrumental hip hop");                  /* not the same genre */
+    CHECK(mb_add_language(&g, "english") == 1);
+    CHECK(g.n == 2 && strcmp(g.v[1], "english") == 0);
+    g.n = 0;
+    mb_add_genre(&g, "ambient");
+    CHECK(mb_add_language(&g, "instrumental") == 1);           /* zxx */
+    CHECK(g.n == 2 && strcmp(g.v[1], "instrumental") == 0);
+}
+
 static void test_release_group(void)
 {
     cJSON *r = cJSON_Parse("{\"release-group\":{\"id\":\"" ID1 "\"}}");
@@ -558,6 +582,7 @@ int main(void)
     test_genres();
     test_language();
     test_add_genre();
+    test_add_language();
     test_release_group();
     test_normalize();
     test_search_path();

@@ -112,6 +112,15 @@ void mb_add_genre(struct mb_genres *g, const char *name)
     g->n++;
 }
 
+int mb_add_language(struct mb_genres *g, const char *language)
+{
+    for (size_t k = 0; k < g->n; k++)
+        if (strcmp(g->name[k], "instrumental") == 0)
+            return 0;
+    mb_add_genre(g, language);
+    return 1;
+}
+
 /* ISO 639-3 codes and their names as genres. */
 static const char *const languages[][2] = {
     { "afr", "afrikaans" }, { "ara", "arabic" },      { "ben", "bengali" },
@@ -664,10 +673,10 @@ static const char *lookup(const char *mbid, struct mb_genres *g, char *note, siz
         const char *code;
         const char *language = mb_language(release, &code);
         size_t len = strlen(note);
-        if (language != NULL)
-            mb_add_genre(g, language);
+        int added = language != NULL && mb_add_language(g, language);
         snprintf(note + len, notelen - len, "%s",
-                 language != NULL                 ? ", and the release's language"
+                 added                            ? ", and the release's language"
+                 : language != NULL               ? ", instrumental (no language)"
                  : code == NULL                   ? ", no language"
                  : strcmp(code, "mul") == 0       ? ", several languages (left out)"
                                                   : ", a language nylm does not know: ");
