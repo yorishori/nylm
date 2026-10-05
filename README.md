@@ -355,16 +355,19 @@ Long work is a job: a root script in `/usr/local/lib/nylm/jobs/` (from
 `deploy/jobs/`) run by its own systemd unit, which a root action starts.
 Every job holds an exclusive flock on that folder while it runs, so only
 one runs at a time (the web app answers 409 meanwhile). The page shows the
-unit's state (`systemctl show`, no root) and its last run's log (action
-`unit-log`, which shows only nylm's own units, those in `NYLM_UNITS` and
-the backup jobs). The actions and jobs read `/etc/nylm.conf` through
+unit's state (`systemctl show`, no root; systemd forgets a run at a
+reboot, so a job that has not run since then says "not run since boot")
+and a Log button: the last 100 lines of the unit's journal, from any run
+(action `unit-journal`). A job's results are read back from its last
+run's log (action `unit-log`). Both show only nylm's own units, those in
+`NYLM_UNITS` and the backup jobs. The actions and jobs read `/etc/nylm.conf` through
 `deploy/lib.sh` (installed as `/usr/local/lib/nylm/lib.sh`), which checks
 its values by the same rules as nylm; nylm refuses to start when a value
 is invalid.
 
 Services: the units in `NYLM_UNITS`, then nylm's own: state, since when
 or how the last run ended (rose: failed, or a service that is stopped),
-and Log (the unit's last run). A name without a unit type is a service,
+and Log (the last 100 lines of its journal). A name without a unit type is a service,
 as systemd reads it (`docker` is `docker.service`).
 
 Disk usage (`nylm-disk-usage.service`): Measure (password) sizes nylm's

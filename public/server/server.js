@@ -85,7 +85,7 @@ function running(job) {
 }
 
 /* One line on a job (a systemd unit): waiting to start, running, how its
- * last run ended, or that it has not run since the server started. */
+ * last run ended, or that it has not run since boot. */
 function jobState(job) {
   if (job.load === "not-found") {
     return el("p", { class: "bad" }, "Not installed: run deploy/install.sh on the server.");
@@ -96,7 +96,7 @@ function jobState(job) {
   if (running(job)) {
     return el("p", { class: "warn" }, `Running since ${showTime(job.started)}…`);
   }
-  if (!job.started) return el("p", { class: "muted" }, "Not run since the server started.");
+  if (!job.started) return el("p", { class: "muted" }, "Not run since boot.");
   if (job.result === "success") {
     return el("p", { class: "ok" }, `Done ${showTime(job.ended || job.started)}.`);
   }
@@ -131,10 +131,10 @@ function logPanel(load, emptyText) {
   return { button: open, panel };
 }
 
-/* The log panel of a unit's last run. */
+/* The log panel of a unit: the last 100 lines of its journal. */
 function unitLog(unit) {
   return logPanel(async () => (await api("GET", `/api/server/log?unit=${encodeURIComponent(unit)}`)).log,
-                  "No log: it has not run since the server started.");
+                  "No log: the journal has nothing for it.");
 }
 
 /*
@@ -295,7 +295,7 @@ function usageCard(du) {
     el("div", { class: "actions" },
       el("button", { class: "btn go", type: "button", disabled: running(job) || du.busy,
                      onclick: () => measure.open() }, "Measure"),
-      job.started ? log.button : null),
+      log.button),
     du.busy && !running(job) ? el("p", { class: "muted" }, "Another job is running.") : null,
     measure,
     log.panel);
@@ -316,7 +316,7 @@ function unitState(u) {
    * is stopped: that is wrong for a service someone watches. */
   const when = u.ended ? showTime(u.ended) : "";
   if (u.started && u.result !== "success") return [`stopped (${u.result})`, "bad", when];
-  if (u.type === "oneshot") return [u.started ? "done" : "not run", "muted", when];
+  if (u.type === "oneshot") return [u.started ? "done" : "not run since boot", "muted", when];
   return ["stopped", "bad", when];
 }
 
@@ -396,7 +396,7 @@ function packagesCard(u) {
     el("div", { class: "actions" },
       el("button", { class: "btn go", type: "button", disabled: running(u.check),
                      onclick: () => check.open() }, "Check for updates"),
-      u.check.started ? log.button : null),
+      log.button),
     check,
     log.panel);
   watchJob(u.check, card, async () => (await api("GET", "/api/server/updates")).check,
@@ -420,7 +420,7 @@ function updateCard(u) {
                 rel: "noopener noreferrer" }, "Arch news"),
       el("button", { class: "btn go", type: "button", disabled: running(u.update) || u.busy,
                      onclick: () => start.open() }, "Update now"),
-      u.update.started ? log.button : null),
+      log.button),
     u.busy && !running(u.update) ? el("p", { class: "muted" }, "Another job is running.") : null,
     start,
     log.panel);
@@ -501,7 +501,7 @@ function entryItem(e, b) {
       el("button", { class: "btn go", type: "button",
                      disabled: running(e.job) || b.busy || !b.available,
                      onclick: () => start.open() }, "Back up now"),
-      e.job.started ? log.button : null),
+      log.button),
     start,
     log.panel);
   watchJob(e.job, card, async () => {

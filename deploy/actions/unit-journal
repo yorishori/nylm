@@ -1,0 +1,9 @@
+#!/bin/sh
+# Prints the last 100 lines of one systemd unit's journal, whatever run
+# they come from (also from before a reboot): nylm's own units, those in
+# NYLM_UNITS and the backup entries' jobs. Argument: the unit's name.
+set -eu
+. /usr/local/lib/nylm/lib.sh
+[ "$#" -eq 1 ] || die "takes one unit name"
+unit_shown "$1" || die "not a unit nylm shows: $1"
+exec /usr/bin/journalctl --no-pager --quiet --output=short-iso --lines=100 --unit="$1"

@@ -35,7 +35,7 @@
 
 #define MAX_AUDIT  100 /* actions listed */
 #define JOBS_LOCK  "/usr/local/lib/nylm/jobs" /* see above */
-#define LOG_MAX    (2 * 1024 * 1024) /* a unit's log as unit-log prints it */
+#define LOG_MAX    (2 * 1024 * 1024) /* a unit's log as unit-log or unit-journal prints it */
 #define SHOW_MAX   (256 * 1024)      /* systemctl show of the units */
 #define SHOW_TIMEOUT 10              /* seconds */
 #define SMART_MAX  (1024 * 1024)     /* smartctl's reports of every disk */
@@ -391,8 +391,9 @@ void server_audit(struct request *req, struct response *res)
 /* ---- logs and jobs ------------------------------------------------------ */
 
 /*
- * GET /api/server/log?unit=U: the last run of the unit (at most 500 lines),
- * for nylm's own units, NYLM_UNITS and the backup jobs. -> {unit, log}
+ * GET /api/server/log?unit=U: the last 100 lines of the unit's journal,
+ * whatever run they come from (action unit-journal), for nylm's own
+ * units, NYLM_UNITS and the backup jobs. -> {unit, log}
  */
 void server_log(struct request *req, struct response *res)
 {
@@ -406,8 +407,8 @@ void server_log(struct request *req, struct response *res)
         json_error(res, 404, "nylm does not show this unit (add it to NYLM_UNITS)");
         return;
     }
-    char *log = unit_log(unit);
-    if (log == NULL) {
+    char *log;
+    if (action_output("unit-journal", unit, LOG_MAX, &log, NULL) != 0) {
         json_error(res, 502, "could not read the log; see the server log");
         return;
     }
