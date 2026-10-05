@@ -1225,6 +1225,7 @@ void music_queue(struct request *req, struct response *res)
 #define MAX_DUPES      500  /* rows in one list of possible duplicates */
 #define MAX_MERGE_FROM 64   /* names merged into one at once */
 #define MAX_MERGE_NAME 4096 /* bytes in a name merged (files may hold long ones) */
+#define MAX_NAMES      20000 /* names of a field listed */
 
 /*
  * The planned values, as "p": every track (id, path) with the tags the
@@ -1284,20 +1285,24 @@ void music_queue(struct request *req, struct response *res)
     "SELECT value, count(DISTINCT track_id) AS tracks FROM pv WHERE field = '" f "' GROUP BY value"
 
 /*
- * Adds name: {"rows": [...], "more": bool} to obj, the first MAX_DUPES rows
- * of sql (ncols columns); more if there were others. 0 or -1 (logged).
+ * Adds name: {"rows": [...], "more": bool} to obj, the first max rows of
+ * sql (ncols columns; ?1 bound to max + 1, ?2 to text unless NULL); more if
+ * there were others. 0 or -1 (logged).
  */
-static int add_dupes(cJSON *obj, const char *name, const char *sql, int ncols)
+static int add_list(cJSON *obj, const char *name, const char *sql, int ncols, int max,
+                    const char *text)
 {
     cJSON *section = cJSON_AddObjectToObject(obj, name);
     cJSON *rows = section != NULL ? cJSON_AddArrayToObject(section, "rows") : NULL;
     sqlite3_stmt *st = rows != NULL ? db_prepare(music_db, sql) : NULL;
-    int rc = st != NULL && sqlite3_bind_int(st, 1, MAX_DUPES + 1) == SQLITE_OK &&
-                     add_rows(rows, st, ncols, MAX_DUPES) == 0
+    int rc = st != NULL && sqlite3_bind_int(st, 1, max + 1) == SQLITE_OK &&
+                     (text == NULL ||
+                      sqlite3_bind_text(st, 2, text, -1, SQLITE_STATIC) == SQLITE_OK) &&
+                     add_rows(rows, st, ncols, max) == 0
                  ? 0
                  : -1;
     int more = 0;
-    if (rc == 0 && cJSON_GetArraySize(rows) == MAX_DUPES) {
+    if (rc == 0 && cJSON_GetArraySize(rows) == max) {
         int step = sqlite3_step(st);
         more = step == SQLITE_ROW;
         if (step != SQLITE_ROW && step != SQLITE_DONE) {
@@ -1308,7 +1313,7 @@ static int add_dupes(cJSON *obj, const char *name, const char *sql, int ncols)
     if (rc == 0 && cJSON_AddBoolToObject(section, "more", more) == NULL)
         rc = -1;
     if (rows == NULL)
-        fprintf(stderr, "music: out of memory listing duplicates\n");
+        fprintf(stderr, "music: out of memory listing %s\n", name);
     sqlite3_finalize(st);
     return rc;
 }
@@ -1357,7 +1362,8 @@ void music_duplicates(struct request *req, struct response *res)
     for (size_t i = 0; ok && i < sizeof lists / sizeof lists[0]; i++) {
         if (i == 0 || strcmp(lists[i].group, lists[i - 1].group) != 0)
             ok = (group = cJSON_AddObjectToObject(obj, lists[i].group)) != NULL;
-        ok = ok && add_dupes(group, lists[i].name, lists[i].sql, lists[i].ncols) == 0;
+        ok = ok && add_list(group, lists[i].name, lists[i].sql, lists[i].ncols, MAX_DUPES,
+                            NULL) == 0;
     }
     if (!ok) {
         json_error(res, 500, "internal error");
@@ -1391,8 +1397,9 @@ static int merged_name(const struct tag_values *from, const char *s)
 
 /*
  * The edit that merges from into to in field f of a track's planned tags
- * t: in a list each of from becomes to (once, where the first was). 1 and
- * e filled, 0 if the track has none of from, -1 when out of memory.
+ * t: in a list each of from becomes to (once, where the first was), or
+ * goes when to is NULL (lists only). 1 and e filled, 0 if the track has
+ * none of from, -1 when out of memory.
  */
 static int merge_edit(const struct tags *t, enum tag_field f, const struct tag_values *from,
                       const char *to, struct edit *e)
@@ -1419,7 +1426,7 @@ static int merge_edit(const struct tags *t, enum tag_field f, const struct tag_v
         int merged = merged_name(from, now->v[i]);
         const char *s = merged ? to : now->v[i];
         found |= merged;
-        int twice = 0;
+        int twice = s == NULL;
         for (size_t j = 0; j < e->value.n && !twice; j++)
             twice = strcmp(e->value.v[j], s) == 0;
         if (!twice)
@@ -1431,6 +1438,78 @@ static int merge_edit(const struct tags *t, enum tag_field f, const struct tag_v
     return e->stored != NULL ? 1 : -1;
 }
 
+/* The field of a name list (artist, albumartist, composer, genre) named
+ * by s, or -1. */
+static int name_field(const char *s)
+{
+    static const enum tag_field fields[] = {
+        TAG_ARTIST, TAG_ALBUMARTIST, TAG_COMPOSER, TAG_GENRE,
+    };
+    for (size_t i = 0; s != NULL && i < sizeof fields / sizeof fields[0]; i++)
+        if (strcmp(s, tags_name[fields[i]]) == 0)
+            return (int)fields[i];
+    return -1;
+}
+
+/* Reads body["field"], a name list's field, into *f. NULL or an error. */
+static const char *read_name_field(const cJSON *body, enum tag_field *f)
+{
+    const char *name = NULL;
+    int found = json_get_string(body, "field", 1, 32, &name) == NULL ? name_field(name) : -1;
+    if (found < 0)
+        return "'field' must be artist, albumartist, composer or genre";
+    *f = (enum tag_field)found;
+    return NULL;
+}
+
+/* Reads body["to"], a name for field f that passes the rules. NULL or an
+ * error message. */
+static const char *read_to(const cJSON *body, enum tag_field f, const char **to)
+{
+    struct edit target;
+    cJSON *one = NULL;
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(body, "to");
+    if (!cJSON_IsString(item))
+        return "'to' must be a string";
+    if (tags_is_multi(f)) { /* read_value() takes a list for these */
+        one = cJSON_CreateArray();
+        cJSON *s = one != NULL ? cJSON_CreateString(item->valuestring) : NULL;
+        if (s == NULL || !cJSON_AddItemToArray(one, s))
+            return "out of memory";
+        item = one;
+    }
+    const char *err = read_value(item, f, &target);
+    if (err != NULL)
+        return err;
+    if (target.value.n != 1)
+        return message("'%s' is required%s", "to", "");
+    *to = target.value.v[0];
+    return NULL;
+}
+
+/* 1 if s is a name as the files may hold it: text of 1 to MAX_MERGE_NAME
+ * bytes. */
+static int name_valid(const char *s)
+{
+    size_t len = s != NULL ? strlen(s) : 0;
+    return len >= 1 && len <= MAX_MERGE_NAME && text_valid(s, 0);
+}
+
+/* Reads body[key], one name as the files may hold it, as the only name of
+ * *names. NULL or an error message. */
+static const char *read_one_name(const cJSON *body, const char *key, struct tag_values *names)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(body, key);
+    if (!cJSON_IsString(item) || !name_valid(item->valuestring))
+        return message("'%s' must be text of 1 to 4096 bytes%s", key, "");
+    names->v = arena_alloc(sizeof *names->v);
+    if (names->v == NULL)
+        return "out of memory";
+    names->v[0] = item->valuestring;
+    names->n = 1;
+    return NULL;
+}
+
 /*
  * {"field": f, "from": [names], "to": name}: reads and checks a merge into
  * *f, from and *to. NULL or an error message.
@@ -1438,41 +1517,14 @@ static int merge_edit(const struct tags *t, enum tag_field f, const struct tag_v
 static const char *read_merge(const cJSON *body, enum tag_field *f, struct tag_values *from,
                               const char **to)
 {
-    static const enum tag_field fields[] = {
-        TAG_ARTIST, TAG_ALBUMARTIST, TAG_COMPOSER, TAG_GENRE,
-    };
-    const char *name = NULL;
-    const char *err = json_get_string(body, "field", 1, 32, &name);
-    int found = 0;
-    for (size_t i = 0; err == NULL && i < sizeof fields / sizeof fields[0]; i++)
-        if (strcmp(name, tags_name[fields[i]]) == 0) {
-            *f = fields[i];
-            found = 1;
-        }
-    if (err != NULL || !found)
-        return "'field' must be artist, albumartist, composer or genre";
-
-    struct edit target;
-    cJSON *one = NULL;
-    const cJSON *item = cJSON_GetObjectItemCaseSensitive(body, "to");
-    if (!cJSON_IsString(item))
-        return "'to' must be a string";
-    if (tags_is_multi(*f)) { /* read_value() takes a list for these */
-        one = cJSON_CreateArray();
-        cJSON *s = one != NULL ? cJSON_CreateString(item->valuestring) : NULL;
-        if (s == NULL || !cJSON_AddItemToArray(one, s))
-            return "out of memory";
-        item = one;
-    }
-    if ((err = read_value(item, *f, &target)) != NULL)
+    const char *err = read_name_field(body, f);
+    if (err != NULL || (err = read_to(body, *f, to)) != NULL)
         return err;
-    if (target.value.n != 1)
-        return message("'%s' is required%s", "to", "");
-    *to = target.value.v[0];
 
     char to_key[DUPES_KEY_MAX + 1], key[DUPES_KEY_MAX + 1];
     dupes_key(*to, strlen(*to), to_key, sizeof to_key);
     const cJSON *list = cJSON_GetObjectItemCaseSensitive(body, "from");
+    const cJSON *item;
     int size = cJSON_GetArraySize(list);
     if (!cJSON_IsArray(list) || size < 1 || size > MAX_MERGE_FROM)
         return "'from' must be a list of 1 to 64 names";
@@ -1482,12 +1534,11 @@ static const char *read_merge(const cJSON *body, enum tag_field *f, struct tag_v
         return "out of memory";
     cJSON_ArrayForEach(item, list) {
         const char *s = cJSON_IsString(item) ? item->valuestring : NULL;
-        size_t len = s != NULL ? strlen(s) : 0;
-        if (len < 1 || len > MAX_MERGE_NAME || !text_valid(s, 0))
+        if (!name_valid(s))
             return "each name in 'from' must be text of 1 to 4096 bytes";
         if (strcmp(s, *to) == 0 || merged_name(from, s))
             return "each name in 'from' must be given once, and not be 'to'";
-        dupes_key(s, len, key, sizeof key);
+        dupes_key(s, strlen(s), key, sizeof key);
         if (to_key[0] == '\0' || strcmp(key, to_key) != 0)
             return message("'%.100s' is not another spelling of '%.100s'", s, *to);
         from->v[from->n++] = s;
@@ -1496,15 +1547,14 @@ static const char *read_merge(const cJSON *body, enum tag_field *f, struct tag_v
 }
 
 /*
- * POST /api/music/merge {"field": f, "from": [names], "to": name}: queues,
- * as one batch, the change of every track whose planned field has a name
- * of from to name to (the duplicates: the same apart from case, accents,
- * punctuation and spaces). field: artist, albumartist, composer or genre;
- * to must pass the rules. A list that would then break the rules (another
- * invalid value) is skipped.
+ * Queues, as one batch, the change of every track whose planned field f
+ * has a name of from to name to, or without it when to is NULL (lists
+ * only). A track whose field would then break the rules (another invalid
+ * value, or no composer left) is skipped. Replies.
  * -> 200 {batch, queued, dropped, skipped}
  */
-void music_merge(struct request *req, struct response *res)
+static void queue_names(struct response *res, enum tag_field f, const struct tag_values *from,
+                        const char *to)
 {
     static const struct {
         enum tag_field f;
@@ -1515,23 +1565,12 @@ void music_merge(struct request *req, struct response *res)
         { TAG_COMPOSER, MERGE_LIST_SQL("composer") },
         { TAG_GENRE, MERGE_LIST_SQL("genre") },
     };
-    cJSON *body = json_body(req, res);
-    if (body == NULL)
-        return;
-    enum tag_field f = TAG_ARTIST;
-    struct tag_values from;
-    const char *to = NULL;
-    const char *err = read_merge(body, &f, &from, &to);
-    if (err != NULL) {
-        json_error(res, 400, err);
-        return;
-    }
     const char *sql = NULL;
     for (size_t i = 0; i < sizeof tracks_sql / sizeof tracks_sql[0]; i++)
         if (tracks_sql[i].f == f)
             sql = tracks_sql[i].sql;
-    const char *from_json = music_values_json(&from);
-    if (sql == NULL || from_json == NULL) {
+    const char *from_json = music_values_json(from);
+    if (sql == NULL || from_json == NULL || (to == NULL && !tags_is_multi(f))) {
         json_error(res, 500, "internal error");
         return;
     }
@@ -1556,7 +1595,7 @@ void music_merge(struct request *req, struct response *res)
     while (rc == 0 && n < count && (step = sqlite3_step(find)) == SQLITE_ROW)
         ids[n++] = sqlite3_column_int64(find, 0);
     if (rc == 0 && step != SQLITE_DONE && step != SQLITE_ROW && n < count) {
-        db_log_error(music_db, "merge: tracks");
+        db_log_error(music_db, "names: tracks");
         rc = -1;
     }
     if (rc == 0 && n > 0 &&
@@ -1571,7 +1610,7 @@ void music_merge(struct request *req, struct response *res)
         if (sqlite3_bind_int64(track, 1, ids[i]) != SQLITE_OK ||
             sqlite3_step(track) != SQLITE_ROW ||
             planned_tags(track, 0, ids[i], pending, &t, &changed) != 0 ||
-            (found = merge_edit(&t, f, &from, to, &e)) < 0)
+            (found = merge_edit(&t, f, from, to, &e)) < 0)
             rc = -1;
         sqlite3_reset(track);
         e.track = ids[i];
@@ -1582,7 +1621,8 @@ void music_merge(struct request *req, struct response *res)
         arena_rewind(mark);
     }
     if (rc != 0)
-        fprintf(stderr, "music: merge into '%.100s' failed\n", to);
+        fprintf(stderr, "music: changing '%.100s' to '%.100s' failed\n", from->v[0],
+                to != NULL ? to : "(none)");
     sqlite3_finalize(find);
     sqlite3_finalize(track);
     sqlite3_finalize(pending);
@@ -1601,6 +1641,147 @@ void music_merge(struct request *req, struct response *res)
         return;
     }
     json_reply(res, 200, out);
+}
+
+/*
+ * POST /api/music/merge {"field": f, "from": [names], "to": name}: queues
+ * the change of every track whose planned field has a name of from to name
+ * to (the duplicates: the same apart from case, accents, punctuation and
+ * spaces). field: artist, albumartist, composer or genre; to must pass the
+ * rules. -> 200 {batch, queued, dropped, skipped} (queue_names())
+ */
+void music_merge(struct request *req, struct response *res)
+{
+    cJSON *body = json_body(req, res);
+    if (body == NULL)
+        return;
+    enum tag_field f = TAG_ARTIST;
+    struct tag_values from;
+    const char *to = NULL;
+    const char *err = read_merge(body, &f, &from, &to);
+    if (err != NULL) {
+        json_error(res, 400, err);
+        return;
+    }
+    queue_names(res, f, &from, to);
+}
+
+/*
+ * POST /api/music/rename {"field": f, "from": name, "to": name}: queues the
+ * change of every track whose planned field has name from to name to, any
+ * other name. field: artist, albumartist, composer or genre; from as the
+ * files may hold it, to must pass the rules.
+ * -> 200 {batch, queued, dropped, skipped} (queue_names())
+ */
+void music_rename(struct request *req, struct response *res)
+{
+    cJSON *body = json_body(req, res);
+    if (body == NULL)
+        return;
+    enum tag_field f = TAG_ARTIST;
+    struct tag_values from;
+    const char *to = NULL;
+    const char *err = read_name_field(body, &f);
+    if (err == NULL && (err = read_to(body, f, &to)) == NULL &&
+        (err = read_one_name(body, "from", &from)) == NULL && strcmp(from.v[0], to) == 0)
+        err = "'from' and 'to' must differ";
+    if (err != NULL) {
+        json_error(res, 400, err);
+        return;
+    }
+    queue_names(res, f, &from, to);
+}
+
+/*
+ * POST /api/music/remove {"field": "genre"|"composer", "name": name}:
+ * queues the removal of name from every track's planned genres or
+ * composers; a track it would leave without a composer is skipped.
+ * -> 200 {batch, queued, dropped, skipped} (queue_names())
+ */
+void music_remove(struct request *req, struct response *res)
+{
+    cJSON *body = json_body(req, res);
+    if (body == NULL)
+        return;
+    enum tag_field f = TAG_ARTIST;
+    struct tag_values name;
+    const char *err = read_name_field(body, &f);
+    if (err != NULL || !tags_is_multi(f))
+        err = "'field' must be composer or genre";
+    else
+        err = read_one_name(body, "name", &name);
+    if (err != NULL) {
+        json_error(res, 400, err);
+        return;
+    }
+    queue_names(res, f, &name, NULL);
+}
+
+/* The planned names of a field: name, tracks, albums (album and album
+ * artist), by name. ?1: at most this many rows. */
+#define NAMES_ONE(c)                                                                         \
+    PLANNED_CTE " SELECT " c " AS name, count(*) AS tracks,"                                 \
+    " count(DISTINCT " ALBUM_KEY("p") ") AS albums FROM p WHERE " c " IS NOT NULL"           \
+    " GROUP BY " c " ORDER BY name COLLATE NOCASE, name LIMIT ?1"
+#define NAMES_LIST(f)                                                                        \
+    PLANNED_CTE " SELECT v.value AS name, count(DISTINCT v.track_id) AS tracks,"             \
+    " count(DISTINCT " ALBUM_KEY("p") ") AS albums FROM pv v JOIN p ON p.id = v.track_id"    \
+    " WHERE v.field = '" f "' GROUP BY v.value ORDER BY name COLLATE NOCASE, name LIMIT ?1"
+
+/* The albums whose planned field has name ?2: id (a track), album,
+ * albumartist, tracks (with the name). ?1: at most this many rows. */
+#define NAME_ALBUMS_ONE(c)                                                                   \
+    PLANNED_CTE " SELECT min(id) AS id, album, albumartist, count(*) AS tracks FROM p"       \
+    " WHERE " c " = ?2 GROUP BY album, albumartist"                                          \
+    " ORDER BY albumartist COLLATE NOCASE, album COLLATE NOCASE LIMIT ?1"
+#define NAME_ALBUMS_LIST(f)                                                                  \
+    PLANNED_CTE " SELECT min(p.id) AS id, p.album, p.albumartist,"                           \
+    " count(DISTINCT p.id) AS tracks FROM pv v JOIN p ON p.id = v.track_id"                  \
+    " WHERE v.field = '" f "' AND v.value = ?2 GROUP BY p.album, p.albumartist"              \
+    " ORDER BY p.albumartist COLLATE NOCASE, p.album COLLATE NOCASE LIMIT ?1"
+
+/*
+ * GET /api/music/names?field=f, or with &name=N the albums with that name:
+ * from the planned tags. field: artist, albumartist, composer or genre.
+ * -> 200 {"names": {"rows": [{name, tracks, albums}], "more": bool}}
+ *    200 {"albums": {"rows": [{id, album, albumartist, tracks}], "more"}}
+ */
+void music_names(struct request *req, struct response *res)
+{
+    static const struct {
+        enum tag_field f;
+        const char *names, *albums;
+    } lists[] = {
+        { TAG_ARTIST, NAMES_ONE("artist"), NAME_ALBUMS_ONE("artist") },
+        { TAG_ALBUMARTIST, NAMES_ONE("albumartist"), NAME_ALBUMS_ONE("albumartist") },
+        { TAG_COMPOSER, NAMES_LIST("composer"), NAME_ALBUMS_LIST("composer") },
+        { TAG_GENRE, NAMES_LIST("genre"), NAME_ALBUMS_LIST("genre") },
+    };
+    const char *field = NULL, *name = NULL;
+    int f = http_query(req, "field", &field) == 0 ? name_field(field) : -1;
+    if (f < 0) {
+        json_error(res, 400,
+                   "query parameter 'field' must be artist, albumartist, composer or genre");
+        return;
+    }
+    int q = http_query(req, "name", &name);
+    if (q < 0 || (q == 0 && !name_valid(name))) {
+        json_error(res, 400, "query parameter 'name' must be text of 1 to 4096 bytes");
+        return;
+    }
+    size_t i = 0;
+    while (lists[i].f != (enum tag_field)f)
+        i++;
+    cJSON *obj = cJSON_CreateObject();
+    int rc = obj == NULL ? -1
+             : name == NULL
+                 ? add_list(obj, "names", lists[i].names, 3, MAX_NAMES, NULL)
+                 : add_list(obj, "albums", lists[i].albums, 4, MAX_LIST, name);
+    if (rc != 0) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, obj);
 }
 
 /* 1 if the track's only picture is hash, 0 if not, -1 on error (logged). */

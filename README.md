@@ -146,7 +146,7 @@ They never run together: each holds `$NYLM_DATA/music/library.lock`
 exclusively. The server holds it shared for its own writes to `music.db`,
 and refuses to queue or discard anything while a service runs (409).
 
-The web app has seven tabs. Albums: the last scan and a button to scan
+The web app has eight tabs. Albums: the last scan and a button to scan
 again, filters (search; a field each, with a switch for albums where a track
 has no value for it; and switches for albums with invalid tags, missing
 tags, invalid genres, genres that differ between tracks, several artists
@@ -171,7 +171,15 @@ pending changes by album, then track (those of tracks a scan removed in
 one group), a search over every field, Discard for an album, a track or
 all, and Write; a track whose changes the write would refuse (another tag
 breaks a rule, after the write's own fixes such as the disc number) is
-marked ⚠, a button to its album. Duplicates (`GET /api/music/duplicates`, by the planned
+marked ⚠, a button to its album. Names (`GET /api/music/names?field=`, by
+the planned tags, at most 20000): every artist, album artist, composer or
+genre with how many tracks and albums have it, by name or by count, with a
+search; one opens on its albums (`&name=`, each a button to it), Rename
+(`POST /api/music/rename {field, from, to}`: to any name that passes the
+rules) and, for a genre or composer, Remove (`POST /api/music/remove
+{field, name}`). Each queues, as one batch, the change on every track
+with that name; a track whose list would still break the rules (another
+invalid genre, or no composer left) is left alone and counted. Duplicates (`GET /api/music/duplicates`, by the planned
 tags; at most 500 rows a list): tracks with the same MusicBrainz track
 id, ISRC, or artist and title; albums (the tracks of one album and album
 artist in one folder) with the same MusicBrainz album id, barcode, album

@@ -213,6 +213,9 @@ td.col-cover.edited.differs .thumb { box-shadow: 0 0 0 2px var(--lavender), 0 0 
 
 /* The written changes: day, album and track groups (foldGroup). */
 .fold-list > .history { border-top: 1px solid var(--edge); padding-top: 0.5rem; }
+/* A name's albums (names tab): a button each, wrapping. */
+.name-albums { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.name-albums .btn { white-space: normal; text-align: left; overflow-wrap: anywhere; }
 .rules { margin: 0; padding-left: 1.2rem; display: grid; gap: 0.3rem; }
 
 @media (max-width: 21rem) {

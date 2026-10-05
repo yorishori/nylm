@@ -562,7 +562,8 @@ for route in "GET /api/music" "GET /api/music/albums" "GET /api/music/album?trac
              "POST /api/music/write" "GET /api/music/art?hash=$(printf '%064d' 0)&size=full" \
              "POST /api/music/cover" "GET /api/music/moves" "POST /api/music/move" \
              "GET /api/music/qobuz" "POST /api/music/qobuz/start" "GET /api/music/duplicates" \
-             "POST /api/music/merge" "POST /api/music/fix/split-genres" \
+             "POST /api/music/merge" "GET /api/music/names?field=genre" "POST /api/music/rename" \
+             "POST /api/music/remove" "POST /api/music/fix/split-genres" \
              "POST /api/music/fix/composers" "GET /api/music/musicbrainz" \
              "POST /api/music/musicbrainz/start"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
@@ -694,6 +695,95 @@ expect_body "'Other Artist' is not another spelling of 'Some Artist'" "merge spe
 post "merge no letters"        400 $MG '{"field":"artist","from":["?"],"to":"!"}'
 post "discard the duplicates"  200 /api/music/discard '{"all":true}'
 query "0" "nothing pending after the duplicates" "SELECT count(*) FROM changes"
+
+# Names: every name of a field with its tracks and albums; rename and
+# remove a name on every track.
+NM=/api/music/names
+expect 200 "artist names"      -b "$JAR" "$B$NM?field=artist"
+expect_body '{"names":{"rows":[{"name":"Some Artist","tracks":2,"albums":1},{"name":"Some Artist; Other Artist","tracks":1,"albums":1}],"more":false}}' "artist names with counts"
+expect 200 "genre names"       -b "$JAR" "$B$NM?field=genre"
+expect_body '{"names":{"rows":[{"name":"Pop","tracks":1,"albums":1},{"name":"Rock","tracks":3,"albums":1}],"more":false}}' "genre names with counts"
+expect 200 "albumartist names" -b "$JAR" "$B$NM?field=albumartist"
+expect_body '{"names":{"rows":[{"name":"Some Artist","tracks":3,"albums":1}],"more":false}}' "album artist names"
+expect 200 "composer names"    -b "$JAR" "$B$NM?field=composer"
+expect_body '{"names":{"rows":[],"more":false}}' "no composer names"
+expect 200 "albums of a genre" -b "$JAR" "$B$NM?field=genre&name=Rock"
+expect_body '"album":"Some Album","albumartist":"Some Artist","tracks":3}],"more":false}}' "albums of a name, its first track"
+expect 200 "albums of an artist" -b "$JAR" "$B$NM?field=artist&name=Some%20Artist"
+expect_body '"album":"Some Album","albumartist":"Some Artist","tracks":2}]' "albums of an artist"
+expect 200 "albums of no name" -b "$JAR" "$B$NM?field=artist&name=Nobody"
+expect_body '{"albums":{"rows":[],"more":false}}' "a name no track has"
+expect 400 "names, no field"   -b "$JAR" "$B$NM"
+expect_body "query parameter 'field' must be artist, albumartist, composer or genre" "names field message"
+expect 400 "names, title"      -b "$JAR" "$B$NM?field=title"
+expect 400 "names, empty name" -b "$JAR" "$B$NM?field=genre&name="
+expect_body "query parameter 'name' must be text of 1 to 4096 bytes" "names name message"
+expect 400 "names, control"    -b "$JAR" "$B$NM?field=genre&name=a%01"
+expect 400 "names, bad escape"  -b "$JAR" "$B$NM?field=genre&name=%zz"
+expect 414 "names, name past the path limit" -b "$JAR" "$B$NM?field=genre&name=$(printf '%2048s' '' | tr ' ' a)"
+
+RN=/api/music/rename
+cp "$M/Artist/Album/01.mp3" "$TMP/before.mp3"
+post "rename artist"           200 $RN '{"field":"artist","from":"Some Artist","to":"The Some Artist"}'
+expect_body '"queued":2,"dropped":0,"skipped":0' "artist renamed on its tracks"
+expect 200 "names renamed"     -b "$JAR" "$B$NM?field=artist"
+expect_body '"rows":[{"name":"Some Artist; Other Artist","tracks":1,"albums":1},{"name":"The Some Artist","tracks":2,"albums":1}]' "names are planned"
+post "rename back"             200 $RN '{"field":"artist","from":"The Some Artist","to":"Some Artist"}'
+expect_body '"queued":0,"dropped":2,"skipped":0' "back to the files' name drops the changes"
+post "rename genre"            200 $RN '{"field":"genre","from":"Rock","to":"rock"}'
+expect_body '"queued":2,"dropped":0,"skipped":1' "a list with another invalid genre is skipped"
+post "rename genre to one it has" 200 $RN '{"field":"genre","from":"Pop","to":"rock"}'
+expect_body '"queued":0,"dropped":0,"skipped":1' "still invalid: skipped"
+post "rename nothing to do"    200 $RN '{"field":"composer","from":"Nobody","to":"Somebody"}'
+expect_body '"batch":-1,"queued":0,"dropped":0,"skipped":0' "no track has it"
+same_file "renaming leaves the file alone" "$TMP/before.mp3" "$M/Artist/Album/01.mp3"
+
+RM=/api/music/remove
+post "remove genre, still invalid" 200 $RM '{"field":"genre","name":"Pop"}'
+expect_body '"queued":0,"dropped":0,"skipped":1' "Rock is left: skipped"
+expect 200 "genre names planned" -b "$JAR" "$B$NM?field=genre"
+expect_body '{"names":{"rows":[{"name":"Pop","tracks":1,"albums":1},{"name":"Rock","tracks":1,"albums":1},{"name":"rock","tracks":2,"albums":1}],"more":false}}' "renamed where valid"
+post "remove the last genre"   200 $RM '{"field":"genre","name":"rock"}'
+expect_body '"queued":2,"dropped":0,"skipped":0' "a genre may be left out"
+post "queue composers"         200 /api/music/queue "{\"edits\":[{\"track\":$T1,\"field\":\"composer\",\"value\":[\"Bach\"]},{\"track\":$T2,\"field\":\"composer\",\"value\":[\"Bach\",\"Händel\"]}]}"
+post "remove composer"         200 $RM '{"field":"composer","name":"Bach"}'
+expect_body '"queued":1,"dropped":0,"skipped":1' "the last composer stays"
+query "[\"Bach\"]|[\"Händel\"]" "composers planned" \
+    "SELECT group_concat(value, '|') FROM (SELECT value FROM changes WHERE state = 'pending'
+     AND field = 'composer' ORDER BY value)"
+same_file "removing leaves the file alone" "$TMP/before.mp3" "$M/Artist/Album/01.mp3"
+
+expect 415 "rename needs json" -b "$JAR" -d '{"field":"artist"}' "$B$RN"
+post "rename no field"         400 $RN '{"from":"a","to":"A"}'
+expect_body "'field' must be artist, albumartist, composer or genre" "rename field message"
+post "rename title"            400 $RN '{"field":"title","from":"a","to":"A"}'
+post "rename no to"            400 $RN '{"field":"artist","from":"a"}'
+expect_body "'to' must be a string" "rename to message"
+post "rename to empty"         400 $RN '{"field":"artist","from":"a","to":""}'
+post "rename to breaks a rule" 400 $RN '{"field":"genre","from":"a","to":"Hip Hop"}'
+expect_body "'genre' may only use lowercase" "rename to rule message"
+post "rename to too long"      400 $RN "{\"field\":\"artist\",\"from\":\"a\",\"to\":\"$(printf '%0501d' 0)\"}"
+post "rename to longest"       200 $RN "{\"field\":\"artist\",\"from\":\"a\",\"to\":\"$(printf '%0500d' 0)\"}"
+post "rename no from"          400 $RN '{"field":"artist","to":"A"}'
+expect_body "'from' must be text of 1 to 4096 bytes" "rename from message"
+post "rename from list"        400 $RN '{"field":"artist","from":["a"],"to":"A"}'
+post "rename from empty"       400 $RN '{"field":"artist","from":"","to":"A"}'
+post "rename from control"     400 $RN '{"field":"artist","from":"a\u0001","to":"A"}'
+post "rename from too long"    400 $RN "{\"field\":\"artist\",\"from\":\"0$(printf '%4096s' '')\",\"to\":\"0\"}"
+post "rename from longest"     200 $RN "{\"field\":\"artist\",\"from\":\"0$(printf '%4095s' '')\",\"to\":\"0\"}"
+post "rename from is to"       400 $RN '{"field":"artist","from":"A","to":"A"}'
+expect_body "'from' and 'to' must differ" "rename differ message"
+expect 415 "remove needs json" -b "$JAR" -d '{"field":"genre"}' "$B$RM"
+post "remove artist"           400 $RM '{"field":"artist","name":"a"}'
+expect_body "'field' must be composer or genre" "remove field message"
+post "remove no field"         400 $RM '{"name":"a"}'
+post "remove no name"          400 $RM '{"field":"genre"}'
+expect_body "'name' must be text of 1 to 4096 bytes" "remove name message"
+post "remove name empty"       400 $RM '{"field":"genre","name":""}'
+post "remove name too long"    400 $RM "{\"field\":\"genre\",\"name\":\"0$(printf '%4096s' '')\"}"
+post "remove name longest"     200 $RM "{\"field\":\"genre\",\"name\":\"0$(printf '%4095s' '')\"}"
+post "discard the names"       200 /api/music/discard '{"all":true}'
+query "0" "nothing pending after the names" "SELECT count(*) FROM changes"
 
 # Queueing changes writes no file.
 Q=/api/music/queue

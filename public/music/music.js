@@ -7,6 +7,9 @@
  *   #/album/ID     the tracks of the album of track ID, every tag editable
  *   #/changes      the queued changes by album and track: search them,
  *                  discard them, write them
+ *   #/names        every artist, album artist, composer and genre with
+ *                  its tracks and albums: rename one, remove a genre or
+ *                  composer, open its albums
  *   #/duplicates   possible duplicate tracks, albums and names: copy a
  *                  path, open an album, merge spellings of a name
  *   #/fixes        changes made for a few albums at a time: split genres,
@@ -214,8 +217,8 @@ function changesLabel(pending) {
 function shell(active, overview, ...content) {
   musicRoot = overview.root || "";
   const tabs = [["albums", "Albums"], ["changes", changesLabel(overview.pending)],
-                ["duplicates", "Duplicates"], ["fixes", "Fixes"], ["files", "Files"], ["qobuz", "Qobuz"],
-                ["info", "Info"]];
+                ["names", "Names"], ["duplicates", "Duplicates"], ["fixes", "Fixes"],
+                ["files", "Files"], ["qobuz", "Qobuz"], ["info", "Info"]];
   return el("section", { class: "page" },
     el("header", { class: "app-head" },
       el("h1", {}, "Music"),
@@ -1588,6 +1591,196 @@ async function qobuzPage() {
         : el("p", { class: "empty" }, "Nothing downloaded yet.")));
 }
 
+/* ---- names --------------------------------------------------------------- */
+
+/* The fields with a list of names. */
+const NAME_FIELDS = [["artist", "Artists"], ["albumartist", "Album artists"],
+                     ["composer", "Composers"], ["genre", "Genres"]];
+const NAME_SORTS = [["name", "By name"], ["tracks", "Most tracks first"],
+                    ["albums", "Most albums first"]];
+/* What the names tab shows; kept while the page is drawn again. */
+const nameView = { field: "artist", sort: "name", q: "" };
+
+/* A name as field's value (a list for genre and composer). */
+function nameValue(field, name) {
+  return FIELDS[field].kind === "list" ? [name] : name;
+}
+
+/* "3 tracks on 1 album" */
+function nameCounts(v) {
+  return `${plural(v.tracks, "track", "tracks")} on ${plural(v.albums, "album", "albums")}`;
+}
+
+/* Queues a rename or removal (POST path, one batch on every track) and
+ * draws the page again. */
+async function changeName(path, body) {
+  const r = await api("POST", path, body);
+  valueCache.clear();
+  setStatus(mergeText(r));
+  refresh();
+}
+
+/* A popup for v's new name, the library's names suggested. */
+function renameEditor(anchor, field, v) {
+  const spec = FIELDS[field];
+  const { pop, close } = floatingPopup(anchor, `Rename ${v.name}`, (again) => {
+    if (again && anchor.isConnected) anchor.focus();
+  });
+  const error = el("p", { class: "form-error", role: "alert" });
+  const save = async (to) => {
+    const why = to === v.name ? "is the same name" : problem(field, nameValue(field, to));
+    if (why) {
+      error.textContent = `${spec.label} ${why}.`;
+      return;
+    }
+    if (!sure(`Change "${v.name}" to "${to}" on ${plural(v.tracks, "track", "tracks")}? ` +
+              "The changes are queued; nothing is written until you write them.")) return;
+    try {
+      await changeName("/api/music/rename", { field, from: v.name, to });
+      close(false);
+    } catch (err) {
+      handleError(err);
+    }
+  };
+  const { input, list } = suggestInput(field, `New name for ${v.name}`, save, () => [v.name]);
+  input.value = v.name;
+  pop.append(el("strong", {}, `Rename "${v.name}"`), input, list, error,
+             popupActions(() => save(input.value), close));
+  input.focus();
+  input.select();
+}
+
+/* Removes v from the genres or composers of every track. */
+function removeButton(field, v, busy) {
+  const button = el("button", {
+    class: "btn danger", type: "button", disabled: busy,
+    onclick: async () => {
+      if (!sure(`Remove "${v.name}" from ${plural(v.tracks, "track", "tracks")}? ` +
+                "The changes are queued; nothing is written until you write them.")) return;
+      button.disabled = true;
+      try {
+        await changeName("/api/music/remove", { field, name: v.name });
+      } catch (err) {
+        handleError(err);
+        button.disabled = false;
+      }
+    },
+  }, "Remove");
+  return button;
+}
+
+/* The albums with name v, each a button that opens it. */
+function nameAlbums(field, v) {
+  const box = el("div", { class: "stack" }, el("p", { class: "muted" }, "Loading the albums…"));
+  api("GET", `/api/music/names?field=${field}&name=${encodeURIComponent(v.name)}`)
+    .then(({ albums }) => box.replaceChildren(...[
+      albums.more ? el("p", { class: "warn" },
+                       `Only the first ${plural(albums.rows.length, "album is", "albums are")} listed.`)
+                  : null,
+      el("ul", { class: "name-albums" }, albums.rows.map((a) => el("li", {},
+        navButton(`${a.album ?? "No album name"} · ${a.albumartist ?? "No album artist"}` +
+                  ` (${plural(a.tracks, "track", "tracks")})`, `#/album/${a.id}`)))),
+    ].filter(Boolean)))
+    .catch((err) => {
+      box.replaceChildren(el("p", { class: "form-error" }, "Could not load the albums."));
+      handleError(err);
+    });
+  return box;
+}
+
+/* One name: opens on Rename (and Remove for genres and composers) and its
+ * albums. A name that breaks the rules is marked rose. */
+function nameItem(field, v, busy) {
+  const bad = problem(field, nameValue(field, v.name));
+  return foldGroup([
+    el("span", { class: bad ? "fold-label path differs-text" : "fold-label path" }, v.name), " ",
+    el("span", { class: "muted" }, nameCounts(v)),
+  ], () => {
+    const rename = el("button", { class: "btn go", type: "button", disabled: busy }, "Rename");
+    rename.addEventListener("click", () => renameEditor(rename, field, v));
+    return el("div", { class: "stack" },
+      bad ? el("p", { class: "differs-text small" }, `Breaks the rules: ${FIELDS[field].label} ${bad}`)
+          : null,
+      el("div", { class: "actions" }, rename,
+         FIELDS[field].kind === "list" ? removeButton(field, v, busy) : null),
+      nameAlbums(field, v));
+  });
+}
+
+async function namesPage() {
+  const which = nameView.field;
+  const [o, d] = await Promise.all([api("GET", "/api/music"),
+                                    api("GET", `/api/music/names?field=${which}`)]);
+  const busy = Boolean(o.busy);
+  const names = d.names.rows;
+  const list = el("ul", { class: "fold-list" });
+  const count = el("span", { class: "count" });
+  const more = el("button", { class: "btn", type: "button" }, "Show more");
+  let limit = SHOW_STEP;
+  const show = () => {
+    const q = nameView.q.trim().toLowerCase();
+    const shown = names.filter((v) => !q || v.name.toLowerCase().includes(q));
+    const by = nameView.sort;
+    if (by !== "name") shown.sort((a, b) => b[by] - a[by]); /* stable: by name within */
+    count.textContent = shown.length === names.length ? names.length
+                                                      : `${shown.length} of ${names.length}`;
+    list.replaceChildren(...shown.slice(0, limit).map((v) => nameItem(which, v, busy)));
+    more.hidden = shown.length <= limit;
+  };
+  more.addEventListener("click", () => {
+    limit += SHOW_STEP;
+    show();
+  });
+  const search = el("input", { type: "search", value: nameView.q, "aria-label": "Search the names",
+                               placeholder: "Search the names" });
+  search.addEventListener("input", () => {
+    nameView.q = search.value;
+    limit = SHOW_STEP;
+    show();
+  });
+  const fieldPicker = dropdown({
+    label: "Names of",
+    options: NAME_FIELDS.map(([value, label]) => ({ value, label })),
+    value: which,
+    onchange: (v) => {
+      nameView.field = v;
+      refresh();
+    },
+  });
+  const sortPicker = dropdown({
+    label: "Order",
+    options: NAME_SORTS.map(([value, label]) => ({ value, label })),
+    value: nameView.sort,
+    onchange: (v) => {
+      nameView.sort = v;
+      limit = SHOW_STEP;
+      show();
+    },
+  });
+  show();
+  const label = NAME_FIELDS.find(([f]) => f === which)[1];
+  return shell("names", o,
+    el("section", { class: "card stack" },
+      el("h2", {}, "Names"),
+      el("p", {}, "Every artist, album artist, composer and genre, by the tags with the " +
+                  "pending changes, with how many tracks and albums have it. Open one to " +
+                  "rename it or see its albums."),
+      el("p", { class: "muted" }, "Rename (and Remove, for genres and composers) queues the " +
+                                  "change on every track that has the name, as one batch, like " +
+                                  "any edit; a track whose other values break the rules is left " +
+                                  "alone, and so is one Remove would leave without a composer."),
+      busy ? el("p", { class: "warn" }, `${busyText(o)} Names can be changed when it is done.`)
+           : null,
+      el("div", { class: "filter-fields" },
+        field("Names of", fieldPicker), field("Order", sortPicker), field("Search", search)),
+      d.names.more ? el("p", { class: "warn" }, `Only the first ${names.length} names are listed.`)
+                   : null),
+    el("section", { class: "section" },
+      el("header", {}, el("h2", {}, `${label} `, count)),
+      names.length ? [list, el("div", { class: "actions" }, more)]
+                   : el("p", { class: "empty" }, "None yet. Scan the library.")));
+}
+
 /* ---- duplicates ---------------------------------------------------------- */
 
 /* The lists of GET /api/music/duplicates: group, list, label, what a row is
@@ -2185,6 +2378,7 @@ function route(parts) {
   if (section === "album" && Number.isInteger(id) && id > 0) return albumPage(id);
   if (section === "albums" && rawId === undefined) return albumsPage();
   if (section === "changes" && rawId === undefined) return changesPage();
+  if (section === "names" && rawId === undefined) return namesPage();
   if (section === "duplicates" && rawId === undefined) return duplicatesPage();
   if (section === "fixes" && rawId === undefined) return fixesPage();
   if (section === "files" && rawId === undefined) return filesPage();
