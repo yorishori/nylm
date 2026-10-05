@@ -546,6 +546,51 @@ static void test_write(void)
     CHECK_STR(t.value[TAG_ALBUMSORT].v[0], "Other Album");
 }
 
+/* Sets key in the file at path to the values list[0..n) through TagLib,
+ * "" included (an MP3 then gets an empty MusicBrainz UFID frame). */
+static void set_raw(const char *path, const char *key, const char **list, size_t n)
+{
+    TagLib_File *f = taglib_file_new(path);
+    CHECK(f != NULL);
+    if (f == NULL)
+        return;
+    taglib_property_set(f, key, list[0]);
+    for (size_t i = 1; i < n; i++)
+        taglib_property_set_append(f, key, list[i]);
+    CHECK(taglib_file_save(f));
+    taglib_file_free(f);
+}
+
+/* An empty value reads as no value, the way the cache holds it, so a
+ * write with the cache's tags is not refused. */
+static void test_empty_values(void)
+{
+    char path[512], err[256];
+    struct tags now, want, t;
+    const char *empty[] = { "" }, *genres[] = { "", "rock", "" };
+
+    copy_fixture("tagged.mp3", "empty.mp3", path, sizeof path);
+    set_raw(path, "MUSICBRAINZ_TRACKID", empty, 1);
+    CHECK(tags_read(path, &now, NULL, NULL, err, sizeof err) == 0);
+    CHECK(now.value[TAG_MUSICBRAINZ_TRACKID].n == 0);
+    CHECK(tags_set_one(&now, TAG_MUSICBRAINZ_TRACKID, "") == 0); /* as the cache loads "" */
+    want = now;
+    want.value[TAG_MOOD] = one("calm");
+    CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_WRITTEN);
+    CHECK(tags_read(path, &t, NULL, NULL, err, sizeof err) == 0);
+    CHECK_STR(t.value[TAG_MOOD].v[0], "calm");
+    CHECK(t.value[TAG_MUSICBRAINZ_TRACKID].n == 0);
+
+    /* several values: the empty ones are left out; all empty is none */
+    copy_fixture("tagged.flac", "empty.flac", path, sizeof path);
+    set_raw(path, "GENRE", genres, 3);
+    set_raw(path, "TITLE", empty, 1);
+    CHECK(tags_read(path, &t, NULL, NULL, err, sizeof err) == 0);
+    CHECK(t.value[TAG_GENRE].n == 1);
+    CHECK_STR(t.value[TAG_GENRE].v[0], "rock");
+    CHECK(t.value[TAG_TITLE].n == 0);
+}
+
 /* A new cover (want's one picture, with its bytes): fills cover. */
 static void make_cover(struct tag_picture *cover)
 {
@@ -687,6 +732,7 @@ int main(void)
     test_pictures();
     test_write();
     test_write_cover();
+    test_empty_values();
     test_refusals();
     test_read_back();
 

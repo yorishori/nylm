@@ -356,6 +356,24 @@ const char *const music_migrations[] = {
     "    note        TEXT    NOT NULL DEFAULT ''"
     ") STRICT;"
     "CREATE INDEX musicbrainz_searches_by_names ON musicbrainz_searches (album, albumartist);",
+
+    /* 8: an empty tag value is now read as no value (a write compared the
+     * file's "" with the cache's none and refused it); the cache the same. */
+    "UPDATE tracks SET title = NULLIF(title, ''), album = NULLIF(album, ''),"
+    "    artist = NULLIF(artist, ''), albumartist = NULLIF(albumartist, ''),"
+    "    tracknumber = NULLIF(tracknumber, ''), discnumber = NULLIF(discnumber, ''),"
+    "    date = NULLIF(date, ''), compilation = NULLIF(compilation, ''),"
+    "    isrc = NULLIF(isrc, ''), asin = NULLIF(asin, ''), bpm = NULLIF(bpm, ''),"
+    "    copyright = NULLIF(copyright, ''), encodedby = NULLIF(encodedby, ''),"
+    "    mood = NULLIF(mood, ''), media = NULLIF(media, ''), label = NULLIF(label, ''),"
+    "    catalognumber = NULLIF(catalognumber, ''), barcode = NULLIF(barcode, ''),"
+    "    titlesort = NULLIF(titlesort, ''), albumsort = NULLIF(albumsort, ''),"
+    "    artistsort = NULLIF(artistsort, ''), albumartistsort = NULLIF(albumartistsort, ''),"
+    "    composersort = NULLIF(composersort, ''),"
+    "    musicbrainz_trackid = NULLIF(musicbrainz_trackid, ''),"
+    "    musicbrainz_albumid = NULLIF(musicbrainz_albumid, ''),"
+    "    navidrome_id = NULLIF(navidrome_id, '');"
+    "DELETE FROM track_values WHERE value = '';",
 };
 
 const int music_migration_count = sizeof music_migrations / sizeof music_migrations[0];

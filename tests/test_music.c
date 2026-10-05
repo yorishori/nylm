@@ -116,6 +116,38 @@ static void test_upgrade(void)
     remove_db();
 }
 
+/* Migration 8: the cache's empty values become no value, the others stay. */
+static void test_upgrade_empty(void)
+{
+    sqlite3 *db = db_open(db_path, music_migrations, 7);
+    CHECK(db != NULL);
+    if (db == NULL)
+        return;
+    CHECK(db_exec(db, "INSERT INTO tracks (path, size, ext, scanned, title, isrc,"
+                      " musicbrainz_trackid, navidrome_id)"
+                      " VALUES ('/m/a.mp3', 1, 'mp3', 1, 'A', '', '', 'x');"
+                      "INSERT INTO track_values VALUES (1, 'genre', 0, ''),"
+                      " (1, 'genre', 1, 'rock'), (1, 'composer', 0, '')") == 0);
+    sqlite3_close(db);
+    db = db_open(db_path, music_migrations, music_migration_count);
+    CHECK(db != NULL);
+    if (db == NULL)
+        return;
+    sqlite3_stmt *st = db_prepare(db, "SELECT title, isrc IS NULL, musicbrainz_trackid IS NULL,"
+                                      " navidrome_id FROM tracks");
+    CHECK(st != NULL && sqlite3_step(st) == SQLITE_ROW);
+    CHECK_STR((const char *)sqlite3_column_text(st, 0), "A");
+    CHECK(sqlite3_column_int(st, 1) == 1 && sqlite3_column_int(st, 2) == 1);
+    CHECK_STR((const char *)sqlite3_column_text(st, 3), "x");
+    sqlite3_finalize(st);
+    st = db_prepare(db, "SELECT group_concat(field || '=' || value) FROM track_values");
+    CHECK(st != NULL && sqlite3_step(st) == SQLITE_ROW);
+    CHECK_STR((const char *)sqlite3_column_text(st, 0), "genre=rock");
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    remove_db();
+}
+
 /* The tracks columns after scanned are the single-valued tags in tags.h
  * order, changes accepts exactly the editable fields, and art and
  * track_pictures keep to their rules. */
@@ -263,6 +295,7 @@ int main(void)
     CHECK(mkdtemp(dir) != NULL);
     snprintf(db_path, sizeof db_path, "%s/music.db", dir);
     test_upgrade();
+    test_upgrade_empty();
     test_schema();
     CHECK(rmdir(dir) == 0);
     test_track_pictures();

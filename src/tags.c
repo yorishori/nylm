@@ -475,10 +475,14 @@ static int read_open(const TagLib_File *f, struct tags *out, tags_picture_fn on_
         struct tag_values *v = &out->value[i];
         if (n > 0 && (v->v = arena_alloc(n * sizeof *v->v)) == NULL)
             rc = -1;
+        /* An empty value (e.g. an MP3's empty MusicBrainz UFID frame) is
+         * no value: the cache keeps none, so a write compares the same. */
+        size_t kept = 0;
         for (size_t k = 0; k < n && rc == 0; k++)
-            if ((v->v[k] = arena_strndup(values[k], strlen(values[k]))) == NULL)
+            if (values[k][0] != '\0' &&
+                (v->v[kept++] = arena_strndup(values[k], strlen(values[k]))) == NULL)
                 rc = -1;
-        v->n = rc == 0 ? n : 0;
+        v->n = rc == 0 ? kept : 0;
         if (values != NULL)
             taglib_property_free(values);
         /* Several values of a single-valued tag: shown joined, and replaced
