@@ -167,7 +167,7 @@ Disc and track numbers are set in a popup, X first and Y worked out:
 saving numbers the whole album again (Y per disc for track numbers; a
 missing X gets the lowest free number). Every edit is queued at once as
 one batch (`changes` table), and colours what will change. Changes: the
-pending changes by album, then track (those of tracks a scan removed in
+pending changes by album, then track, each opening on its own (those of tracks a scan removed in
 one group), a search over every field, Discard for an album, a track or
 all, and Write; a track whose changes the write would refuse (another tag
 breaks a rule, after the write's own fixes such as the disc number) is

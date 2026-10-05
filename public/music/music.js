@@ -1281,51 +1281,61 @@ function blockedButton(track, fields) {
   return button;
 }
 
-/* One album's pending changes (shown: those the search finds), track by
- * track, each with Discard; the whole album's with Discard album. The
- * changes of tracks no longer in the library are one group. blocked:
- * track -> the tags that keep the write from writing it. */
+/* A group of pending changes that opens and closes (foldGroup): the label,
+ * how many changes, and how many of its tracks the write would refuse. */
+function pendingGroup(label, changes, blocked, content) {
+  const refused = new Set(changes.filter((c) => blocked.has(c.track)).map((c) => c.track)).size;
+  return foldGroup([
+    el("span", { class: "fold-label" }, label), " ",
+    el("span", { class: "count" }, String(changes.length)),
+    refused ? el("span", { class: "due late" },
+                 ` ⚠ ${plural(refused, "track", "tracks")} not written`) : null,
+  ], content);
+}
+
+/* One track's pending changes (list): its file, ⚠ and Discard track
+ * (total: all its changes), and the changes. */
+function trackChanges(track, list, total, blocked, readOnly) {
+  const removed = track == null;
+  return el("div", { class: "stack" },
+    el("div", { class: "path muted small" }, relative(list[0].path)),
+    removed ? null : el("div", { class: "actions" },
+      blocked.has(track) ? blockedButton(track, blocked.get(track)) : null,
+      discardButton({ track }, "track", total, readOnly)),
+    blocked.has(track)
+      ? el("p", { class: "warn small" },
+           `Not written: ${blocked.get(track).map(fieldLabel).join(", ")} breaks a rule, so ` +
+           "none of this track's changes will be written. Fix it in the album.")
+      : null,
+    el("div", { class: "grid-wrap" },
+      el("table", { class: "grid" },
+        el("thead", {}, el("tr", {},
+          el("th", { scope: "col" }, "Tag"), el("th", { scope: "col" }, "Now"),
+          el("th", { scope: "col" }, "New"))),
+        el("tbody", {}, list.map(pendingRow)))));
+}
+
+/* One album's pending changes (shown: those the search finds) as a group
+ * that opens on Discard album and a group per track, each opening on its
+ * changes. The changes of tracks no longer in the library are one group.
+ * blocked: track -> the tags that keep the write from writing it. */
 function albumChanges(changes, shown, blocked, readOnly) {
   const first = changes[0];
   const removed = first.track == null;
-  const tracks = new Map();
-  for (const c of shown) {
-    if (!tracks.has(c.track)) tracks.set(c.track, []);
-    tracks.get(c.track).push(c);
-  }
   const perTrack = new Map();
   for (const c of changes) perTrack.set(c.track, (perTrack.get(c.track) || 0) + 1);
-  return el("section", { class: "card stack" },
-    el("header", { class: "batch-head" },
-      removed
-        ? el("h3", {}, "No longer in the library ", el("span", { class: "count" }, changes.length))
-        : el("div", {},
-            el("h3", {}, first.album ?? "No album name", " ",
-               el("span", { class: "count" }, changes.length)),
-            el("p", { class: "muted" }, first.albumartist ?? "No album artist")),
-      discardButton(removed ? { removed: true } : { album: first.track },
-                    removed ? "these" : "album", changes.length, readOnly)),
+  const label = removed ? "No longer in the library"
+                        : `${first.album ?? "No album name"} · ${first.albumartist ?? "No album artist"}`;
+  return pendingGroup(label, shown, blocked, () => el("div", { class: "stack" },
     removed ? el("p", { class: "muted small" },
                  "A scan removed these tracks; writing marks their changes failed.") : null,
-    [...tracks].map(([track, list]) => el("div", { class: "track-changes stack" },
-      removed ? null : el("header", { class: "batch-head" },
-        el("div", {},
-          el("strong", {}, list[0].title ?? relative(list[0].path)),
-          el("div", { class: "path muted small" }, relative(list[0].path))),
-        el("div", { class: "actions" },
-          blocked.has(track) ? blockedButton(track, blocked.get(track)) : null,
-          discardButton({ track }, "track", perTrack.get(track), readOnly))),
-      blocked.has(track)
-        ? el("p", { class: "warn small" },
-             `Not written: ${blocked.get(track).map(fieldLabel).join(", ")} breaks a rule, so ` +
-             "none of this track's changes will be written. Fix it in the album.")
-        : null,
-      el("div", { class: "grid-wrap" },
-        el("table", { class: "grid" },
-          el("thead", {}, el("tr", {},
-            el("th", { scope: "col" }, "Tag"), el("th", { scope: "col" }, "Now"),
-            el("th", { scope: "col" }, "New"))),
-          el("tbody", {}, list.map(pendingRow)))))));
+    el("div", { class: "actions" },
+      discardButton(removed ? { removed: true } : { album: first.track },
+                    removed ? "these" : "album", changes.length, readOnly)),
+    el("ul", { class: "fold-list" },
+      groupBy(shown, (c) => c.track).map(([track, list]) => pendingGroup(
+        removed ? relative(list[0].path) : list[0].title ?? relative(list[0].path), list, blocked,
+        () => trackChanges(track, list, perTrack.get(track), blocked, readOnly))))));
 }
 
 /* The pending search; kept while the page is drawn again. */
@@ -1376,20 +1386,21 @@ async function changesPage() {
   if (!ch.pending.length) return shell("changes", o, panel);
 
   const texts = new Map(ch.pending.map((c) => [c, pendingText(c)]));
-  const list = el("div", { class: "stack" });
+  const list = el("ul", { class: "fold-list" });
   const found = el("p", { class: "muted", "aria-live": "polite" });
+  const empty = el("p", { class: "empty", hidden: true }, "No pending change matches.");
   const show = () => {
     const q = pendingSearch.trim().toLowerCase();
-    const cards = [];
+    const groups = [];
     let n = 0;
     for (const changes of albums.values()) {
       const shown = q ? changes.filter((c) => texts.get(c).includes(q)) : changes;
       n += shown.length;
-      if (shown.length) cards.push(albumChanges(changes, shown, blocked, Boolean(o.busy)));
+      if (shown.length) groups.push(albumChanges(changes, shown, blocked, Boolean(o.busy)));
     }
-    list.replaceChildren(...cards);
+    list.replaceChildren(...groups);
     found.textContent = q ? `${plural(n, "change", "changes")} found.` : "";
-    if (q && !n) list.append(el("p", { class: "empty" }, "No pending change matches."));
+    empty.hidden = !q || n > 0;
   };
   const search = el("input", { type: "search", value: pendingSearch, "aria-label": "Search the changes",
                                placeholder: "Search the changes" });
@@ -1398,7 +1409,8 @@ async function changesPage() {
     show();
   });
   show();
-  return shell("changes", o, panel, el("div", { class: "filters stack" }, search, found), list);
+  return shell("changes", o, panel, el("div", { class: "filters stack" }, search, found),
+               el("section", { class: "card" }, list, empty));
 }
 
 /* ---- files --------------------------------------------------------------- */

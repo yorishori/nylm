@@ -199,8 +199,6 @@ td.col-cover.edited.differs .thumb { box-shadow: 0 0 0 2px var(--lavender), 0 0 
 .album-line > * { border-bottom: 2px solid var(--edge); background: var(--surface); }
 .album-line > th { text-align: left; white-space: nowrap; }
 
-.track-changes { border-top: 1px solid var(--edge); padding-top: 0.75rem; }
-.batch-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.5rem; }
 .old { color: var(--muted); text-decoration: line-through; overflow-wrap: anywhere; }
 .edited-text { color: var(--lavender); overflow-wrap: anywhere; }
 .history > header {
