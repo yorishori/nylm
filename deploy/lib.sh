@@ -82,15 +82,22 @@ valid_group() {
     [ "${#1}" -le 32 ]
 }
 
-# unit_shown UNIT: nylm shows this unit's log (nylm's own, NYLM_UNITS, the
-# backup job of an entry); UNIT is a full name.
-unit_shown() {
-    valid_unit "$1" || return 1
+# shown_units: the units nylm shows (nylm's own, NYLM_UNITS, the backup job
+# of each entry), full names, one per line.
+shown_units() {
     for u in $NYLM_OWN_UNITS $NYLM_UNITS; do
-        [ "$(full_unit "$u")" = "$1" ] && return 0
+        full_unit "$u"
     done
     for e in $NYLM_BACKUP; do
-        [ "nylm-backup@${e%%=*}.service" = "$1" ] && return 0
+        printf 'nylm-backup@%s.service\n' "${e%%=*}"
+    done
+}
+
+# unit_shown UNIT: nylm shows this unit's log; UNIT is a full name.
+unit_shown() {
+    valid_unit "$1" || return 1
+    for u in $(shown_units); do
+        [ "$u" = "$1" ] && return 0
     done
     return 1
 }

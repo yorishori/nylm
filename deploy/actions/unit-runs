@@ -1,0 +1,17 @@
+#!/bin/sh
+# Prints, for each unit nylm shows (nylm's own, NYLM_UNITS, the backup
+# entries' jobs), systemd's journal messages on its last start: the last 2
+# with JOB_TYPE=start ("Starting ..." and how it ended), each as
+# "UNIT<TAB>JSON" (time, result, invocation id). systemd unloads a unit that
+# has stopped and forgets its run; the journal does not. No arguments.
+set -eu
+. /usr/local/lib/nylm/lib.sh
+[ "$#" -eq 0 ] || die "takes no arguments"
+for u in $(shown_units); do
+    valid_unit "$u" || continue
+    /usr/bin/journalctl --no-pager --quiet --lines=2 --output=json \
+        --output-fields=JOB_RESULT,INVOCATION_ID _PID=1 "UNIT=$u" JOB_TYPE=start |
+        while IFS= read -r line; do
+            printf '%s\t%s\n' "$u" "$line"
+        done
+done

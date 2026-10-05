@@ -355,11 +355,14 @@ Long work is a job: a root script in `/usr/local/lib/nylm/jobs/` (from
 `deploy/jobs/`) run by its own systemd unit, which a root action starts.
 Every job holds an exclusive flock on that folder while it runs, so only
 one runs at a time (the web app answers 409 meanwhile). The page shows the
-unit's state (`systemctl show`, no root; systemd forgets a run at a
-reboot, so a job that has not run since then says "not run since boot")
-and a Log button: the last 100 lines of the unit's journal, from any run
-(action `unit-journal`). A job's results are read back from its last
-run's log (action `unit-log`). Both show only nylm's own units, those in
+unit's state (`systemctl show`, no root). systemd unloads a unit that has
+stopped and forgets its run, so then the last run (when it started and
+ended, and its result; "interrupted" if it never ended) comes from the
+journal (action `unit-runs`: systemd's last 2 messages on starting each
+unit nylm shows). Log: the last 100 lines of the unit's journal, from any
+run (action `unit-journal`). A job's results are read back from its last
+run's log (action `unit-log`, which finds that run in the journal when
+systemd has forgotten it). All three show only nylm's own units, those in
 `NYLM_UNITS` and the backup jobs. The actions and jobs read `/etc/nylm.conf` through
 `deploy/lib.sh` (installed as `/usr/local/lib/nylm/lib.sh`), which checks
 its values by the same rules as nylm; nylm refuses to start when a value

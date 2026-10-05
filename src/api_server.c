@@ -36,6 +36,7 @@
 #define MAX_AUDIT  100 /* actions listed */
 #define JOBS_LOCK  "/usr/local/lib/nylm/jobs" /* see above */
 #define LOG_MAX    (2 * 1024 * 1024) /* a unit's log as unit-log or unit-journal prints it */
+#define RUNS_MAX   (256 * 1024)      /* the units' last starts as unit-runs prints them */
 #define SHOW_MAX   (256 * 1024)      /* systemctl show of the units */
 #define SHOW_TIMEOUT 10              /* seconds */
 #define SMART_MAX  (1024 * 1024)     /* smartctl's reports of every disk */
@@ -160,8 +161,9 @@ static int log_allowed(const char *unit)
 
 /* ---- helpers ------------------------------------------------------------ */
 
-/* The state of n units (valid names), from systemctl show; NULL (logged)
- * if it fails. */
+/* The state of n units (valid names), from systemctl show, and the last
+ * run from the journal of those systemd has forgotten (action unit-runs;
+ * without it they stay as systemd says); NULL (logged) if it fails. */
 static cJSON *units_state(const char *const *units, size_t n)
 {
     char *argv[16 + SYSINFO_MAX_UNITS + NNYLM_UNITS + SYSINFO_MAX_ENTRIES];
@@ -192,6 +194,14 @@ static cJSON *units_state(const char *const *units, size_t n)
         fprintf(stderr, "server: unexpected output of systemctl show\n");
         return NULL;
     }
+    int forgotten = 0;
+    const cJSON *u;
+    cJSON_ArrayForEach(u, list)
+        forgotten |= sysinfo_run_forgotten(u);
+    char *runs;
+    if (forgotten && action_output("unit-runs", NULL, RUNS_MAX, &runs, NULL) == 0 &&
+        sysinfo_unit_runs(runs, list) != 0)
+        return NULL;
     return list;
 }
 

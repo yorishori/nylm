@@ -1,12 +1,18 @@
 #!/bin/sh
 # Prints the journal of one systemd unit's last run (at most 500 lines):
-# nylm's own units, those in NYLM_UNITS and the backup entries' jobs.
-# Prints nothing if it has not run since boot. Argument: the unit's name.
+# nylm's own units, those in NYLM_UNITS and the backup entries' jobs. The
+# run is systemd's current one, else (systemd unloads a unit that has
+# stopped, and forgets it) the last start in the journal. Prints nothing
+# if it never ran. Argument: the unit's name.
 set -eu
 . /usr/local/lib/nylm/lib.sh
 [ "$#" -eq 1 ] || die "takes one unit name"
 unit_shown "$1" || die "not a unit nylm shows: $1"
 id=$(/usr/bin/systemctl show -p InvocationID --value -- "$1")
+if [ -z "$id" ]; then
+    id=$(/usr/bin/journalctl --no-pager --quiet --lines=1 --output=cat \
+        --output-fields=INVOCATION_ID _PID=1 "UNIT=$1" JOB_TYPE=start)
+fi
 [ -n "$id" ] || exit 0
 case $id in *[!0-9a-f]*) die "unexpected invocation id: $id" ;; esac
 exec /usr/bin/journalctl --no-pager --quiet --output=short-iso --lines=500 \

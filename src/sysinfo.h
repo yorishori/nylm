@@ -103,6 +103,24 @@ long long sysinfo_backup_time(const char *name, const char *file);
  */
 cJSON *sysinfo_units(const char *text);
 
+/*
+ * Fills in the last run of each unit of units (from sysinfo_units) that
+ * systemd has forgotten (it unloads a unit that stopped: no "started", not
+ * running or queued) from the journal, as the action unit-runs prints it:
+ * lines "UNIT<TAB>JSON" of systemd's messages with JOB_TYPE=start, oldest
+ * first ({__REALTIME_TIMESTAMP, JOB_RESULT?, INVOCATION_ID}). The unit's
+ * last message: with JOB_RESULT, "ended" is its time and "result"
+ * "success" (done) or the JOB_RESULT; "started" the message before when it
+ * is the start of the same run, else the end. Without (a start that never
+ * ended, e.g. at a reboot): "started" its time, "result" "interrupted".
+ * Lines not shaped so are skipped. 0, or -1 when out of memory.
+ */
+int sysinfo_unit_runs(const char *text, cJSON *units);
+
+/* 1 if systemd has forgotten the last run of unit (from sysinfo_units): no
+ * start time, inactive or failed, and no job waiting. */
+int sysinfo_run_forgotten(const cJSON *unit);
+
 /* The disk usage job's log -> [{label, path, bytes}] from its lines
  * "nylm-du<TAB>bytes<TAB>label<TAB>path" (anything before the marker, such
  * as the journal's prefix, is skipped). */

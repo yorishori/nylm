@@ -315,6 +315,79 @@ static void test_config(void)
     CHECK(cJSON_GetArraySize(sysinfo_backup_entries(entries, &why)) == 32);
 }
 
+/* A unit from systemctl show: name, active state, started ("" if none),
+ * Job (a queued job's id, or ""). */
+static cJSON *show(const char *name, const char *active, const char *started, const char *job)
+{
+    char text[512];
+    snprintf(text, sizeof text,
+             "Id=%s\nActiveState=%s\nResult=success\nExecMainStartTimestamp=%s\n"
+             "ExecMainExitTimestamp=\nJob=%s\n",
+             name, active, started, job);
+    return sysinfo_units(text);
+}
+
+#define START(u, t, id) u "\t{\"__REALTIME_TIMESTAMP\":\"" t "\",\"INVOCATION_ID\":\"" id "\"}\n"
+#define END(u, t, id, r) \
+    u "\t{\"__REALTIME_TIMESTAMP\":\"" t "\",\"INVOCATION_ID\":\"" id "\",\"JOB_RESULT\":\"" r "\"}\n"
+
+static void test_unit_runs(void)
+{
+    const char *journal =
+        START("w.service", "1700000000000000", "aa") END("w.service", "1700000010500000", "aa", "done")
+        START("f.service", "1700000100000000", "bb") END("f.service", "1700000160000000", "bb", "failed")
+        START("i.service", "1700000200000000", "cc")
+        START("o.service", "1700000300000000", "dd") END("o.service", "1700000301000000", "ee", "done")
+        END("e.service", "1700000400000000", "ff", "done")
+        "w.services\t{\"__REALTIME_TIMESTAMP\":\"1\"}\n"          /* another unit */
+        "f.service {\"__REALTIME_TIMESTAMP\":\"1\"}\n"            /* no tab */
+        "x.service\tnot json\n"
+        "x.service\t{\"__REALTIME_TIMESTAMP\":\"soon\"}\n"
+        "y.service\t[1]";                                       /* no newline at the end */
+    struct { const char *name, *active, *started, *job; double start, end; const char *result; }
+    cases[] = {
+        /* a run: started at "Starting", ended at "Finished" */
+        { "w.service", "inactive", "", "", 1700000000, 1700000010, "success" },
+        { "f.service", "failed", "", "", 1700000100, 1700000160, "failed" },
+        /* a start that never ended */
+        { "i.service", "inactive", "", "", 1700000200, -1, "interrupted" },
+        /* the start of another run: the end is all we know */
+        { "o.service", "inactive", "", "", 1700000301, 1700000301, "success" },
+        { "e.service", "inactive", "", "", 1700000400, 1700000400, "success" },
+        /* systemd knows, it runs, a job waits, nothing in the journal: as they were */
+        { "w.service", "inactive", "@1600000000", "", 1600000000, -1, "success" },
+        { "w.service", "active", "", "", -1, -1, "success" },
+        { "w.service", "inactive", "", "12", -1, -1, "success" },
+        { "n.service", "inactive", "", "", -1, -1, "success" },
+        /* lines not shaped as they should be */
+        { "x.service", "inactive", "", "", -1, -1, "success" },
+        { "y.service", "inactive", "", "", -1, -1, "success" },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        int failed = test_failures;
+        cJSON *list = show(cases[i].name, cases[i].active, cases[i].started, cases[i].job);
+        CHECK(list != NULL && sysinfo_unit_runs(journal, list) == 0);
+        cJSON *u = cJSON_GetArrayItem(list, 0);
+        const cJSON *start = cJSON_GetObjectItemCaseSensitive(u, "started");
+        const cJSON *end = cJSON_GetObjectItemCaseSensitive(u, "ended");
+        CHECK(cases[i].start < 0 ? cJSON_IsNull(start) : num(u, "started") == cases[i].start);
+        CHECK(cases[i].end < 0 ? cJSON_IsNull(end) : num(u, "ended") == cases[i].end);
+        CHECK_STR(str(u, "result"), cases[i].result);
+        if (test_failures != failed)
+            fprintf(stderr, "  in case %zu (%s)\n", i, cases[i].name);
+    }
+    /* forgotten: no start time, inactive or failed, no job waiting */
+    CHECK(sysinfo_run_forgotten(cJSON_GetArrayItem(show("a", "inactive", "", ""), 0)));
+    CHECK(sysinfo_run_forgotten(cJSON_GetArrayItem(show("a", "failed", "", ""), 0)));
+    CHECK(!sysinfo_run_forgotten(cJSON_GetArrayItem(show("a", "inactive", "@1", ""), 0)));
+    CHECK(!sysinfo_run_forgotten(cJSON_GetArrayItem(show("a", "activating", "", ""), 0)));
+    CHECK(!sysinfo_run_forgotten(cJSON_GetArrayItem(show("a", "inactive", "", "7"), 0)));
+    /* an empty journal changes nothing */
+    cJSON *list = show("w.service", "inactive", "", "");
+    CHECK(sysinfo_unit_runs("", list) == 0);
+    CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(cJSON_GetArrayItem(list, 0), "started")));
+}
+
 static void test_units(void)
 {
     cJSON *u = sysinfo_units(
@@ -745,6 +818,7 @@ int main(void)
     test_names();
     test_config();
     test_units();
+    test_unit_runs();
     test_du();
     test_locked();
     test_smart();

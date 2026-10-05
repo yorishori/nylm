@@ -564,6 +564,98 @@ cJSON *sysinfo_units(const char *text)
     return list;
 }
 
+/* A journal message's __REALTIME_TIMESTAMP (microseconds, text) in unix
+ * seconds; -1 if absent or not a number. */
+static long long journal_time(const cJSON *msg)
+{
+    const cJSON *t = cJSON_GetObjectItemCaseSensitive(msg, "__REALTIME_TIMESTAMP");
+    if (!cJSON_IsString(t))
+        return -1;
+    char *end;
+    errno = 0;
+    long long us = strtoll(t->valuestring, &end, 10);
+    return errno != 0 || end == t->valuestring || *end != '\0' || us < 0 ? -1 : us / 1000000;
+}
+
+/* msg's text field key, or NULL. */
+static const char *journal_text(const cJSON *msg, const char *key)
+{
+    const cJSON *v = cJSON_GetObjectItemCaseSensitive(msg, key);
+    return cJSON_IsString(v) ? v->valuestring : NULL;
+}
+
+/* Sets unit[key] to the number n (n < 0: null). 0, or -1. */
+static int set_time(cJSON *unit, const char *key, long long n)
+{
+    cJSON *v = n >= 0 ? cJSON_CreateNumber((double)n) : cJSON_CreateNull();
+    cJSON_DeleteItemFromObjectCaseSensitive(unit, key);
+    return v != NULL && cJSON_AddItemToObject(unit, key, v) ? 0 : -1;
+}
+
+/* The last run of unit from its journal messages last (and prev, the one
+ * before, or NULL), as sysinfo_unit_runs() says. 0, or -1. */
+static int fill_run(cJSON *unit, const cJSON *last, const cJSON *prev)
+{
+    long long end = journal_time(last);
+    const char *result = journal_text(last, "JOB_RESULT");
+    if (end < 0)
+        return 0;
+    const char *id = journal_text(last, "INVOCATION_ID");
+    const char *prev_id = prev != NULL ? journal_text(prev, "INVOCATION_ID") : NULL;
+    long long start = result == NULL ? end
+                      : prev != NULL && journal_text(prev, "JOB_RESULT") == NULL &&
+                                id != NULL && prev_id != NULL && strcmp(id, prev_id) == 0 &&
+                                journal_time(prev) >= 0
+                          ? journal_time(prev)
+                          : end;
+    cJSON *r = cJSON_CreateString(result == NULL               ? "interrupted"
+                                  : strcmp(result, "done") == 0 ? "success"
+                                                                : result);
+    cJSON_DeleteItemFromObjectCaseSensitive(unit, "result");
+    if (r == NULL || !cJSON_AddItemToObject(unit, "result", r))
+        return -1;
+    return set_time(unit, "started", start) == 0 &&
+                   set_time(unit, "ended", result != NULL ? end : -1) == 0
+               ? 0
+               : -1;
+}
+
+int sysinfo_run_forgotten(const cJSON *unit)
+{
+    const char *a = journal_text(unit, "active");
+    return !cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(unit, "started")) &&
+           !cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(unit, "queued")) && a != NULL &&
+           (strcmp(a, "inactive") == 0 || strcmp(a, "failed") == 0);
+}
+
+int sysinfo_unit_runs(const char *text, cJSON *units)
+{
+    cJSON *unit;
+    cJSON_ArrayForEach(unit, units) {
+        const char *name = journal_text(unit, "unit");
+        if (name == NULL || !sysinfo_run_forgotten(unit))
+            continue;
+        size_t nlen = strlen(name);
+        cJSON *last = NULL, *prev = NULL;
+        for (const char *line = text; *line != '\0';) {
+            size_t len = strcspn(line, "\n");
+            const char *json = line + nlen + 1;
+            if (len > nlen + 1 && len <= LINE_MAX_LEN && strncmp(line, name, nlen) == 0 &&
+                line[nlen] == '\t') {
+                cJSON *msg = cJSON_ParseWithLength(json, len - nlen - 1);
+                if (cJSON_IsObject(msg)) {
+                    prev = last;
+                    last = msg;
+                }
+            }
+            line += len + (line[len] == '\n');
+        }
+        if (last != NULL && fill_run(unit, last, prev) != 0)
+            return -1;
+    }
+    return 0;
+}
+
 cJSON *sysinfo_du(const char *log)
 {
     static const char marker[] = "nylm-du\t";

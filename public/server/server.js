@@ -85,7 +85,7 @@ function running(job) {
 }
 
 /* One line on a job (a systemd unit): waiting to start, running, how its
- * last run ended, or that it has not run since boot. */
+ * last run ended, or that it has not run (as far as the journal knows). */
 function jobState(job) {
   if (job.load === "not-found") {
     return el("p", { class: "bad" }, "Not installed: run deploy/install.sh on the server.");
@@ -96,7 +96,7 @@ function jobState(job) {
   if (running(job)) {
     return el("p", { class: "warn" }, `Running since ${showTime(job.started)}…`);
   }
-  if (!job.started) return el("p", { class: "muted" }, "Not run since boot.");
+  if (!job.started) return el("p", { class: "muted" }, "Not run yet.");
   if (job.result === "success") {
     return el("p", { class: "ok" }, `Done ${showTime(job.ended || job.started)}.`);
   }
@@ -316,7 +316,7 @@ function unitState(u) {
    * is stopped: that is wrong for a service someone watches. */
   const when = u.ended ? showTime(u.ended) : "";
   if (u.started && u.result !== "success") return [`stopped (${u.result})`, "bad", when];
-  if (u.type === "oneshot") return [u.started ? "done" : "not run since boot", "muted", when];
+  if (u.type === "oneshot") return [u.started ? "done" : "not run", "muted", when];
   return ["stopped", "bad", when];
 }
 
