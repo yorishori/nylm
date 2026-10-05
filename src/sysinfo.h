@@ -98,8 +98,8 @@ long long sysinfo_backup_time(const char *name, const char *file);
 /*
  * `systemctl show --timestamp=unix -p ...` of one or more units -> [{unit,
  * description, load, active, sub, result, type, status, started, ended,
- * since}],
- * timestamps in unix seconds or null.
+ * since, queued}], timestamps in unix seconds or null; queued (from Job) is
+ * true while a job of the unit waits, e.g. a start not begun yet.
  */
 cJSON *sysinfo_units(const char *text);
 

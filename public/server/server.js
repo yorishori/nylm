@@ -81,14 +81,17 @@ function facts(pairs) {
 /* ---- jobs and logs ------------------------------------------------------- */
 
 function running(job) {
-  return ["active", "activating", "deactivating", "reloading"].includes(job.active);
+  return job.queued || ["active", "activating", "deactivating", "reloading"].includes(job.active);
 }
 
-/* One line on a job (a systemd unit): running, how its last run ended,
- * or that it has not run since the server started. */
+/* One line on a job (a systemd unit): waiting to start, running, how its
+ * last run ended, or that it has not run since the server started. */
 function jobState(job) {
   if (job.load === "not-found") {
     return el("p", { class: "bad" }, "Not installed: run deploy/install.sh on the server.");
+  }
+  if (job.queued && (job.active === "inactive" || job.active === "failed")) {
+    return el("p", { class: "warn" }, "Waiting to start…");
   }
   if (running(job)) {
     return el("p", { class: "warn" }, `Running since ${showTime(job.started)}…`);

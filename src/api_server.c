@@ -167,7 +167,7 @@ static cJSON *units_state(const char *const *units, size_t n)
     char systemctl[] = "/usr/bin/systemctl", show[] = "show", ts[] = "--timestamp=unix",
          p[] = "-p", props[] = "Id,Description,LoadState,ActiveState,SubState,Result,"
                                "ExecMainStatus,ExecMainStartTimestamp,ExecMainExitTimestamp,"
-                               "ActiveEnterTimestamp,Type",
+                               "ActiveEnterTimestamp,Type,Job",
          dashes[] = "--";
     size_t argc = 0;
     if (n > sizeof argv / sizeof argv[0] - 8)
@@ -201,10 +201,12 @@ static cJSON *unit_state(const char *unit)
     return list != NULL ? cJSON_DetachItemFromArray(list, 0) : NULL;
 }
 
-/* 1 if the unit (from units_state) is starting or running. */
+/* 1 if the unit (from units_state) is queued to start, starting or running. */
 static int unit_running(const cJSON *state)
 {
     const cJSON *a = cJSON_GetObjectItemCaseSensitive(state, "active");
+    if (cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(state, "queued")))
+        return 1;
     return cJSON_IsString(a) && (strcmp(a->valuestring, "active") == 0 ||
                                  strcmp(a->valuestring, "activating") == 0 ||
                                  strcmp(a->valuestring, "deactivating") == 0 ||

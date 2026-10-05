@@ -493,7 +493,7 @@ static int unit_property(cJSON *unit, const char *key, const char *value)
 {
     static const struct {
         const char *key, *name;
-        char kind; /* s: text, i: number, t: timestamp */
+        char kind; /* s: text, i: number, t: timestamp, j: a job is queued */
     } props[] = {
         { "Id", "unit", 's' },          { "Description", "description", 's' },
         { "LoadState", "load", 's' },   { "ActiveState", "active", 's' },
@@ -503,6 +503,7 @@ static int unit_property(cJSON *unit, const char *key, const char *value)
         { "ExecMainStartTimestamp", "started", 't' },
         { "ExecMainExitTimestamp", "ended", 't' },
         { "ActiveEnterTimestamp", "since", 't' },
+        { "Job", "queued", 'j' },
     };
     for (size_t i = 0; i < sizeof props / sizeof props[0]; i++) {
         if (strcmp(key, props[i].key) != 0)
@@ -512,6 +513,8 @@ static int unit_property(cJSON *unit, const char *key, const char *value)
             v = cJSON_CreateString(value);
         } else if (props[i].kind == 't') {
             v = timestamp(value);
+        } else if (props[i].kind == 'j') {
+            v = cJSON_CreateBool(*value != '\0'); /* the job's id, or empty */
         } else {
             char *end;
             errno = 0;

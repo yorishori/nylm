@@ -321,10 +321,10 @@ static void test_units(void)
         "Id=docker.service\nDescription=Docker Application Container Engine\n"
         "LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\nType=notify\n"
         "ExecMainStatus=0\nExecMainStartTimestamp=@1700000000\nExecMainExitTimestamp=\n"
-        "ActiveEnterTimestamp=@1700000001\nSomethingElse=x=y\n"
+        "ActiveEnterTimestamp=@1700000001\nSomethingElse=x=y\nJob=\n"
         "\n"
         "Id=nylm-disk-usage.service\nLoadState=not-found\nActiveState=inactive\n"
-        "ExecMainStatus=\nExecMainStartTimestamp=n/a\n");
+        "ExecMainStatus=\nExecMainStartTimestamp=n/a\nJob=358\n");
     CHECK(cJSON_GetArraySize(u) == 2);
     cJSON *a = cJSON_GetArrayItem(u, 0), *b = cJSON_GetArrayItem(u, 1);
     CHECK_STR(str(a, "unit"), "docker.service");
@@ -339,6 +339,8 @@ static void test_units(void)
     CHECK_STR(str(b, "load"), "not-found");
     CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(b, "status")));
     CHECK(cJSON_IsNull(cJSON_GetObjectItemCaseSensitive(b, "started")));
+    CHECK(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(a, "queued")));
+    CHECK(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(b, "queued")));
 
     u = sysinfo_units("");
     CHECK(u != NULL && cJSON_GetArraySize(u) == 0);
