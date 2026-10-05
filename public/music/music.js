@@ -9,7 +9,8 @@
  *                  discard them, write them
  *   #/duplicates   possible duplicate tracks, albums and names: copy a
  *                  path, open an album, merge spellings of a name
- *   #/fixes        changes made for a few albums at a time: split genres
+ *   #/fixes        changes made for a few albums at a time: split genres,
+ *                  composers from the album artist
  *   #/files        where the move service puts each file (its plan, its
  *                  problems, what it did), and starting it
  *   #/qobuz        connect to Qobuz, download albums into the library
@@ -1858,7 +1859,15 @@ async function fixesPage() {
       fixButton("split", `Split genres in ${FIX_ALBUMS} albums`,
                 `Split the genres in the next ${FIX_ALBUMS} albums?`,
                 "/api/music/fix/split-genres", () => ({ delimiter: splitDelimiter }), busy),
-      "a genre would break the rules (fix it in the album)."));
+      "a genre would break the rules (fix it in the album)."),
+    fixSection("composers", "Composer from the album artist",
+      "Each track without a composer gets its album artist as the composer. Compilations " +
+      "are not changed; an album without an album artist is left alone.",
+      null,
+      fixButton("composers", `Set composers in ${FIX_ALBUMS} albums`,
+                `Make the album artist the composer in the next ${FIX_ALBUMS} albums?`,
+                "/api/music/fix/composers", () => ({}), busy),
+      "a track has no album artist, or it breaks the rules (fix it in the album)."));
 }
 
 /* ---- info ---------------------------------------------------------------- */

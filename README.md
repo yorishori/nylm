@@ -187,7 +187,10 @@ planned tags, queued as one batch like any edit; an album a fix would
 leave breaking the rules is left alone and named (the first 50) with
 Open album. Split genres (`fix/split-genres`, delimiter `,`, `;` or `:`):
 a genre holding the delimiter becomes several, each part trimmed, spaces
-made one, lowercase; other genres stay as they are. Files: the naming rule, the tracks
+made one, lowercase; other genres stay as they are. Composer from the
+album artist (`fix/composers`): each track without a composer gets its
+album artist; compilations are not changed, an album without an album
+artist is left alone. Files: the naming rule, the tracks
 that move (from, to) and those that can not (why), Move files, and what
 the moves did (`GET /api/music/moves`). Qobuz: connect, download albums,
 and what came of each download. Info: library

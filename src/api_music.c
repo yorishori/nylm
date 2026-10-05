@@ -2084,6 +2084,39 @@ void music_fix_split(struct request *req, struct response *res)
             d, split_fix, d);
 }
 
+/* The album artist as the only composer, unless the track is a
+ * compilation; 2 when it has no album artist. */
+static int composer_fix(const struct tags *t, const void *ctx, struct edit *e)
+{
+    (void)ctx;
+    const struct tag_values *c = &t->value[TAG_COMPILATION];
+    const struct tag_values *a = &t->value[TAG_ALBUMARTIST];
+    if (t->value[TAG_COMPOSER].n > 0 || (c->n == 1 && strcmp(c->v[0], "1") == 0))
+        return 0;
+    if (a->n == 0 || a->v[0][0] == '\0')
+        return 2;
+    e->field = TAG_COMPOSER;
+    e->value = *a;
+    e->stored = music_values_json(&e->value);
+    return e->stored != NULL ? 1 : -1;
+}
+
+/*
+ * POST /api/music/fix/composers {}: in the next FIX_ALBUMS albums with a
+ * track without a planned composer, makes the album artist each such
+ * track's composer; compilations are not changed, an album without an
+ * album artist is left alone. -> run_fix()
+ */
+void music_fix_composers(struct request *req, struct response *res)
+{
+    if (json_body(req, res) == NULL)
+        return;
+    run_fix(res, "composers from album artists",
+            PLANNED_CTE " SELECT t.id, t.album, t.albumartist FROM tracks t WHERE NOT EXISTS"
+            " (SELECT 1 FROM pv WHERE pv.track_id = t.id AND pv.field = 'composer')" FIX_ORDER,
+            NULL, composer_fix, NULL);
+}
+
 /* ---- starting the services ---------------------------------------------- */
 
 /* Checks the body's password, after the library (replies 400, 503, 403

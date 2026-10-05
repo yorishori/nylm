@@ -562,7 +562,8 @@ for route in "GET /api/music" "GET /api/music/albums" "GET /api/music/album?trac
              "POST /api/music/write" "GET /api/music/art?hash=$(printf '%064d' 0)&size=full" \
              "POST /api/music/cover" "GET /api/music/moves" "POST /api/music/move" \
              "GET /api/music/qobuz" "POST /api/music/qobuz/start" "GET /api/music/duplicates" \
-             "POST /api/music/merge" "POST /api/music/fix/split-genres"; do
+             "POST /api/music/merge" "POST /api/music/fix/split-genres" \
+             "POST /api/music/fix/composers"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
@@ -828,6 +829,7 @@ expect_body "the library is busy" "busy message"
 post "discard while busy"      409 $D "{\"track\":$T1}"
 post "merge while busy"        409 /api/music/merge '{"field":"artist","from":["some artist"],"to":"Some Artist"}'
 post "split while busy"        409 /api/music/fix/split-genres '{"delimiter":","}'
+post "composers while busy"    409 /api/music/fix/composers '{}'
 post "scan while busy"         409 $S "{$PW}"
 post "write while busy"        409 $W "{$PW}"
 post "move while busy"         409 /api/music/move "{$PW}"
@@ -1285,6 +1287,29 @@ query '["rock","pop rock","jazz"]' "split, trimmed, lowercase; the other value a
     "SELECT value FROM changes WHERE track_id = $(FIXID 01) AND state = 'pending'"
 post "split, nothing left"     200 $SP '{"delimiter":","}'
 expect_body '"batch":-1,"albums":0,"queued":0,"dropped":0,"skipped":2,"more":false}' "planned values are split already"
+# Composers from the album artist (sorted first now): a compilation is not
+# changed, an album without an album artist is left alone.
+sqlite3 "$MDB" "UPDATE tracks SET albumartist = 'AAA Fixer' WHERE album GLOB 'Fix [0-9][0-9]';
+                UPDATE tracks SET compilation = '1' WHERE album = 'Fix 00';
+                UPDATE tracks SET albumartist = NULL WHERE album = 'Fix 01'"
+FC=/api/music/fix/composers
+FCQ() { echo "SELECT coalesce(max(value), '-') FROM changes WHERE track_id = $(FIXID "$1")
+              AND field = 'composer' AND state = 'pending'"; }
+expect 415 "composers need json" -b "$JAR" -d '{}' "$B$FC"
+post "composers not an object" 400 $FC '[]'
+expect_body "body must be a JSON object" "composers body message"
+post "composers"               200 $FC '{}'
+expect_body '"left_alone":[{"track":'"$(FIXID 01)"',"album":"Fix 01","albumartist":null}' "an album without album artist is left alone"
+expect_body '"albums":10,"queued":10,"dropped":0,"skipped":1,"more":true}' "10 albums, more left"
+query '["AAA Fixer"]' "the album artist as composer" "$(FCQ 02)"
+query '["AAA Fixer"]' "the 10th album" "$(FCQ 11)"
+query "-" "a compilation is not changed" "$(FCQ 00)"
+query "-" "the 11th album waits" "$(FCQ 12)"
+post "composers again"         200 $FC '{}'
+expect_body '"left_alone":[{"track":'"$(FIXID 01)"',"album":"Fix 01","albumartist":null}' "left alone again"
+query '["AAA Fixer"]' "the next album" "$(FCQ 12)"
+query "1" "a planned composer is not changed again" \
+    "SELECT count(*) FROM changes WHERE track_id = $(FIXID 02) AND field = 'composer'"
 post "discard the fixes"       200 /api/music/discard '{"all":true}'
 sqlite3 "$MDB" "DELETE FROM tracks WHERE album GLOB 'Fix [0-9][0-9]'"
 

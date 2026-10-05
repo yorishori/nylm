@@ -42,6 +42,7 @@ void music_queue(struct request *req, struct response *res);
 void music_duplicates(struct request *req, struct response *res);
 void music_merge(struct request *req, struct response *res);
 void music_fix_split(struct request *req, struct response *res);
+void music_fix_composers(struct request *req, struct response *res);
 void music_cover(struct request *req, struct response *res);
 void music_discard(struct request *req, struct response *res);
 void music_scan_start(struct request *req, struct response *res);
