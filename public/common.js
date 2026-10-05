@@ -77,6 +77,22 @@ function navButton(label, href, extra) {
 }
 
 /*
+ * A group that opens and closes: a button with label (text or nodes) and
+ * the content it shows, made by content() when it first opens. -> an li
+ * for a ul.fold-list.
+ */
+function foldGroup(label, content) {
+  const body = el("div", { class: "fold-body stack", hidden: true });
+  const button = el("button", { class: "btn fold", type: "button", "aria-expanded": "false",
+                                onclick: () => {
+    if (!body.firstChild) body.append(content());
+    body.hidden = !body.hidden;
+    button.setAttribute("aria-expanded", String(!body.hidden));
+  } }, label);
+  return el("li", { class: "stack" }, button, body);
+}
+
+/*
  * A form whose submit runs action(form). While it runs the form's buttons
  * are disabled; an error is shown in the form's .form-error line.
  */

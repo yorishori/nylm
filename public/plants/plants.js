@@ -135,15 +135,31 @@ const DUE_GROUPS = [
   ["Later", (d) => d > 7],
 ];
 
-function dueRow(item) {
+/* One care due; showPlant: false inside its plant's group. */
+function dueRow(item, showPlant = true) {
   return el("li", { class: `card marked due-row c-${item.plant_color}` },
     el("div", { class: "what" },
-      plantName(item.plant, item.plant_color, "strong"),
+      showPlant ? plantName(item.plant, item.plant_color, "strong") : null,
       el("span", {}, careChip(item.care_type, item.care_type_color))),
     el("span", { class: "when" }, dueLabel(item.days_left, item.due)),
     el("div", { class: "done" },
       doneButtons(item.plant_id, item.plant, item.care_type_id, item.care_type,
                   navButton("Open plant", `#/plants/${item.plant_id}`))));
+}
+
+/* Later: one group per plant (by its soonest care), which opens on its
+ * care and their dates. items: soonest first. */
+function plantGroups(items) {
+  const plants = new Map();
+  for (const item of items) {
+    if (!plants.has(item.plant_id)) plants.set(item.plant_id, []);
+    plants.get(item.plant_id).push(item);
+  }
+  return el("ul", { class: "fold-list" }, [...plants.values()].map((list) => foldGroup([
+    plantName(list[0].plant, list[0].plant_color), " ",
+    el("span", { class: "count" }, String(list.length)),
+    el("span", { class: "muted" }, ` · next ${showDate(list[0].due)}`),
+  ], () => el("ul", { class: "list cols" }, list.map((item) => dueRow(item, false))))));
 }
 
 async function duePage() {
@@ -160,7 +176,8 @@ async function duePage() {
       if (items.length === 0) return null;
       return el("section", { class: "section" },
         el("header", {}, el("h2", {}, title, " ", el("span", { class: "count" }, items.length))),
-        el("ul", { class: "list cols" }, items.map(dueRow)));
+        title === "Later" ? plantGroups(items)
+                          : el("ul", { class: "list cols" }, items.map((item) => dueRow(item))));
     }));
 }
 

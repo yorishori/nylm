@@ -1805,24 +1805,17 @@ function groupBy(list, key) {
   return [...groups];
 }
 
-/* A group of written changes that opens and closes: a button with the
- * label, how many changes and how many failed or warned, and the content
- * it shows (made when it first opens). */
+/* A group of written changes that opens and closes (foldGroup): the label,
+ * how many changes and how many failed or warned. */
 function historyGroup(label, changes, content) {
   const failed = changes.filter((c) => c.state === "failed").length;
   const warned = changes.filter((c) => c.state === "warning").length;
-  const body = el("div", { class: "fold-body stack", hidden: true });
-  const button = el("button", { class: "btn fold", type: "button", "aria-expanded": "false",
-                                onclick: () => {
-    if (!body.firstChild) body.append(content());
-    body.hidden = !body.hidden;
-    button.setAttribute("aria-expanded", String(!body.hidden));
-  } },
+  return foldGroup([
     el("span", { class: "fold-label" }, label), " ",
     el("span", { class: "count" }, String(changes.length)),
     failed ? el("span", { class: "due late" }, ` ${failed} failed`) : null,
-    warned ? el("span", { class: "due today" }, ` ${warned} warned`) : null);
-  return el("li", { class: "stack" }, button, body);
+    warned ? el("span", { class: "due today" }, ` ${warned} warned`) : null,
+  ], content);
 }
 
 /* The written changes by day, then album, then track; each opens and

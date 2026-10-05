@@ -211,19 +211,7 @@ td.col-cover.edited.differs .thumb { box-shadow: 0 0 0 2px var(--lavender), 0 0 
 }
 .note { overflow-wrap: anywhere; color: var(--muted); }
 
-/* The written changes: day, album and track groups that open and close. */
-.fold-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
-.btn.fold {
-  width: 100%;
-  border-radius: 1rem;
-  white-space: normal;
-  text-align: left;
-  overflow-wrap: anywhere;
-}
-.btn.fold::before { content: "▸"; margin-right: 0.5rem; color: var(--muted); }
-.btn.fold[aria-expanded="true"]::before { content: "▾"; }
-.fold-label { font-weight: 700; }
-.fold-body { padding-left: 1rem; border-left: 1px solid var(--edge); margin-left: 0.75rem; }
+/* The written changes: day, album and track groups (foldGroup). */
 .fold-list > .history { border-top: 1px solid var(--edge); padding-top: 0.5rem; }
 .rules { margin: 0; padding-left: 1.2rem; display: grid; gap: 0.3rem; }
 
@@ -238,7 +226,6 @@ td.col-cover.edited.differs .thumb { box-shadow: 0 0 0 2px var(--lavender), 0 0 
   }
   .grid { font-size: 0.8rem; }
   .grid .col-album, .grid .col-title { min-width: 9rem; }
-  .fold-body { padding-left: 0.5rem; margin-left: 0.25rem; }
 }
 
 /* ---- charts (Info) -------------------------------------------------------- */
