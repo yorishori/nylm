@@ -125,7 +125,7 @@ int tags_same_pictures(const struct tags *a, const struct tags *b);
  *  - required tags must have a value;
  *  - text: UTF-8 without control characters, at most 500 bytes each;
  *  - genre and composer: at most 64 values, none empty; a genre is
- *    lowercase a-z, 0-9 and '-';
+ *    lowercase a-z, 0-9, '-', '&' and '/', one space between words;
  *  - track and disc number "X/Y", positive whole numbers, X <= Y;
  *  - date (the year) and BPM: a positive whole number;
  *  - compilation "0" or "1".

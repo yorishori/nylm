@@ -71,9 +71,9 @@ static void test_fields(void)
     int required = 0;
     for (int i = 0; i < TAG_FIELDS; i++)
         required += tags_is_required((enum tag_field)i);
-    CHECK(required == 10);
+    CHECK(required == 9);
     CHECK(tags_is_required(TAG_COMPILATION) && tags_is_required(TAG_COMPOSER));
-    CHECK(!tags_is_required(TAG_BPM) && !tags_is_required(TAG_ISRC));
+    CHECK(!tags_is_required(TAG_BPM) && !tags_is_required(TAG_ISRC) && !tags_is_required(TAG_GENRE));
 
     const char *music[] = { "mp3", "mp2", "flac", "ogg", "oga", "opus", "m4a", "m4b", "m4p",
                             "mp4", "aac", "wav", "aif", "aiff", "aifc", "afc", "ape", "wv",
@@ -100,7 +100,7 @@ static void test_check(void)
     CHECK(ok(TAG_ISRC, NULL));     /* not required */
     CHECK(ok(TAG_BPM, NULL));
     CHECK(ok(TAG_NAVIDROME_ID, NULL));
-    CHECK(!ok_list(TAG_GENRE, NULL, 0));
+    CHECK(ok_list(TAG_GENRE, NULL, 0)); /* not required */
     CHECK(!ok_list(TAG_COMPOSER, NULL, 0));
 
     /* text: UTF-8 without control characters, at most 500 bytes */
@@ -171,10 +171,12 @@ static void test_check(void)
     CHECK(!ok(TAG_COMPILATION, "yes"));
     CHECK(!ok(TAG_COMPILATION, "01"));
 
-    /* genre: lowercase a-z, 0-9 and '-' */
-    const char *genres[] = { "rock", "hip-hop", "80s", "-" };
-    CHECK(ok_list(TAG_GENRE, genres, 4));
-    const char *bad_genres[] = { "Rock", "hip hop", "rock_pop", "électro", "rock;pop", "" };
+    /* genre: lowercase a-z, 0-9, '-', '&' and '/', one space between words */
+    const char *genres[] = { "rock", "hip-hop", "80s", "-", "pop rock", "r&b", "drum & bass",
+                             "rock/pop", "a b c", "&", "/" };
+    CHECK(ok_list(TAG_GENRE, genres, 11));
+    const char *bad_genres[] = { "Rock", "rock_pop", "électro", "rock;pop", "rock,pop", "rock's",
+                                 "", " ", " rock", "rock ", "pop  rock", "pop\trock" };
     for (size_t i = 0; i < sizeof bad_genres / sizeof bad_genres[0]; i++)
         CHECK(!ok_list(TAG_GENRE, &bad_genres[i], 1));
     const char *mixed[] = { "rock", "Pop" };

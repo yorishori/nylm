@@ -34,7 +34,7 @@ const FIELDS = {
   albumartist: { label: "Album artist", kind: "combo", required: true },
   date: { label: "Date", kind: "whole", required: true },
   composer: { label: "Composer", kind: "list", required: true },
-  genre: { label: "Genres", kind: "list", required: true },
+  genre: { label: "Genres", kind: "list" },
   compilation: { label: "Compilation", kind: "switch", required: true },
   bpm: { label: "BPM", kind: "whole" },
   isrc: { label: "ISRC", kind: "text" },
@@ -63,7 +63,7 @@ const SHOW_STEP = 200; /* albums shown at a time */
 const POPUP_ROOM = 320; /* pixels an editing popup may grow to */
 const GENRE_SLICES = 12;  /* genres in the donut; the rest are "other" */
 const YEAR_BAR = 6;       /* pixels per year in the years chart */
-const GENRE_RE = /^[a-z0-9-]+$/;
+const GENRE_RE = /^[a-z0-9&/-]+( [a-z0-9&/-]+)*$/; /* words, one space between */
 const WHOLE_RE = /^(?!0+$)\d{1,4}$/; /* a positive whole number, at most 9999 */
 const encoder = new TextEncoder();
 const COVER_SIDE = 1200;            /* pixels: the longer side of a new cover, at most */
@@ -95,13 +95,13 @@ function textProblem(s) {
 function problem(field, v) {
   const spec = FIELDS[field];
   if (spec.kind === "list") {
-    if (!v.length) return "needs at least one value";
+    if (!v.length) return spec.required ? "needs at least one value" : null;
     if (v.length > MAX_VALUES) return "has too many values (at most 64)";
     for (const x of v) {
       if (x === "") return "can not have an empty value";
       const p = textProblem(x);
       if (p) return p;
-      if (field === "genre" && !GENRE_RE.test(x)) return `"${x}": only lowercase a-z, 0-9 and -`;
+      if (field === "genre" && !GENRE_RE.test(x)) return `"${x}": only lowercase a-z, 0-9, -, & and /, one space between words`;
     }
     return null;
   }
@@ -520,7 +520,7 @@ function listEditor(anchor, { field, values, mixed, onSave, onDone }) {
     if (await onSave(chosen)) close(true);
   };
   pop.append(el("strong", {}, spec.label), items, input, list,
-    field === "genre" ? el("p", { class: "hint" }, "Lowercase a-z, 0-9 and -.") : null,
+    field === "genre" ? el("p", { class: "hint" }, "Lowercase a-z, 0-9, -, & and /; one space between words. None is allowed.") : null,
     mixed ? el("p", { class: "hint" }, "The tracks differ: the list saved here goes on every track.") : null,
     error, popupActions(save, close));
   render();
@@ -716,7 +716,7 @@ function albumMatches(a) {
   for (const f of FILTER_FIELDS) {
     const v = filters[f].trim().toLowerCase();
     if (v && !albumText(a, f).includes(v)) return false;
-    if (filters.none[f] && !a.missing.includes(f)) return false;
+    if (filters.none[f] && !a.empty.includes(f)) return false;
   }
   return !(filters.invalid && !a.invalid.length) && !(filters.missing && !a.missing.length) &&
          !(filters.artists && !a.several_artists) && !(filters.noArt && !a.no_art) &&
@@ -1844,12 +1844,13 @@ function historyList(history) {
 
 const RULES = [
   "Every track needs: title, album, artist, album artist, track and disc number, date, " +
-    "at least one genre and composer, and compilation.",
+    "at least one composer, and compilation. Genres may be left out.",
   "Text: UTF-8 without control characters, at most 500 bytes per value.",
   "Track and disc number: X/Y, two positive whole numbers, X at most Y (3/12). A track with " +
     "an invalid track number is not written; a missing or invalid disc number is written as 1/1.",
   "Date: the year, a positive whole number. BPM: a positive whole number.",
-  "Genres: lowercase a-z, 0-9 and -, as many as needed, in order.",
+  "Genres: lowercase a-z, 0-9, -, & and /, words with one space between them (pop rock, " +
+    "r&b), as many as needed, in order.",
   "Composers: as many as needed, in order.",
   "Compilation: yes or no (1 or 0).",
   "Titlesort, albumsort, artistsort, albumartistsort and composersort are written with " +

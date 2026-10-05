@@ -191,11 +191,12 @@ files' tags), the rules, and the written changes with their results, by
 day, then album, then track, each opening on its own.
 
 The rules for a value: required are title, album, artist, album artist,
-track and disc number, date, genre, composer and compilation; text is
-UTF-8 without control characters, at most 500 bytes; track and disc
-number `X/Y`, positive whole numbers, X at most Y; date (the year) and BPM
-positive whole numbers; compilation `0` or `1` (absent reads as `0`);
-genres lowercase `a-z`, `0-9` and `-`.
+track and disc number, date, composer and compilation (genre may be left
+out); text is UTF-8 without control characters, at most 500 bytes; track
+and disc number `X/Y`, positive whole numbers, X at most Y; date (the year)
+and BPM positive whole numbers; compilation `0` or `1` (absent reads as
+`0`); genres are words of lowercase `a-z`, `0-9`, `-`, `&` and `/` with one
+space between them (`pop rock`, `r&b`).
 
 The write service, per track, only through TagLib (`src/tags.c`): applies
 the track's pending changes to the cached tags; mirrors TITLESORT,

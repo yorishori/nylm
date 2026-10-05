@@ -88,7 +88,6 @@ int tags_is_required(enum tag_field f)
     case TAG_TRACKNUMBER:
     case TAG_DISCNUMBER:
     case TAG_DATE:
-    case TAG_GENRE:
     case TAG_COMPOSER:
     case TAG_COMPILATION:
         return 1;
@@ -179,11 +178,21 @@ int tags_number(const char *s, int *x, int *y)
     return 0;
 }
 
-/* A genre: lowercase a-z, 0-9 and '-'. */
+/* A genre: words of lowercase a-z, 0-9, '-', '&' and '/', with one space
+ * between two words. */
 static int genre_valid(const char *s)
 {
-    size_t n = strspn(s, "abcdefghijklmnopqrstuvwxyz0123456789-");
-    return n > 0 && s[n] == '\0';
+    for (;;) {
+        size_t n = strspn(s, "abcdefghijklmnopqrstuvwxyz0123456789-&/");
+        if (n == 0)
+            return 0;
+        s += n;
+        if (*s == '\0')
+            return 1;
+        if (*s != ' ')
+            return 0;
+        s++;
+    }
 }
 
 const char *tags_check(enum tag_field f, const struct tag_values *v)
@@ -225,7 +234,8 @@ const char *tags_check(enum tag_field f, const struct tag_values *v)
             break;
         case TAG_GENRE:
             if (!genre_valid(s))
-                return "may only use lowercase a-z, 0-9 and -";
+                return "may only use lowercase a-z, 0-9, -, & and /, with one space between "
+                       "words";
             break;
         default:
             break;

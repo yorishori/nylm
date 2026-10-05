@@ -432,7 +432,7 @@ struct album_sum {
     cJSON *row;
     int tracks;
     uint64_t hash[NALBUM_FIELDS], artist, pictures;
-    unsigned mixed, changed, missing, invalid;
+    unsigned mixed, changed, empty, missing, invalid;
     int several_artists, all_compilation, no_art, mixed_art;
     char cover[ART_HASH_LEN + 1]; /* "" if no track has a picture */
     int cover_front;              /* cover is a "Front Cover" */
@@ -479,6 +479,7 @@ static int album_end(const struct album_sum *a)
     return cJSON_AddNumberToObject(row, "tracks", a->tracks) != NULL &&
                    add_field_names(row, "mixed", a->mixed) != NULL &&
                    add_field_names(row, "changed", a->changed) != NULL &&
+                   add_field_names(row, "empty", a->empty) != NULL &&
                    add_field_names(row, "missing", a->missing) != NULL &&
                    add_field_names(row, "invalid", a->invalid) != NULL &&
                    cJSON_AddBoolToObject(row, "several_artists",
@@ -505,8 +506,9 @@ static int new_album(sqlite3_stmt *st, const char **album, const char **artist, 
  * GET /api/music/albums[?track=N]: every album (or the album of track N),
  * one row each: track (one of its tracks), the planned album fields
  * (null if absent or mixed), tracks, mixed and changed (fields;
- * "picture" for a new cover), missing and invalid (the required tags a
- * track has no value for, the tags a track has an invalid value in),
+ * "picture" for a new cover), empty (the album fields a track has no
+ * value for), missing and invalid (the required tags a track has no
+ * value for, the tags a track has an invalid value in),
  * whether the tracks have several artists without being a compilation,
  * and whether a track has no picture; cover (the hash of the planned
  * front cover, else of the first picture; null if none) and whether the
@@ -559,11 +561,14 @@ void music_albums(struct request *req, struct response *res)
             break;
         problems(&t, &missing, &invalid);
         for (size_t i = 0; i < NALBUM_FIELDS; i++) {
-            uint64_t h = hash_values(&t.value[album_fields[i]]);
+            const struct tag_values *v = &t.value[album_fields[i]];
+            uint64_t h = hash_values(v);
             if (a.tracks == 0)
                 a.hash[i] = h;
             else if (h != a.hash[i])
                 a.mixed |= 1u << album_fields[i];
+            if (v->n == 0 || v->v[0][0] == '\0')
+                a.empty |= 1u << album_fields[i];
         }
         uint64_t artist = hash_values(&t.value[TAG_ARTIST]);
         a.several_artists |= a.tracks > 0 && artist != a.artist;
