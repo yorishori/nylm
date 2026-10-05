@@ -954,8 +954,9 @@ function albumPictures(tracks) {
   };
 }
 
-/* One picture of the album: thumbnail, what it is, how many tracks have it. */
-function pictureCard(p, total, isNew) {
+/* One picture of the album: thumbnail, what it is, how many tracks have it;
+ * useAll: null, or the button that makes it every track's cover. */
+function pictureCard(p, total, isNew, useAll) {
   const on = isNew ? p.tracks : p.tracks.size;
   return el("li", { class: isNew ? "card stack picture new" : "card stack picture" },
     p.mime === null && !isNew
@@ -970,65 +971,99 @@ function pictureCard(p, total, isNew) {
     isNew || p.mime === null ? null
       : el("div", { class: "actions" },
           el("a", { class: "btn", href: artUrl(p.hash, "full"), target: "_blank",
-                    rel: "noopener" }, "Full size")));
+                    rel: "noopener" }, "Full size"),
+          useAll));
 }
 
 /*
  * The album's pictures, and Set cover: a picture file is made a JPEG here
- * (see makeCover), shown, and queued for every track of album id.
+ * (see makeCover), shown, and queued for every track of album id. A stored
+ * picture that is not every track's only one has Use on all tracks: a
+ * JPEG the write service takes as it is is queued by its hash; any other
+ * is made a JPEG and shown first, like a file.
  */
 function picturesSection(id, tracks, readOnly) {
   const { next, stored } = albumPictures(tracks);
-  const list = el("ul", { class: "pictures" },
-    next ? pictureCard(next, tracks.length, true) : null,
-    stored.map((p) => pictureCard(p, tracks.length, false)));
   const file = el("input", { type: "file", accept: "image/*", hidden: true });
   const preview = el("div", { class: "card stack", hidden: true });
   const choose = el("button", { class: "btn", type: "button", onclick: () => file.click() },
                     "Set cover…");
+  const queued = (r) => {
+    setStatus(r.queued ? `Cover queued for ${plural(r.queued, "track", "tracks")}`
+                       : "Every track has this cover already");
+    refresh();
+  };
+  /* Shows source (a file or a stored picture) made a JPEG, with Use as cover. */
+  const showPreview = async (source, back) => {
+    const { canvas, blob } = await makeCover(source);
+    const error = el("p", { class: "form-error", role: "alert" });
+    const use = el("button", { class: "btn go", type: "button" }, "Use as cover");
+    use.addEventListener("click", async () => {
+      use.disabled = true;
+      error.textContent = "";
+      try {
+        queued(await api("POST", "/api/music/cover", { album: id, image: await base64Of(blob) }));
+      } catch (err) {
+        if (!(err instanceof ApiError && err.status === 401 && handleError(err))) {
+          error.textContent = err.message;
+        }
+        use.disabled = false;
+      }
+    });
+    preview.replaceChildren(
+      el("h3", {}, "New cover"),
+      canvas,
+      el("p", { class: "muted small" },
+         `${canvas.width} × ${canvas.height} · JPEG · ${showSize(blob.size)}`),
+      el("p", { class: "hint" }, `Queued for every track of the album; writing makes it ` +
+                                 "each track's only picture."),
+      error,
+      el("div", { class: "actions" }, use,
+        el("button", { class: "btn", type: "button",
+                       onclick: () => { preview.hidden = true; back.focus(); } }, "Cancel")));
+    preview.hidden = false;
+    use.focus();
+  };
   file.addEventListener("change", async () => {
     const picked = file.files[0];
     file.value = "";
     if (!picked) return;
     choose.disabled = true;
     try {
-      const { canvas, blob } = await makeCover(picked);
-      const error = el("p", { class: "form-error", role: "alert" });
-      const use = el("button", { class: "btn go", type: "button" }, "Use as cover");
-      use.addEventListener("click", async () => {
-        use.disabled = true;
-        error.textContent = "";
-        try {
-          const r = await api("POST", "/api/music/cover", { album: id, image: await base64Of(blob) });
-          setStatus(r.queued ? `Cover queued for ${plural(r.queued, "track", "tracks")}`
-                             : "Every track has this cover already");
-          refresh();
-        } catch (err) {
-          if (!(err instanceof ApiError && err.status === 401 && handleError(err))) {
-            error.textContent = err.message;
-          }
-          use.disabled = false;
-        }
-      });
-      preview.replaceChildren(
-        el("h3", {}, "New cover"),
-        canvas,
-        el("p", { class: "muted small" },
-           `${canvas.width} × ${canvas.height} · JPEG · ${showSize(blob.size)}`),
-        el("p", { class: "hint" }, `Queued for every track of the album; writing makes it ` +
-                                   "each track's only picture."),
-        error,
-        el("div", { class: "actions" }, use,
-          el("button", { class: "btn", type: "button",
-                         onclick: () => { preview.hidden = true; choose.focus(); } }, "Cancel")));
-      preview.hidden = false;
-      use.focus();
+      await showPreview(picked, choose);
     } catch (err) {
       setStatus(err.message, true);
     } finally {
       choose.disabled = false;
     }
   });
+  const useAll = (p) => {
+    if (readOnly || p.mime === null ||
+        tracks.every((t) => JSON.stringify(plannedPictures(t)) === JSON.stringify([p.hash]))) {
+      return null;
+    }
+    const button = el("button", { class: "btn", type: "button", onclick: async () => {
+      button.disabled = true;
+      try {
+        if (p.mime === "image/jpeg" && p.size <= COVER_BYTES) {
+          queued(await api("POST", "/api/music/cover", { album: id, hash: p.hash }));
+        } else {
+          const r = await fetch(artUrl(p.hash, "full"), { credentials: "same-origin" });
+          if (!r.ok) throw new Error(`The picture could not be loaded (${r.status}).`);
+          await showPreview(await r.blob(), button);
+        }
+      } catch (err) {
+        handleError(err);
+      } finally {
+        button.disabled = false;
+      }
+    } }, "Use on all tracks");
+    button.title = "Makes it every track's only picture (queued until written).";
+    return button;
+  };
+  const list = el("ul", { class: "pictures" },
+    next ? pictureCard(next, tracks.length, true, null) : null,
+    stored.map((p) => pictureCard(p, tracks.length, false, useAll(p))));
   return el("section", { class: "section" },
     el("header", {}, el("h2", {}, "Pictures ", el("span", { class: "count" }, stored.length))),
     readOnly ? null : el("div", { class: "actions" }, choose, file),

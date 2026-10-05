@@ -234,7 +234,10 @@ A new album cover is a JPEG of at most 700 KiB, sent as base64 in JSON
 (`POST /api/music/cover`; the browser scales it down first). The server
 checks only that it is base64 and starts like a JPEG, stores it in the
 art folder, and queues a `picture` change (its hash) for every track of
-the album. The write service checks that the stored bytes still have
+the album. A picture already stored can be used the same way by its hash
+(`{album, hash}`, Use on all tracks under it) when it is a JPEG of at
+most 700 KiB, as it is; any other the browser makes a JPEG and sends like
+an upload. The write service checks that the stored bytes still have
 that hash and decode completely (which makes the thumbnail), then
 replaces all of the track's pictures with it as the front cover, and
 checks it reads back.

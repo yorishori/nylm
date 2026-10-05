@@ -1660,13 +1660,41 @@ static int queue_cover(long long album, const char *hash, long long batch, int *
 }
 
 /*
- * POST /api/music/cover {"album": track id, "image": base64 of a JPEG}:
- * sets the album's cover. The picture (at most ART_MAX_UPLOAD bytes; only
- * its first bytes are checked here, the write service decodes it) is
- * stored in the art folder, and a change that makes it each track's only
- * picture is queued for every track of the album, as one batch; nothing
- * is written to the files until the write service runs. A track that has
- * only this picture already gets none (its pending cover is dropped).
+ * The picture of a cover given by its hash: it must be stored and be a
+ * JPEG the write service takes as it is (at most ART_MAX_UPLOAD bytes).
+ * 0, or -1 after the reply.
+ */
+static int stored_cover(struct response *res, const char *hash)
+{
+    sqlite3_stmt *st = db_prepare(music_db, "SELECT mime, size FROM art WHERE hash = ?");
+    int rc = st != NULL && sqlite3_bind_text(st, 1, hash, -1, SQLITE_STATIC) == SQLITE_OK
+                 ? sqlite3_step(st)
+                 : SQLITE_ERROR;
+    const char *mime = rc == SQLITE_ROW ? (const char *)sqlite3_column_text(st, 0) : NULL;
+    int jpeg = mime != NULL && strcmp(mime, "image/jpeg") == 0 &&
+               sqlite3_column_int64(st, 1) <= ART_MAX_UPLOAD;
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE)
+        db_log_error(music_db, "cover: stored picture");
+    sqlite3_finalize(st);
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE)
+        json_error(res, 500, "internal error");
+    else if (rc == SQLITE_DONE)
+        json_error(res, 404, "that picture is not stored");
+    else if (!jpeg)
+        json_error(res, 400, "only a JPEG of at most 700 KiB is used as it is; upload it instead");
+    return rc == SQLITE_ROW && jpeg ? 0 : -1;
+}
+
+/*
+ * POST /api/music/cover {"album": track id, "image": base64 of a JPEG} or
+ * {"album": track id, "hash": a stored picture's}: sets the album's
+ * cover. An image (at most ART_MAX_UPLOAD bytes; only its first bytes are
+ * checked here, the write service decodes it) is stored in the art
+ * folder; a hash must be a stored JPEG (stored_cover()). Then a change
+ * that makes it each track's only picture is queued for every track of
+ * the album, as one batch; nothing is written to the files until the
+ * write service runs. A track that has only this picture already gets
+ * none (its pending cover is dropped).
  * -> 200 {batch, queued, dropped, hash}
  */
 void music_cover(struct request *req, struct response *res)
@@ -1675,32 +1703,52 @@ void music_cover(struct request *req, struct response *res)
     if (body == NULL)
         return;
     long long album;
-    const char *image = NULL;
+    const char *image = NULL, *stored = NULL;
     const char *err = get_id(body, "album", &album);
-    if (err == NULL)
+    int by_hash = cJSON_GetObjectItemCaseSensitive(body, "hash") != NULL;
+    if (err == NULL && by_hash == (cJSON_GetObjectItemCaseSensitive(body, "image") != NULL))
+        err = "give either 'image' or 'hash'";
+    else if (err == NULL && by_hash)
+        err = json_get_string(body, "hash", ART_HASH_LEN, ART_HASH_LEN, &stored) != NULL ||
+                      !art_hash_valid(stored)
+                  ? "'hash' must be 64 lowercase hex characters"
+                  : NULL;
+    else if (err == NULL)
         err = json_get_string(body, "image", 1, HTTP_MAX_BODY, &image);
     if (err != NULL) {
         json_error(res, 400, err);
         return;
     }
-    unsigned char *data = arena_alloc(ART_MAX_UPLOAD);
-    if (data == NULL) {
-        json_error(res, 500, "internal error");
-        return;
-    }
-    long size = art_base64_decode(image, strlen(image), data, ART_MAX_UPLOAD);
-    if (size == -2) {
-        json_error(res, 413, "the picture is bigger than 700 KiB");
-        return;
-    }
-    if (size < 0) {
-        json_error(res, 400, "'image' must be base64 (A-Z a-z 0-9 + /, padded with =)");
-        return;
-    }
-    const char *mime = art_mime(data, (size_t)size);
-    if (mime == NULL || strcmp(mime, "image/jpeg") != 0) {
-        json_error(res, 400, "'image' must be a JPEG picture");
-        return;
+    unsigned char *data = NULL;
+    long size = 0;
+    char hash[ART_HASH_LEN + 1];
+    if (by_hash) {
+        if (stored_cover(res, stored) != 0)
+            return;
+        snprintf(hash, sizeof hash, "%s", stored);
+    } else {
+        if ((data = arena_alloc(ART_MAX_UPLOAD)) == NULL) {
+            json_error(res, 500, "internal error");
+            return;
+        }
+        size = art_base64_decode(image, strlen(image), data, ART_MAX_UPLOAD);
+        if (size == -2) {
+            json_error(res, 413, "the picture is bigger than 700 KiB");
+            return;
+        }
+        if (size < 0) {
+            json_error(res, 400, "'image' must be base64 (A-Z a-z 0-9 + /, padded with =)");
+            return;
+        }
+        const char *mime = art_mime(data, (size_t)size);
+        if (mime == NULL || strcmp(mime, "image/jpeg") != 0) {
+            json_error(res, 400, "'image' must be a JPEG picture");
+            return;
+        }
+        if (art_hash(data, (size_t)size, hash) != 0) {
+            json_error(res, 500, "internal error");
+            return;
+        }
     }
     if (track_exists(res, album) != 1)
         return;
@@ -1710,28 +1758,23 @@ void music_cover(struct request *req, struct response *res)
                                                  : "this album has more than 2000 tracks");
         return;
     }
-    char hash[ART_HASH_LEN + 1];
-    if (art_hash(data, (size_t)size, hash) != 0) {
-        json_error(res, 500, "internal error");
-        return;
-    }
 
     int lock = lock_for_write(res);
     if (lock < 0)
         return;
     int queued = 0, dropped = 0;
     long long batch = -1;
-    sqlite3_stmt *add = db_prepare(music_db,
+    sqlite3_stmt *add = by_hash ? NULL : db_prepare(music_db,
         "INSERT INTO art (hash, mime, size) VALUES (?, 'image/jpeg', ?)"
         " ON CONFLICT (hash) DO NOTHING");
     /* The file first: a row never names a missing file. If what follows
      * fails, the scan of the whole library removes the file. */
-    int rc = add != NULL && art_save(ART_MUSIC, hash, 0, data, (size_t)size) == 0 &&
-                     sqlite3_bind_text(add, 1, hash, -1, SQLITE_STATIC) == SQLITE_OK &&
-                     sqlite3_bind_int64(add, 2, size) == SQLITE_OK
+    int rc = by_hash || (add != NULL && art_save(ART_MUSIC, hash, 0, data, (size_t)size) == 0 &&
+                         sqlite3_bind_text(add, 1, hash, -1, SQLITE_STATIC) == SQLITE_OK &&
+                         sqlite3_bind_int64(add, 2, size) == SQLITE_OK)
                  ? db_exec(music_db, "BEGIN IMMEDIATE")
                  : -1;
-    if (rc == 0)
+    if (rc == 0 && !by_hash)
         rc = run_once(add); /* finalizes add */
     else
         sqlite3_finalize(add);

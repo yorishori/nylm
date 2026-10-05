@@ -1044,6 +1044,28 @@ expect_body "\"field\":\"picture\",\"value\":\"$COVER\",\"now\":\"[\\\"$FRONT\\\
 expect 200 "the same cover again" -b "$JAR" -H "$J" --data-binary "@$TMP/cover.json" "$B$C"
 expect_body '"queued":0,"dropped":0' "nothing new to queue"
 post "picture through queue"   400 $Q "{\"edits\":[{\"track\":$TA,\"field\":\"picture\",\"value\":\"$COVER\"}]}"
+# A stored JPEG as the cover of every track, by its hash (bytes as stored).
+post "cover by hash"           200 $C "{\"album\":$TA,\"hash\":\"$FRONT\"}"
+expect_body "\"queued\":$N,\"dropped\":0,\"hash\":\"$FRONT\"}" "a stored picture queued for every track"
+query "$N" "every track's pending cover is the stored one" \
+    "SELECT count(*) FROM changes WHERE state = 'pending' AND field = 'picture' AND value = '$FRONT'"
+post "cover image and hash"    400 $C "{\"album\":$TA,\"image\":\"/9j/\",\"hash\":\"$FRONT\"}"
+expect_body "give either 'image' or 'hash'" "image or hash message"
+post "cover hash short"        400 $C "{\"album\":$TA,\"hash\":\"${FRONT%?}\"}"
+expect_body "'hash' must be 64 lowercase hex characters" "cover hash message"
+post "cover hash long"         400 $C "{\"album\":$TA,\"hash\":\"${FRONT}0\"}"
+post "cover hash capitals"     400 $C "{\"album\":$TA,\"hash\":\"$(echo "$FRONT" | tr a-f A-F)\"}"
+post "cover hash number"       400 $C "{\"album\":$TA,\"hash\":1}"
+post "cover hash not stored"   404 $C "{\"album\":$TA,\"hash\":\"$(printf '%064d' 0)\"}"
+expect_body "that picture is not stored" "not stored message"
+post "cover hash not a JPEG"   400 $C "{\"album\":$TA,\"hash\":\"$BACK\"}"
+expect_body "only a JPEG of at most 700 KiB is used as it is" "stored JPEG message"
+sqlite3 "$MDB" "UPDATE art SET size = 716801 WHERE hash = '$FRONT'"
+post "cover hash too big"      400 $C "{\"album\":$TA,\"hash\":\"$FRONT\"}"
+sqlite3 "$MDB" "UPDATE art SET size = 2388 WHERE hash = '$FRONT'"
+post "cover hash missing album" 404 $C "{\"album\":999,\"hash\":\"$FRONT\"}"
+expect 200 "back to the uploaded cover" -b "$JAR" -H "$J" --data-binary "@$TMP/cover.json" "$B$C"
+expect_body "\"queued\":$N,\"dropped\":0" "the upload replaces the pending covers"
 
 # The write: each valid track gets the cover as its only picture (the Art
 # copies and 02.FLAC break the rules and are not written); the cover is
