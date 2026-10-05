@@ -1866,6 +1866,224 @@ void music_discard(struct request *req, struct response *res)
     json_reply(res, 200, out);
 }
 
+/* ---- fixes: a few albums at a time --------------------------------------- */
+
+#define FIX_ALBUMS  10 /* albums one fix changes at once */
+#define FIX_SKIPPED 50 /* albums left alone named in the reply, at most */
+
+/*
+ * What a fix makes of one track's planned tags t: 1 and e filled (the
+ * edit; e->track is set by the caller), 0 if the track needs none, 2 if
+ * its album must be left alone, -1 when out of memory.
+ */
+typedef int (*fix_fn)(const struct tags *t, const void *ctx, struct edit *e);
+
+/* 1 if a and b (either may be NULL) are the same text. */
+static int same_text(const char *a, const char *b)
+{
+    return a == NULL ? b == NULL : b != NULL && strcmp(a, b) == 0;
+}
+
+/* The candidates of a fix: track ids with their album and album artist. */
+struct fix_track {
+    long long id;
+    const char *album, *albumartist;
+};
+
+/*
+ * Reads the rows of find (id, album, albumartist; in album order) into
+ * *out, at most max. The count, or -1 (logged).
+ */
+static long long fix_tracks(sqlite3_stmt *find, long long max, struct fix_track *out)
+{
+    long long n = 0;
+    int rc = SQLITE_DONE;
+    while (n < max && (rc = sqlite3_step(find)) == SQLITE_ROW) {
+        struct fix_track *t = &out[n];
+        const char *a = (const char *)sqlite3_column_text(find, 1);
+        const char *b = (const char *)sqlite3_column_text(find, 2);
+        t->id = sqlite3_column_int64(find, 0);
+        t->album = a != NULL ? arena_strndup(a, strlen(a)) : NULL;
+        t->albumartist = b != NULL ? arena_strndup(b, strlen(b)) : NULL;
+        if ((a != NULL && t->album == NULL) || (b != NULL && t->albumartist == NULL))
+            return -1;
+        n++;
+    }
+    if (n < max && rc != SQLITE_DONE) {
+        db_log_error(music_db, "fix: tracks");
+        return -1;
+    }
+    return n;
+}
+
+#define FIX_LEAVE (-2) /* fix_album(): the album is left alone */
+
+/*
+ * The edits of fn for the tracks t[0..n) of one album into edits. The
+ * count; FIX_LEAVE if the album must be left alone (fn said so, or an
+ * edit would break the rules); -1 on error (logged).
+ */
+static long long fix_album(const struct fix_track *t, long long n, fix_fn fn, const void *ctx,
+                           sqlite3_stmt *track, sqlite3_stmt *pending, struct edit *edits)
+{
+    long long k = 0;
+    int leave = 0;
+    for (long long i = 0; i < n && !leave; i++) {
+        struct tags tags;
+        unsigned changed;
+        int r = -1;
+        if (sqlite3_bind_int64(track, 1, t[i].id) == SQLITE_OK &&
+            sqlite3_step(track) == SQLITE_ROW &&
+            planned_tags(track, 0, t[i].id, pending, &tags, &changed) == 0)
+            r = fn(&tags, ctx, &edits[k]);
+        sqlite3_reset(track);
+        if (r < 0)
+            return -1;
+        if (r == 2 || (r == 1 && tags_check(edits[k].field, &edits[k].value) != NULL))
+            leave = 1;
+        else if (r == 1)
+            edits[k++].track = t[i].id;
+    }
+    return leave ? FIX_LEAVE : k;
+}
+
+/*
+ * Runs a fix: find (SQL; ?1 bound to bind unless NULL) gives the tracks
+ * that may need it (id, album, albumartist) in album order; fn makes
+ * each one's edit. Queues, as one batch, the edits of the first
+ * FIX_ALBUMS albums it changes; an album fn says to leave alone, or whose
+ * edits would break the rules, is skipped and named (the first
+ * FIX_SKIPPED). Replies
+ *   200 {batch, albums, queued, dropped, skipped, left_alone: [{track,
+ *        album, albumartist}], more}
+ * more: the albums after those that were not looked at.
+ */
+static void run_fix(struct response *res, const char *what, const char *find_sql,
+                    const char *bind, fix_fn fn, const void *ctx)
+{
+    int lock = lock_for_write(res);
+    if (lock < 0)
+        return;
+    struct fix_track *tracks = NULL;
+    struct edit *edits = NULL;
+    long long n = -1, batch = -1, *skipped = NULL;
+    int albums = 0, queued = 0, dropped = 0, nskipped = 0, more = 0;
+    sqlite3_stmt *find = db_prepare(music_db, find_sql);
+    sqlite3_stmt *track = find != NULL ? db_prepare(music_db,
+        "SELECT " MUSIC_TAG_COLUMNS " FROM tracks t WHERE t.id = ?") : NULL;
+    sqlite3_stmt *pending = track != NULL ? db_prepare(music_db, PENDING_SQL) : NULL;
+    int rc = pending != NULL ? db_exec(music_db, "BEGIN IMMEDIATE") : -1;
+    long long count = rc == 0 ? single_number("SELECT count(*) FROM tracks", 0) : -1;
+    if (count < 0 || (tracks = arena_alloc((size_t)(count + 1) * sizeof *tracks)) == NULL ||
+        (edits = arena_alloc((size_t)(count + 1) * sizeof *edits)) == NULL ||
+        (skipped = arena_alloc(FIX_SKIPPED * sizeof *skipped)) == NULL ||
+        (bind != NULL && sqlite3_bind_text(find, 1, bind, -1, SQLITE_STATIC) != SQLITE_OK) ||
+        (n = fix_tracks(find, count, tracks)) < 0)
+        rc = -1;
+    for (long long i = 0, end; rc == 0 && i < n; i = end) {
+        for (end = i + 1; end < n && same_text(tracks[end].album, tracks[i].album) &&
+                          same_text(tracks[end].albumartist, tracks[i].albumartist);
+             end++)
+            ;
+        if (albums == FIX_ALBUMS) {
+            more = 1;
+            break;
+        }
+        size_t mark = arena_mark();
+        long long k = fix_album(&tracks[i], end - i, fn, ctx, track, pending, edits);
+        if (k == FIX_LEAVE) {
+            if (nskipped < FIX_SKIPPED)
+                skipped[nskipped] = i;
+            nskipped++;
+        } else if (k < 0) {
+            rc = -1;
+        } else if (k > 0 && batch < 0 &&
+                   (batch = single_number("SELECT coalesce(max(batch), 0) + 1 FROM changes",
+                                          0)) < 0) {
+            rc = -1;
+        }
+        int before = queued + dropped;
+        for (long long e = 0; rc == 0 && k > 0 && e < k; e++)
+            rc = queue_one(&edits[e], batch, track, &queued, &dropped);
+        albums += queued + dropped > before;
+        arena_rewind(mark);
+    }
+    if (rc != 0)
+        fprintf(stderr, "music: %s failed\n", what);
+    sqlite3_finalize(find);
+    sqlite3_finalize(track);
+    sqlite3_finalize(pending);
+    if (rc == 0)
+        rc = db_exec(music_db, "COMMIT");
+    if (rc != 0 && sqlite3_get_autocommit(music_db) == 0)
+        db_exec(music_db, "ROLLBACK");
+    music_unlock(lock);
+
+    cJSON *out = cJSON_CreateObject();
+    cJSON *list = out != NULL ? cJSON_AddArrayToObject(out, "left_alone") : NULL;
+    for (int i = 0; list != NULL && i < nskipped && i < FIX_SKIPPED; i++) {
+        const struct fix_track *t = &tracks[skipped[i]];
+        cJSON *item = cJSON_CreateObject();
+        if (item == NULL || !cJSON_AddItemToArray(list, item) ||
+            cJSON_AddNumberToObject(item, "track", (double)t->id) == NULL ||
+            (t->album != NULL ? cJSON_AddStringToObject(item, "album", t->album)
+                              : cJSON_AddNullToObject(item, "album")) == NULL ||
+            (t->albumartist != NULL ? cJSON_AddStringToObject(item, "albumartist", t->albumartist)
+                                    : cJSON_AddNullToObject(item, "albumartist")) == NULL)
+            list = NULL;
+    }
+    if (rc != 0 || list == NULL || cJSON_AddNumberToObject(out, "batch", (double)batch) == NULL ||
+        cJSON_AddNumberToObject(out, "albums", albums) == NULL ||
+        cJSON_AddNumberToObject(out, "queued", queued) == NULL ||
+        cJSON_AddNumberToObject(out, "dropped", dropped) == NULL ||
+        cJSON_AddNumberToObject(out, "skipped", nskipped) == NULL ||
+        cJSON_AddBoolToObject(out, "more", more) == NULL) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, out);
+}
+
+/* The tracks of fix_tracks() in the order of the albums list. */
+#define FIX_ORDER                                                                     \
+    " ORDER BY t.albumartist COLLATE NOCASE, t.album COLLATE NOCASE, t.albumartist,"  \
+    " t.album, t.id"
+
+/* Splits the genres at the delimiter (ctx); 2 when the album has a genre
+ * from somewhere else that breaks the rules. */
+static int split_fix(const struct tags *t, const void *ctx, struct edit *e)
+{
+    e->field = TAG_GENRE;
+    int found = tags_split_genres(&t->value[TAG_GENRE], *(const char *)ctx, &e->value);
+    if (found <= 0)
+        return found;
+    e->stored = music_values_json(&e->value);
+    return e->stored != NULL ? 1 : -1;
+}
+
+/*
+ * POST /api/music/fix/split-genres {"delimiter": "," | ";" | ":"}: in the
+ * next FIX_ALBUMS albums with a planned genre that holds the delimiter,
+ * splits each such genre into several (tags_split_genres()). An album
+ * whose genres would then break the rules is left alone. -> run_fix()
+ */
+void music_fix_split(struct request *req, struct response *res)
+{
+    cJSON *body = json_body(req, res);
+    if (body == NULL)
+        return;
+    const char *d = NULL;
+    if (json_get_string(body, "delimiter", 1, 1, &d) != NULL || strchr(",;:", d[0]) == NULL) {
+        json_error(res, 400, "'delimiter' must be one of , ; :");
+        return;
+    }
+    run_fix(res, "splitting genres",
+            PLANNED_CTE " SELECT t.id, t.album, t.albumartist FROM tracks t WHERE EXISTS"
+            " (SELECT 1 FROM pv WHERE pv.track_id = t.id AND pv.field = 'genre'"
+            "  AND instr(pv.value, ?1) > 0)" FIX_ORDER,
+            d, split_fix, d);
+}
+
 /* ---- starting the services ---------------------------------------------- */
 
 /* Checks the body's password, after the library (replies 400, 503, 403

@@ -9,6 +9,7 @@
  *                  discard them, write them
  *   #/duplicates   possible duplicate tracks, albums and names: copy a
  *                  path, open an album, merge spellings of a name
+ *   #/fixes        changes made for a few albums at a time: split genres
  *   #/files        where the move service puts each file (its plan, its
  *                  problems, what it did), and starting it
  *   #/qobuz        connect to Qobuz, download albums into the library
@@ -211,7 +212,7 @@ function changesLabel(pending) {
 function shell(active, overview, ...content) {
   musicRoot = overview.root || "";
   const tabs = [["albums", "Albums"], ["changes", changesLabel(overview.pending)],
-                ["duplicates", "Duplicates"], ["files", "Files"], ["qobuz", "Qobuz"],
+                ["duplicates", "Duplicates"], ["fixes", "Fixes"], ["files", "Files"], ["qobuz", "Qobuz"],
                 ["info", "Info"]];
   return el("section", { class: "page" },
     el("header", { class: "app-head" },
@@ -1772,6 +1773,94 @@ async function duplicatesPage() {
     body);
 }
 
+/* ---- fixes --------------------------------------------------------------- */
+
+const FIX_ALBUMS = 10; /* albums one fix changes at once (the server's limit) */
+const DELIMITERS = [[",", "Comma ,"], [";", "Semicolon ;"], [":", "Colon :"]];
+let splitDelimiter = ",";
+const fixResults = {}; /* the last result of each fix, shown while the app is open */
+
+/* What a fix did: the albums it changed, and those it left alone (why). */
+function fixResult(r, why) {
+  const done = r.albums ? `Queued changes in ${plural(r.albums, "album", "albums")}: write them ` +
+                          "from Changes." : "No album to change.";
+  return el("div", { class: "stack" },
+    el("p", {}, r.more ? `${done} More albums need it: run it again.` : done),
+    r.skipped ? el("p", { class: "differs-text small" },
+                   `${plural(r.skipped, "album was", "albums were")} left alone: ${why}`) : null,
+    r.left_alone.length
+      ? el("ul", { class: "list" }, r.left_alone.map((a) => el("li", { class: "dupe" },
+          el("div", { class: "dupe-text" },
+            el("strong", {}, a.album ?? "No album name"),
+            el("p", { class: "muted" }, a.albumartist ?? "No album artist")),
+          el("div", { class: "actions" }, navButton("Open album", `#/album/${a.track}`)))))
+      : null,
+    r.skipped > r.left_alone.length
+      ? el("p", { class: "muted small" }, `Only the first ${r.left_alone.length} are listed.`)
+      : null);
+}
+
+/* Runs a fix: POST path with body(), after asking question. */
+function fixButton(key, label, question, path, body, busy) {
+  const button = el("button", {
+    class: "btn go", type: "button", disabled: busy,
+    onclick: async () => {
+      if (!sure(`${question} The changes are queued; nothing is written until you write them.`)) {
+        return;
+      }
+      button.disabled = true;
+      try {
+        fixResults[key] = await api("POST", path, body());
+        valueCache.clear();
+        refresh();
+      } catch (err) {
+        handleError(err);
+        button.disabled = false;
+      }
+    },
+  }, label);
+  return button;
+}
+
+/* A fix: what it does, its controls and button, and its last result. */
+function fixSection(key, title, about, controls, button, why) {
+  return el("section", { class: "card stack" },
+    el("h2", {}, title),
+    el("p", {}, about),
+    controls,
+    el("div", { class: "actions" }, button),
+    fixResults[key] ? fixResult(fixResults[key], why) : null);
+}
+
+async function fixesPage() {
+  const o = await api("GET", "/api/music");
+  const busy = Boolean(o.busy);
+  const picker = dropdown({
+    label: "Delimiter",
+    options: DELIMITERS.map(([value, label]) => ({ value, label })),
+    value: splitDelimiter,
+    onchange: (v) => {
+      splitDelimiter = v;
+    },
+  });
+  return shell("fixes", o,
+    el("section", { class: "card stack" },
+      el("h2", {}, "Fixes"),
+      el("p", {}, `Each fix changes at most ${FIX_ALBUMS} albums at a time, in the order of the ` +
+                  "albums list, by the tags with the pending changes. The changes are queued " +
+                  "like any edit: look at them in Changes, then write or discard them."),
+      busy ? el("p", { class: "warn" }, `${busyText(o)} Fixes can run when it is done.`) : null),
+    fixSection("split", "Split genres",
+      "A genre that holds the delimiter becomes several genres: each part without spaces at " +
+      "its ends, in lowercase (\"Rock, Pop Rock\" becomes rock and pop rock). Genres without " +
+      "it stay as they are. An album whose genres would then break the rules is left alone.",
+      field("Delimiter", picker),
+      fixButton("split", `Split genres in ${FIX_ALBUMS} albums`,
+                `Split the genres in the next ${FIX_ALBUMS} albums?`,
+                "/api/music/fix/split-genres", () => ({ delimiter: splitDelimiter }), busy),
+      "a genre would break the rules (fix it in the album)."));
+}
+
 /* ---- info ---------------------------------------------------------------- */
 
 const STATE_TEXT = { done: "Done", warning: "Done, with a warning", failed: "Failed" };
@@ -2004,6 +2093,7 @@ function route(parts) {
   if (section === "albums" && rawId === undefined) return albumsPage();
   if (section === "changes" && rawId === undefined) return changesPage();
   if (section === "duplicates" && rawId === undefined) return duplicatesPage();
+  if (section === "fixes" && rawId === undefined) return fixesPage();
   if (section === "files" && rawId === undefined) return filesPage();
   if (section === "qobuz" && rawId === undefined) return qobuzPage();
   if (section === "info" && rawId === undefined) return infoPage();

@@ -145,7 +145,7 @@ They never run together: each holds `$NYLM_DATA/music/library.lock`
 exclusively. The server holds it shared for its own writes to `music.db`,
 and refuses to queue or discard anything while a service runs (409).
 
-The web app has six tabs. Albums: the last scan and a button to scan
+The web app has seven tabs. Albums: the last scan and a button to scan
 again, filters (search; a field each, with a switch for albums where a track
 has no value for it; and switches for albums with invalid tags, missing
 tags, invalid genres, genres that differ between tracks, several artists
@@ -181,7 +181,13 @@ punctuation, symbols and spaces, `&` read as "and", a leading "The "
 dropped. A track or album has Copy path (or folder) and Open album; nylm
 never removes a file. A spelling has Use this one (`POST
 /api/music/merge`), which queues, as one batch, the change of the other
-spellings to it on every track. Files: the naming rule, the tracks
+spellings to it on every track. Fixes: changes for at most 10 albums at
+a time (`POST /api/music/fix/...`), in the order of the albums list, by the
+planned tags, queued as one batch like any edit; an album a fix would
+leave breaking the rules is left alone and named (the first 50) with
+Open album. Split genres (`fix/split-genres`, delimiter `,`, `;` or `:`):
+a genre holding the delimiter becomes several, each part trimmed, spaces
+made one, lowercase; other genres stay as they are. Files: the naming rule, the tracks
 that move (from, to) and those that can not (why), Move files, and what
 the moves did (`GET /api/music/moves`). Qobuz: connect, download albums,
 and what came of each download. Info: library

@@ -562,7 +562,7 @@ for route in "GET /api/music" "GET /api/music/albums" "GET /api/music/album?trac
              "POST /api/music/write" "GET /api/music/art?hash=$(printf '%064d' 0)&size=full" \
              "POST /api/music/cover" "GET /api/music/moves" "POST /api/music/move" \
              "GET /api/music/qobuz" "POST /api/music/qobuz/start" "GET /api/music/duplicates" \
-             "POST /api/music/merge"; do
+             "POST /api/music/merge" "POST /api/music/fix/split-genres"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
@@ -827,6 +827,7 @@ post "queue while busy"        409 $Q "{\"album\":$T1,\"set\":{\"date\":\"2000\"
 expect_body "the library is busy" "busy message"
 post "discard while busy"      409 $D "{\"track\":$T1}"
 post "merge while busy"        409 /api/music/merge '{"field":"artist","from":["some artist"],"to":"Some Artist"}'
+post "split while busy"        409 /api/music/fix/split-genres '{"delimiter":","}'
 post "scan while busy"         409 $S "{$PW}"
 post "write while busy"        409 $W "{$PW}"
 post "move while busy"         409 /api/music/move "{$PW}"
@@ -1236,6 +1237,56 @@ if env NYLM_MUSIC= "$QBIN" >"$TMP/service.log" 2>&1; then
     FAILED=$((FAILED + 1)); echo "FAIL: nylm-qobuz ran without NYLM_MUSIC"
 else PASSED=$((PASSED + 1)); fi
 logged "NYLM_MUSIC is not set" "nylm-qobuz says why"
+
+# Fixes, 10 albums at a time, queued like any edit. Albums of the cache
+# only (no files): "Fix 00" .. "Fix 13" by Fixer, a track each.
+post "discard before the fixes" 200 /api/music/discard '{"all":true}'
+for i in $(seq -w 0 13); do
+    sqlite3 "$MDB" "INSERT INTO tracks (path, size, ext, scanned, title, album, albumartist)
+                    VALUES ('$M/fix/$i.mp3', 1, 'mp3', 1, 'T', 'Fix $i', 'Fixer')"
+done
+FIXID() { sqlite3 "$MDB" "SELECT id FROM tracks WHERE album = 'Fix $1'"; }
+FIXG() { sqlite3 "$MDB" "INSERT INTO track_values VALUES ($(FIXID "$1"), 'genre', $2, '$3')"; }
+FIXG 00 0 "Électro, Rock"   # A-Z only: électro breaks the rules, the album is left alone
+FIXG 01 0 "Rock,  Pop Rock" # parts trimmed, spaces made one, lowercase
+FIXG 01 1 "jazz"            # no delimiter: as it is
+FIXG 01 2 "Jazz"
+for i in $(seq -w 2 12); do FIXG "$i" 0 "Rock, rock"; done
+FIXG 12 1 "Pop;Soul"        # another delimiter: breaks the rules, left alone
+FIXG 13 0 "Pop;Soul"
+SP=/api/music/fix/split-genres
+post "split no body"           400 $SP '{}'
+expect_body "'delimiter' must be one of , ; :" "delimiter message"
+post "split delimiter number"  400 $SP '{"delimiter":1}'
+post "split delimiter empty"   400 $SP '{"delimiter":""}'
+post "split delimiter two"     400 $SP '{"delimiter":",,"}'
+post "split delimiter other"   400 $SP '{"delimiter":"/"}'
+expect 415 "split needs json"  -b "$JAR" -d '{"delimiter":","}' "$B$SP"
+query "0" "refused splits queue nothing" "SELECT count(*) FROM changes WHERE state = 'pending'"
+post "split genres"            200 $SP '{"delimiter":","}'
+expect_body '"left_alone":[{"track":'"$(FIXID 00)"',"album":"Fix 00","albumartist":"Fixer"},{"track":'"$(FIXID 01)"',"album":"Fix 01","albumartist":"Fixer"}],"batch":' "albums the rules refuse are named"
+expect_body '"albums":10,"queued":10,"dropped":0,"skipped":2,"more":true}' "10 albums at a time, more left"
+query '["rock"]' "a part given twice is kept once" \
+    "SELECT value FROM changes WHERE track_id = $(FIXID 02) AND state = 'pending'"
+query "0" "the 11th album waits" \
+    "SELECT count(*) FROM changes WHERE track_id = $(FIXID 12) AND state = 'pending'"
+post "split the rest"          200 $SP '{"delimiter":","}'
+expect_body '"albums":0,"queued":0,"dropped":0,"skipped":3,"more":false}' "the next albums"
+query '0' "a value with another delimiter breaks the rules: left alone" \
+    "SELECT count(*) FROM changes WHERE track_id = $(FIXID 12) AND state = 'pending'"
+post "split at ;"              200 $SP '{"delimiter":";"}'
+expect_body '"albums":1,"queued":1,"dropped":0,"skipped":1,"more":false}' "split at ;"
+query '["pop","soul"]' "split at ;" \
+    "SELECT value FROM changes WHERE track_id = $(FIXID 13) AND state = 'pending'"
+sqlite3 "$MDB" "DELETE FROM track_values WHERE track_id = $(FIXID 01) AND position = 2"
+post "split, valid now"        200 $SP '{"delimiter":","}'
+expect_body '"albums":1,"queued":1,"dropped":0,"skipped":2,"more":false}' "fixed album split"
+query '["rock","pop rock","jazz"]' "split, trimmed, lowercase; the other value as it is" \
+    "SELECT value FROM changes WHERE track_id = $(FIXID 01) AND state = 'pending'"
+post "split, nothing left"     200 $SP '{"delimiter":","}'
+expect_body '"batch":-1,"albums":0,"queued":0,"dropped":0,"skipped":2,"more":false}' "planned values are split already"
+post "discard the fixes"       200 /api/music/discard '{"all":true}'
+sqlite3 "$MDB" "DELETE FROM tracks WHERE album GLOB 'Fix [0-9][0-9]'"
 
 # ---- server ------------------------------------------------------------------
 

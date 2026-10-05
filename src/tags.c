@@ -244,6 +244,66 @@ const char *tags_check(enum tag_field f, const struct tag_values *v)
     return NULL;
 }
 
+/* Adds s to out unless it holds it already. */
+static void add_once(struct tag_values *out, const char *s)
+{
+    for (size_t i = 0; i < out->n; i++)
+        if (strcmp(out->v[i], s) == 0)
+            return;
+    out->v[out->n++] = s;
+}
+
+int tags_split_genres(const struct tag_values *v, char delim, struct tag_values *out)
+{
+    size_t parts = 0;
+    int found = 0;
+    for (size_t i = 0; i < v->n; i++) {
+        parts++;
+        for (const char *c = v->v[i]; *c != '\0'; c++)
+            if (*c == delim) {
+                parts++;
+                found = 1;
+            }
+    }
+    *out = *v;
+    if (!found)
+        return 0;
+    out->n = 0;
+    out->v = arena_alloc(parts * sizeof *out->v);
+    if (out->v == NULL)
+        return -1;
+    for (size_t i = 0; i < v->n; i++) {
+        const char *s = v->v[i];
+        if (strchr(s, delim) == NULL) {
+            add_once(out, s);
+            continue;
+        }
+        for (;;) {
+            const char *end = strchr(s, delim);
+            size_t len = end != NULL ? (size_t)(end - s) : strlen(s);
+            char *part = arena_alloc(len + 1);
+            if (part == NULL)
+                return -1;
+            size_t n = 0;
+            for (size_t k = 0; k < len; k++) {
+                char c = s[k];
+                if (c == ' ' && (n == 0 || part[n - 1] == ' '))
+                    continue;
+                part[n++] = c >= 'A' && c <= 'Z' ? (char)(c - 'A' + 'a') : c;
+            }
+            if (n > 0 && part[n - 1] == ' ')
+                n--;
+            part[n] = '\0';
+            if (n > 0)
+                add_once(out, part);
+            if (end == NULL)
+                break;
+            s = end + 1;
+        }
+    }
+    return 1;
+}
+
 /* ---- preparing a write -------------------------------------------------- */
 
 /* s cut to at most max bytes, at a UTF-8 character boundary, in the arena

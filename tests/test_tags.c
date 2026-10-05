@@ -194,6 +194,64 @@ static void test_check(void)
     CHECK(!ok_list(TAG_COMPOSER, many, TAGS_MAX_VALUES + 1));  /* max + 1 */
 }
 
+/* 1 if splitting list (n values) at delim gives the values want (m). */
+static int split_is(const char **list, size_t n, char delim, int found, const char **want,
+                    size_t m)
+{
+    struct tag_values out;
+    if (tags_split_genres(&(struct tag_values){ n, list }, delim, &out) != found || out.n != m)
+        return 0;
+    for (size_t i = 0; i < m; i++)
+        if (strcmp(out.v[i], want[i]) != 0)
+            return 0;
+    return 1;
+}
+
+static void test_split(void)
+{
+    /* parts trimmed, spaces made one, A-Z lowercase; the order kept */
+    const char *a[] = { "Rock, Pop Rock ,  Hip   Hop" };
+    const char *a_want[] = { "rock", "pop rock", "hip hop" };
+    CHECK(split_is(a, 1, ',', 1, a_want, 3));
+    /* the other delimiters, and only the one chosen */
+    const char *b[] = { "jazz;Blues" }, *b_want[] = { "jazz", "blues" };
+    CHECK(split_is(b, 1, ';', 1, b_want, 2));
+    const char *c[] = { "jazz:Blues" }, *c_want[] = { "jazz", "blues" };
+    CHECK(split_is(c, 1, ':', 1, c_want, 2));
+    CHECK(split_is(b, 1, ',', 0, b, 1));
+    /* values without the delimiter stay as they are, even with capitals */
+    const char *d[] = { "Soul", "funk,disco", "jazz" };
+    const char *d_want[] = { "Soul", "funk", "disco", "jazz" };
+    CHECK(split_is(d, 3, ',', 1, d_want, 4));
+    /* a value given twice is kept once, where it came first */
+    const char *e[] = { "rock", "Rock, pop", "pop,ROCK" }, *e_want[] = { "rock", "pop" };
+    CHECK(split_is(e, 3, ',', 1, e_want, 2));
+    /* empty parts are left out; nothing left is an empty list */
+    const char *f[] = { ",, a ,," }, *f_want[] = { "a" };
+    CHECK(split_is(f, 1, ',', 1, f_want, 1));
+    const char *g[] = { " , ," };
+    CHECK(split_is(g, 1, ',', 1, NULL, 0));
+    const char *h[] = { "," };
+    CHECK(split_is(h, 1, ',', 1, NULL, 0));
+    /* nothing to split */
+    CHECK(split_is(NULL, 0, ',', 0, NULL, 0));
+    const char *i[] = { "" };
+    CHECK(split_is(i, 1, ',', 0, i, 1));
+    /* other characters are kept as they are (the rules then refuse them) */
+    const char *j[] = { "Électro,R&B" }, *j_want[] = { "Électro", "r&b" };
+    CHECK(split_is(j, 1, ',', 1, j_want, 2));
+    /* as many parts as delimiters + 1 */
+    char many[2 * TAGS_MAX_VALUES];
+    for (size_t k = 0; k < TAGS_MAX_VALUES; k++) {
+        many[2 * k] = (char)('a' + k % 26);
+        many[2 * k + 1] = ',';
+    }
+    many[2 * TAGS_MAX_VALUES - 1] = '\0';
+    const char *m[] = { many };
+    struct tag_values out;
+    CHECK(tags_split_genres(&(struct tag_values){ 1, m }, ',', &out) == 1 && out.n == 26);
+}
+
 static void test_prepare(void)
 {
     struct tags t;
@@ -623,6 +681,7 @@ int main(void)
 
     test_fields();
     test_check();
+    test_split();
     test_prepare();
     test_read();
     test_pictures();

@@ -136,6 +136,15 @@ const char *tags_check(enum tag_field f, const struct tag_values *v);
 int tags_number(const char *s, int *x, int *y);
 
 /*
+ * The genres v with every value that holds delim split at it into out (in
+ * the arena): each part without spaces at its ends, runs of spaces made
+ * one, A-Z made lowercase; empty parts left out. Values without delim stay
+ * as they are; a value given twice is kept once, where it came first.
+ * 1 if a value held delim, 0 if not (out is then v), -1 when out of memory.
+ */
+int tags_split_genres(const struct tag_values *v, char delim, struct tag_values *out);
+
+/*
  * Makes t ready to write, after its changes were applied:
  *  - the sort tags of the fields in changed (bit 1u << field) mirror them
  *    (TITLESORT = TITLE, ..., COMPOSERSORT = the composers joined by "; ");
