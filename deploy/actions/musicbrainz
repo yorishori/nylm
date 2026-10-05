@@ -1,0 +1,9 @@
+#!/bin/sh
+# Starts the MusicBrainz service (nylm-musicbrainz.service, which runs
+# nylm-musicbrainz as user nylm) and returns at once. Takes no arguments.
+set -eu
+if [ "$#" -ne 0 ]; then
+    echo "musicbrainz: takes no arguments" >&2
+    exit 2
+fi
+exec /usr/bin/systemctl start --no-block nylm-musicbrainz.service

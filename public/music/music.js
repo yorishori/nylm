@@ -10,7 +10,7 @@
  *   #/duplicates   possible duplicate tracks, albums and names: copy a
  *                  path, open an album, merge spellings of a name
  *   #/fixes        changes made for a few albums at a time: split genres,
- *                  composers from the album artist
+ *                  composers from the album artist, genres from MusicBrainz
  *   #/files        where the move service puts each file (its plan, its
  *                  problems, what it did), and starting it
  *   #/qobuz        connect to Qobuz, download albums into the library
@@ -280,6 +280,29 @@ function watchBusy(o, node, text) {
         setStatus(o.busy === "write" ? "Writing finished: see the results in Info"
                   : o.busy === "move" ? "Moving finished: see the results below"
                   : "Scan finished");
+        refresh();
+      }
+    } catch (err) {
+      handleError(err);
+    }
+  };
+  setTimeout(poll, POLL_MS);
+}
+
+/*
+ * While the service whose state GET path gives (running) runs, checks back
+ * every few seconds; when it ends, says done and shows the page again.
+ * Stops when node is no longer on the page.
+ */
+function watchRunning(path, node, done) {
+  const poll = async () => {
+    if (!node.isConnected) return;
+    try {
+      const now = await api("GET", path);
+      if (!node.isConnected) return;
+      if (now.running) setTimeout(poll, POLL_MS);
+      else {
+        setStatus(done);
         refresh();
       }
     } catch (err) {
@@ -1513,24 +1536,7 @@ async function qobuzPage() {
   const [o, qb] = await Promise.all([api("GET", "/api/music"), api("GET", "/api/music/qobuz")]);
   musicRoot = o.root || "";
   const status = el("p", {}, qb.running ? "The Qobuz service is running…" : "");
-  /* While it runs, check back; when it ends, show the page again. */
-  if (qb.running) {
-    const poll = async () => {
-      if (!status.isConnected) return;
-      try {
-        const now = await api("GET", "/api/music/qobuz");
-        if (!status.isConnected) return;
-        if (now.running) setTimeout(poll, POLL_MS);
-        else {
-          setStatus("Qobuz finished");
-          refresh();
-        }
-      } catch (err) {
-        handleError(err);
-      }
-    };
-    setTimeout(poll, POLL_MS);
-  }
+  if (qb.running) watchRunning("/api/music/qobuz", status, "Qobuz finished");
   const ready = o.available && !qb.running;
 
   const pasted = el("input", { type: "text", name: "login", required: true, autocomplete: "off",
@@ -1777,6 +1783,7 @@ async function duplicatesPage() {
 /* ---- fixes --------------------------------------------------------------- */
 
 const FIX_ALBUMS = 10; /* albums one fix changes at once (the server's limit) */
+const MB_GENRES = 3;   /* genres taken from MusicBrainz for an album, at most */
 const DELIMITERS = [[",", "Comma ,"], [";", "Semicolon ;"], [":", "Colon :"]];
 let splitDelimiter = ",";
 const fixResults = {}; /* the last result of each fix, shown while the app is open */
@@ -1833,8 +1840,64 @@ function fixSection(key, title, about, controls, button, why) {
     fixResults[key] ? fixResult(fixResults[key], why) : null);
 }
 
+const LOOKUP_STATE = { queued: "Genres queued", none: "No genres", not_found: "Not on MusicBrainz",
+                       failed: "Failed", skipped: "Skipped" };
+
+/* One MusicBrainz lookup: the album, what was found. Rose failed, peach
+ * nothing found. */
+function lookupItem(l) {
+  const tone = l.state === "failed" ? "late" : l.state === "none" || l.state === "not_found"
+                                      ? "today" : "";
+  return el("li", { class: "card stack history" },
+    el("header", {},
+      el("span", { class: tone ? `due ${tone}` : "muted" }, LOOKUP_STATE[l.state] || l.state),
+      el("span", { class: "muted" }, showTime(l.looked))),
+    el("strong", {}, l.album ?? "No album name"),
+    el("p", { class: "muted" }, l.albumartist ?? "No album artist"),
+    l.genres.length ? el("p", {}, l.genres.join("; ")) : null,
+    l.note ? el("p", { class: "note" }, l.note) : null,
+    el("div", { class: "actions" }, navButton("Open album", `#/album/${l.track}`)));
+}
+
+/* Genres from MusicBrainz: start the service with the password, and the
+ * lookups so far. */
+function musicbrainzSection(mb) {
+  const status = el("p", {}, mb.running ? "Looking up genres on MusicBrainz…" : "");
+  if (mb.running) watchRunning("/api/music/musicbrainz", status, "MusicBrainz finished: see the " +
+                                                                 "queued genres in Changes");
+  const password = el("input", { type: "password", name: "password", required: true,
+                                 autocomplete: "current-password" });
+  const start = form({ class: "raised" }, async () => {
+    try {
+      await api("POST", "/api/music/musicbrainz/start", { password: password.value });
+    } finally {
+      password.value = "";
+    }
+    setStatus("Looking up genres on MusicBrainz");
+    refresh();
+  },
+    field("Password", password, "Starting the MusicBrainz service needs your password again."),
+    el("div", { class: "actions" },
+      el("button", { class: "btn go", type: "submit" }, `Look up ${FIX_ALBUMS} albums`)));
+  return el("section", { class: "card stack" },
+    el("h2", {}, "Genres from MusicBrainz"),
+    el("p", {}, `Looks up the next ${FIX_ALBUMS} albums without a genre whose tracks share one ` +
+                "MusicBrainz album id: the genres MusicBrainz's users voted for the release " +
+                `group (else the release), the ${MB_GENRES} with the most votes that fit the ` +
+                "rules, queued for the tracks without a genre. Each album is looked up once; " +
+                "a failed lookup is tried again next time."),
+    status,
+    mb.running ? null : start,
+    mb.lookups.length
+      ? el("ul", { class: "fold-list" },
+          foldGroup(`Lookups (${mb.lookups.length})`,
+                    () => el("ul", { class: "list cols" }, mb.lookups.map(lookupItem))))
+      : el("p", { class: "muted" }, "Nothing looked up yet."));
+}
+
 async function fixesPage() {
-  const o = await api("GET", "/api/music");
+  const [o, mb] = await Promise.all([api("GET", "/api/music"),
+                                     api("GET", "/api/music/musicbrainz")]);
   const busy = Boolean(o.busy);
   const picker = dropdown({
     label: "Delimiter",
@@ -1867,7 +1930,8 @@ async function fixesPage() {
       fixButton("composers", `Set composers in ${FIX_ALBUMS} albums`,
                 `Make the album artist the composer in the next ${FIX_ALBUMS} albums?`,
                 "/api/music/fix/composers", () => ({}), busy),
-      "a track has no album artist, or it breaks the rules (fix it in the album)."));
+      "a track has no album artist, or it breaks the rules (fix it in the album)."),
+    musicbrainzSection(mb));
 }
 
 /* ---- info ---------------------------------------------------------------- */

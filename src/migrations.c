@@ -321,6 +321,24 @@ const char *const music_migrations[] = {
     "    saved     INTEGER NOT NULL DEFAULT 0," /* now in the library */
     "    note      TEXT    NOT NULL DEFAULT ''"
     ") STRICT;",
+
+    /* 6: genres looked up on MusicBrainz for albums without one (by the
+     * album's MusicBrainz album id), a row per album looked up: what was
+     * found and queued, so that an album is looked up once (a failed
+     * lookup is tried again). track: one of the album's tracks then. */
+    "CREATE TABLE musicbrainz_lookups ("
+    "    id          INTEGER PRIMARY KEY,"
+    "    mbid        TEXT    NOT NULL CHECK (length(mbid) = 36),"
+    "    track       INTEGER NOT NULL,"
+    "    album       TEXT,"
+    "    albumartist TEXT,"
+    "    looked      INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "    state       TEXT    NOT NULL CHECK (state IN"
+    "                        ('queued', 'none', 'not_found', 'failed', 'skipped')),"
+    "    genres      TEXT    NOT NULL DEFAULT '[]'," /* a JSON array */
+    "    note        TEXT    NOT NULL DEFAULT ''"
+    ") STRICT;"
+    "CREATE INDEX musicbrainz_lookups_by_mbid ON musicbrainz_lookups (mbid);",
 };
 
 const int music_migration_count = sizeof music_migrations / sizeof music_migrations[0];

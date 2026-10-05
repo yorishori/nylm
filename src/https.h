@@ -4,7 +4,8 @@
 #include <stddef.h>
 
 /*
- * A small HTTPS client (OpenSSL libssl) for the Qobuz service: one request
+ * A small HTTPS client (OpenSSL libssl) for the services that talk to the
+ * internet (nylm-qobuz, nylm-musicbrainz): one request
  * per connection (Connection: close), the server's certificate checked
  * against the system's CAs and the host name, 30 s timeouts. Only
  * nylm-qobuz links it, never the server.

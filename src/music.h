@@ -91,6 +91,10 @@ int music_start_service(const char *name);
  */
 int music_qobuz_lock(int service);
 
+/* The same for the MusicBrainz service (<NYLM_DATA>/music/musicbrainz.lock):
+ * it looks genres up while the library is edited. */
+int music_musicbrainz_lock(int service);
+
 /*
  * The columns of a track's tags in a query on "tracks t": its pictures (a
  * JSON array of {hash, type, description}), the single-valued tags in

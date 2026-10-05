@@ -36,7 +36,8 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 | `src/dupes.c`     | when two names are the same, for the duplicates          |
 | `src/qobuz.c`     | Qobuz without the network: links, login, bundle, tags    |
 | `src/qobuz_*.c`   | `nylm-qobuz`, the Qobuz service (its own binary)         |
-| `src/https.c`     | HTTPS client (libssl), only in `nylm-qobuz`              |
+| `src/musicbrainz*.c` | `nylm-musicbrainz`, genres from MusicBrainz (own binary) |
+| `src/https.c`     | HTTPS client (libssl), only in the two services above    |
 | `src/tags.c`      | music file tags through TagLib: read, write, verify      |
 | `src/art.c`       | album art files, named by SHA-256; base64                |
 | `src/image.c`     | thumbnails (libjpeg-turbo, libpng), only in the services |
@@ -66,7 +67,7 @@ $NYLM_DATA/plants/plants.db   plant care
 $NYLM_DATA/plants/photos/     journal photos: each once, and its thumbnail
 $NYLM_DATA/music/music.db     music tags cache, changes, scans, audit log
 $NYLM_DATA/music/art/         album art: each picture once, and its thumbnail
-$NYLM_DATA/music/*.lock       the library's lock and the Qobuz service's
+$NYLM_DATA/music/*.lock       the library's lock, the Qobuz and MusicBrainz services
 $NYLM_DATA/server/server.db   server app: audit log, WireGuard peer names
 ```
 
@@ -190,7 +191,8 @@ a genre holding the delimiter becomes several, each part trimmed, spaces
 made one, lowercase; other genres stay as they are. Composer from the
 album artist (`fix/composers`): each track without a composer gets its
 album artist; compilations are not changed, an album without an album
-artist is left alone. Files: the naming rule, the tracks
+artist is left alone. Genres from MusicBrainz (below). Files: the naming
+rule, the tracks
 that move (from, to) and those that can not (why), Move files, and what
 the moves did (`GET /api/music/moves`). Qobuz: connect, download albums,
 and what came of each download. Info: library
@@ -254,10 +256,10 @@ that hash and decode completely (which makes the thumbnail), then
 replaces all of the track's pictures with it as the front cover, and
 checks it reads back.
 
-Qobuz (`nylm-qobuz`, `nylm-qobuz.service`, root action `qobuz`): the
-only part of nylm that talks to the internet, and a binary of its own so
-that only it links libssl (`src/https.c`: TLS 1.2+, certificates checked,
-30 s timeouts). The web app queues what it should do (`POST
+Qobuz (`nylm-qobuz`, `nylm-qobuz.service`, root action `qobuz`): one of
+the two parts of nylm that talk to the internet (with MusicBrainz, below),
+each a binary of its own so that only they link libssl (`src/https.c`:
+TLS 1.2+, certificates checked, 30 s timeouts; the server never links it). The web app queues what it should do (`POST
 /api/music/qobuz/start`, password again, audited) and shows how it went
 (`GET /api/music/qobuz`); each run:
 
@@ -281,6 +283,24 @@ It holds `$NYLM_DATA/music/qobuz.lock`, not the library's, while it
 downloads, so the library can be edited meanwhile. The signing scheme is
 Qobuz's own and may change; then the service says that no secret signs
 downloads.
+
+Genres from MusicBrainz (`nylm-musicbrainz`, `nylm-musicbrainz.service`,
+root action `musicbrainz`; Fixes tab): started with the password again
+(`POST /api/music/musicbrainz/start`, audited), its lookups in `GET
+/api/music/musicbrainz` (the latest 100). Each run takes the next 10 albums
+without a planned genre, in the order of the albums list, whose tracks
+without a genre all have one planned MusicBrainz album id (a release id,
+lowercase `8-4-4-4-12` hex), and asks musicbrainz.org (one request a
+second) for the release, then its release group: the genres MusicBrainz's
+users voted for the group, else for the release; the 3 with the most votes
+that fit the genre rule (and are at most 100 bytes). Holding the library
+lock as the server does, it queues them as one batch, like any edit, for
+those tracks that still have no genre (it never touches the files), and
+records every lookup in `musicbrainz_lookups`: queued, none, not_found,
+failed, skipped (the album got a genre meanwhile). An album whose id was
+queued, none or not_found is not asked again; failed and skipped are. It
+holds `$NYLM_DATA/music/musicbrainz.lock` while it runs, so the library
+can be edited meanwhile; it does not need `NYLM_MUSIC`.
 
 ## Server
 
@@ -445,9 +465,11 @@ sudo systemctl start nylm-music-scan   # scan the music folder (or what is queue
 sudo systemctl start nylm-music-write  # write the pending tag changes
 sudo systemctl start nylm-music-move   # move the files where their tags put them
 sudo systemctl start nylm-qobuz        # Qobuz: what the web app queued
+sudo systemctl start nylm-musicbrainz  # genres from MusicBrainz, 10 albums
 sudo -u nylm env NYLM_DATA=/mnt/data/nylm NYLM_MUSIC=/mnt/data/music \
     nylm music-scan /mnt/data/music/Some/Album   # scan one folder or file
-journalctl -u nylm-music-scan -u nylm-music-write -u nylm-music-move -u nylm-qobuz
+journalctl -u nylm-music-scan -u nylm-music-write -u nylm-music-move -u nylm-qobuz \
+    -u nylm-musicbrainz
 sudo systemctl start nylm-disk-usage    # measure the folders (see the System tab)
 journalctl -u nylm-disk-usage
 sudo systemctl start nylm-updates-check # list the package updates
@@ -469,13 +491,15 @@ NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-debug music-scan
 NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-debug music-write
 NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-debug music-move
 NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-qobuz-debug
+NYLM_DATA=dev-data ./nylm-musicbrainz-debug
 ```
 
 Configuration is environment variables; `nylm --help` lists them.
 Build needs `gcc`, `make` and the system libraries `sqlite` (3.44+), `cjson`,
-`openssl` (3.2+; libssl only for `nylm-qobuz`), `taglib` (2.0+),
+`openssl` (3.2+; libssl only for `nylm-qobuz` and `nylm-musicbrainz`),
+`taglib` (2.0+),
 `libjpeg-turbo` and `libpng`, linked dynamically: `pacman -Syu` brings their
-fixes. `make` builds `nylm` and `nylm-qobuz`. The server app's root
+fixes. `make` builds `nylm`, `nylm-qobuz` and `nylm-musicbrainz`. The server app's root
 actions also use `smartmontools`, `wireguard-tools`, `pacman-contrib`,
 `fakeroot`, `zstd`, and `rsync` for the copy to your PC (`install.sh`
 installs them).

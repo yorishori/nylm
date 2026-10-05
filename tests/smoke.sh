@@ -563,7 +563,8 @@ for route in "GET /api/music" "GET /api/music/albums" "GET /api/music/album?trac
              "POST /api/music/cover" "GET /api/music/moves" "POST /api/music/move" \
              "GET /api/music/qobuz" "POST /api/music/qobuz/start" "GET /api/music/duplicates" \
              "POST /api/music/merge" "POST /api/music/fix/split-genres" \
-             "POST /api/music/fix/composers"; do
+             "POST /api/music/fix/composers" "GET /api/music/musicbrainz" \
+             "POST /api/music/musicbrainz/start"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
@@ -1239,6 +1240,40 @@ if env NYLM_MUSIC= "$QBIN" >"$TMP/service.log" 2>&1; then
     FAILED=$((FAILED + 1)); echo "FAIL: nylm-qobuz ran without NYLM_MUSIC"
 else PASSED=$((PASSED + 1)); fi
 logged "NYLM_MUSIC is not set" "nylm-qobuz says why"
+
+# MusicBrainz: the lookups, and starting it up to the root action (the
+# service talks to MusicBrainz, which these tests do not).
+MZ=/api/music/musicbrainz/start
+expect 200 "musicbrainz"       -b "$JAR" "$B/api/music/musicbrainz"
+expect_body '{"running":false,"lookups":[]}' "musicbrainz, never run"
+post "musicbrainz no password" 400 $MZ '{}'
+post "musicbrainz wrong password" 403 $MZ '{"password":"nope"}'
+post "musicbrainz password number" 400 $MZ '{"password":1}'
+expect 415 "musicbrainz needs json" -b "$JAR" -d '{"password":"x"}' "$B$MZ"
+sqlite3 "$MDB" "INSERT INTO musicbrainz_lookups (mbid, track, album, albumartist, state, genres, note)
+                VALUES ('f2c9c0f4-9c9b-4a7b-8f3a-1234567890ab', 7, 'Some Album', NULL, 'queued',
+                        '[\"pop rock\",\"r&b\"]', 'from the release group')"
+expect 200 "musicbrainz lookups" -b "$JAR" "$B/api/music/musicbrainz"
+expect_body '"lookups":[{"id":1,"mbid":"f2c9c0f4-9c9b-4a7b-8f3a-1234567890ab","track":7,"album":"Some Album","albumartist":null,"looked":' "a lookup"
+expect_body '"state":"queued","genres":["pop rock","r&b"],"note":"from the release group"}]}' "a lookup's genres as a list"
+# Longer than the 3 s the service waits for the lock.
+flock "$TMP/data/music/musicbrainz.lock" sleep 5 &
+LOCKER=$!
+sleep 0.3
+expect 200 "musicbrainz while running" -b "$JAR" "$B/api/music/musicbrainz"
+expect_body '{"running":true,' "musicbrainz shows it runs"
+post "musicbrainz start while running" 409 $MZ "{$PW}"
+expect_body "MusicBrainz is busy" "musicbrainz busy message"
+MBIN=$(dirname "$BIN")/nylm-musicbrainz${BIN##*nylm}
+if "$MBIN" >"$TMP/service.log" 2>&1; then
+    FAILED=$((FAILED + 1)); echo "FAIL: nylm-musicbrainz ran while it runs"
+else PASSED=$((PASSED + 1)); fi
+logged "MusicBrainz: the service already runs" "nylm-musicbrainz runs once at a time"
+wait "$LOCKER"
+if "$MBIN" x >"$TMP/service.log" 2>&1; then FAILED=$((FAILED + 1)); echo "FAIL: nylm-musicbrainz takes an argument"
+else PASSED=$((PASSED + 1)); fi
+logged "usage:" "nylm-musicbrainz says how to run it"
+sqlite3 "$MDB" "DELETE FROM musicbrainz_lookups"
 
 # Fixes, 10 albums at a time, queued like any edit. Albums of the cache
 # only (no files): "Fix 00" .. "Fix 13" by Fixer, a track each.

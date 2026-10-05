@@ -63,6 +63,7 @@ install -d -m 755 -o root -g root /usr/local/lib/nylm "$ACTIONS" "$JOBS"
 step "files"
 install -m 755 nylm /usr/local/bin/nylm
 install -m 755 nylm-qobuz /usr/local/bin/nylm-qobuz
+install -m 755 nylm-musicbrainz /usr/local/bin/nylm-musicbrainz
 rm -rf "$SHARE"
 install -d -m 755 "$SHARE"
 cp -r public "$SHARE/public"

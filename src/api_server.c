@@ -51,8 +51,9 @@
 /* nylm's own units: always shown, their logs always readable. */
 static const char *const nylm_units[] = {
     "nylm.service", "nylm-music-scan.service", "nylm-music-write.service",
-    "nylm-music-move.service", "nylm-qobuz.service", "nylm-disk-usage.service",
-    "nylm-updates-check.service", "nylm-update.service", "nylm-backup@nylm.service",
+    "nylm-music-move.service", "nylm-qobuz.service", "nylm-musicbrainz.service",
+    "nylm-disk-usage.service", "nylm-updates-check.service", "nylm-update.service",
+    "nylm-backup@nylm.service",
 };
 #define NNYLM_UNITS (sizeof nylm_units / sizeof nylm_units[0])
 

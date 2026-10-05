@@ -32,6 +32,7 @@ static char root[MUSIC_MAX_ROOT + 1];
 static size_t root_len;
 static char lock_path[DB_MAX_PATH];
 static char qobuz_lock_path[DB_MAX_PATH];
+static char musicbrainz_lock_path[DB_MAX_PATH];
 
 int music_configure(const char *dir, const char *data_dir)
 {
@@ -39,8 +40,10 @@ int music_configure(const char *dir, const char *data_dir)
     root_len = 0;
     int n = snprintf(lock_path, sizeof lock_path, "%s/music/library.lock", data_dir);
     int q = snprintf(qobuz_lock_path, sizeof qobuz_lock_path, "%s/music/qobuz.lock", data_dir);
+    int b = snprintf(musicbrainz_lock_path, sizeof musicbrainz_lock_path,
+                     "%s/music/musicbrainz.lock", data_dir);
     if (n < 0 || (size_t)n >= sizeof lock_path || q < 0 || (size_t)q >= sizeof qobuz_lock_path ||
-        art_configure(data_dir) != 0) {
+        b < 0 || (size_t)b >= sizeof musicbrainz_lock_path || art_configure(data_dir) != 0) {
         fprintf(stderr, "music: data folder path is too long\n");
         return -1;
     }
@@ -860,11 +863,13 @@ int music_lock_shared(void)
     return busy ? MUSIC_BUSY : -1;
 }
 
-int music_qobuz_lock(int service)
+/* A service's own lock at path, as music_qobuz_lock() says; name is the
+ * service in messages. */
+static int own_lock(const char *path, const char *name, int service)
 {
-    int fd = open(qobuz_lock_path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
     if (fd < 0) {
-        fprintf(stderr, "music: %s: %s\n", qobuz_lock_path, strerror(errno));
+        fprintf(stderr, "music: %s: %s\n", path, strerror(errno));
         return -1;
     }
     const struct timespec tick = { 0, 100 * 1000 * 1000 };
@@ -880,9 +885,20 @@ int music_qobuz_lock(int service)
         return fd;
     int busy = errno == EWOULDBLOCK;
     if (!busy || service)
-        fprintf(stderr, "music: %s\n", busy ? "Qobuz: the service already runs" : strerror(errno));
+        fprintf(stderr, "music: %s%s\n", busy ? name : strerror(errno),
+                busy ? ": the service already runs" : "");
     close(fd);
     return busy ? MUSIC_BUSY : -1;
+}
+
+int music_qobuz_lock(int service)
+{
+    return own_lock(qobuz_lock_path, "Qobuz", service);
+}
+
+int music_musicbrainz_lock(int service)
+{
+    return own_lock(musicbrainz_lock_path, "MusicBrainz", service);
 }
 
 void music_unlock(int fd)

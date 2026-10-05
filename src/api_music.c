@@ -2426,6 +2426,68 @@ void music_qobuz_start(struct request *req, struct response *res)
     start_action(req, res, lock, rc, "qobuz", detail);
 }
 
+/* ---- MusicBrainz ------------------------------------------------------- */
+
+#define MB_LISTED 100 /* lookups listed */
+
+/*
+ * GET /api/music/musicbrainz: whether nylm-musicbrainz runs, and the latest
+ * lookups: id, mbid, track (one of the album's tracks), album, albumartist,
+ * looked, state, genres (a list), note.
+ */
+void music_musicbrainz(struct request *req, struct response *res)
+{
+    (void)req;
+    int lock = music_musicbrainz_lock(0);
+    if (lock == -1) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    music_unlock(lock);
+    cJSON *obj = cJSON_CreateObject();
+    cJSON *list = obj != NULL && cJSON_AddBoolToObject(obj, "running", lock == MUSIC_BUSY) != NULL
+                      ? cJSON_AddArrayToObject(obj, "lookups")
+                      : NULL;
+    sqlite3_stmt *st = list != NULL ? db_prepare(music_db,
+        "SELECT id, mbid, track, album, albumartist, looked, state, genres, note"
+        " FROM musicbrainz_lookups ORDER BY id DESC LIMIT 100") : NULL;
+    int rc = st != NULL ? SQLITE_ROW : SQLITE_ERROR;
+    while (rc == SQLITE_ROW && (rc = sqlite3_step(st)) == SQLITE_ROW) {
+        cJSON *row = json_row(st, 7);
+        if (row == NULL || !cJSON_AddItemToArray(list, row) ||
+            add_column(row, "genres", TAG_GENRE, st, 7) == NULL ||
+            cJSON_AddStringToObject(row, "note", (const char *)sqlite3_column_text(st, 8)) == NULL)
+            rc = SQLITE_NOMEM;
+    }
+    if (rc != SQLITE_DONE)
+        db_log_error(music_db, "musicbrainz lookups");
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, obj);
+}
+
+/*
+ * POST /api/music/musicbrainz/start {password}: starts
+ * nylm-musicbrainz.service, which looks up the genres of the next 10
+ * albums without one and queues them. -> 202
+ */
+void music_musicbrainz_start(struct request *req, struct response *res)
+{
+    if (password_checked(req, res) == NULL)
+        return;
+    int lock = music_musicbrainz_lock(0);
+    if (lock < 0) {
+        json_error(res, lock == MUSIC_BUSY ? 409 : 500,
+                   lock == MUSIC_BUSY ? "MusicBrainz is busy: try again when it is done"
+                                      : "internal error");
+        return;
+    }
+    start_action(req, res, lock, 0, "musicbrainz", "{}");
+}
+
 /* POST /api/music/write {password}: starts nylm-music-write.service. -> 202 */
 void music_write_start(struct request *req, struct response *res)
 {

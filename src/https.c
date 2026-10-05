@@ -1,5 +1,5 @@
 /*
- * A small HTTPS client for the Qobuz service (src/https.h).
+ * A small HTTPS client for the Qobuz and MusicBrainz services (src/https.h).
  */
 #define _POSIX_C_SOURCE 200809L
 

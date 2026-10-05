@@ -32,7 +32,8 @@ If a rule blocks the task, stop and ask the user; do not work around it.
 1. The only libraries are libc, SQLite, cJSON, OpenSSL libcrypto, TagLib,
    libjpeg-turbo and libpng, all linked dynamically from the distro packages
    (`sqlite`, `cjson`, `openssl`, `taglib`, `libjpeg-turbo`, `libpng`), and
-   (approved) OpenSSL libssl, linked only into `nylm-qobuz`, never the server.
+   (approved) OpenSSL libssl, linked only into `nylm-qobuz` and (approved
+   2026-10-05) `nylm-musicbrainz`, never the server.
    (approved) The server app's actions and jobs run these distro tools:
    `pacman-contrib` (checkupdates, which needs `fakeroot`), `smartmontools`,
    `wireguard-tools`, `zstd`, and `rsync` for copying backups to a PC.

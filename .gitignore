@@ -4,6 +4,8 @@ build/
 /nylm-debug
 /nylm-qobuz
 /nylm-qobuz-debug
+/nylm-musicbrainz
+/nylm-musicbrainz-debug
 *.db
 *.db-wal
 *.db-shm

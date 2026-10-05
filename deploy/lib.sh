@@ -17,7 +17,8 @@ JOBS_LOCK=/usr/local/lib/nylm/jobs
 
 # nylm's own units: their logs are always shown.
 NYLM_OWN_UNITS="nylm.service nylm-music-scan.service nylm-music-write.service
-nylm-music-move.service nylm-qobuz.service nylm-disk-usage.service
+nylm-music-move.service nylm-qobuz.service nylm-musicbrainz.service
+nylm-disk-usage.service
 nylm-updates-check.service nylm-update.service nylm-backup@nylm.service"
 
 die() {
