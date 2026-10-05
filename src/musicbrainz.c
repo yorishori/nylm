@@ -718,9 +718,10 @@ static const char *lookup(const char *mbid, struct mb_genres *g, char *note, siz
     char path[128], group[MB_ID_LEN + 1] = "";
     cJSON *release = NULL, *rg = NULL;
     g->n = 0;
+    /* The ids are valid, so MB_ID_LEN bytes: the paths fit. */
     snprintf(path, sizeof path,
-             "release/%s?inc=genres+release-groups+recordings+work-rels+recording-level-rels"
-             "&fmt=json", mbid);
+             "release/%.*s?inc=genres+release-groups+recordings+work-rels+recording-level-rels"
+             "&fmt=json", MB_ID_LEN, mbid);
     int r = get(path, &release, note, notelen);
     const char *state = r < 0 ? "failed" : r == 0 ? "not_found" : NULL;
     if (r == 0)
@@ -729,7 +730,7 @@ static const char *lookup(const char *mbid, struct mb_genres *g, char *note, siz
     if (id != NULL)
         memcpy(group, id, sizeof group);
     if (state == NULL && group[0] != '\0') {
-        snprintf(path, sizeof path, "release-group/%s?inc=genres&fmt=json", group);
+        snprintf(path, sizeof path, "release-group/%.*s?inc=genres&fmt=json", MB_ID_LEN, group);
         r = get(path, &rg, note, notelen);
         if (r < 0)
             state = "failed";
