@@ -87,6 +87,7 @@ fixed date. Logging a care entry makes the next due date count from that day;
 nothing comes due during a pause. Due dates are computed on every read, from
 the server's local date (the system time zone). Due lists what is late,
 today and this week; Later is grouped by plant, each opening on its care.
+A plant's page has its care rules, details and, at the bottom, its journal.
 
 A journal entry has up to 4 photos. The browser makes each one a JPEG of at
 most 1600 pixels and 640 KiB, and a thumbnail of at most 320 pixels and 64

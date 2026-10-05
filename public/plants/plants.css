@@ -63,17 +63,6 @@
   border-radius: 10px;
 }
 
-/* The journal's plant: name, switcher, open button. */
-.plant-picker {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem 1.25rem;
-  align-items: end;
-  margin-bottom: 2rem;
-}
-.plant-picker > h2 { flex: 1 1 100%; }
-.plant-picker .field { flex: 1 1 14rem; }
-
 @media (max-width: 21rem) {
   .due-row, .plant-card { grid-template-columns: 1fr; }
   .when { justify-self: start; }

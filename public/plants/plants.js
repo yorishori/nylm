@@ -3,8 +3,8 @@
 /*
  * Plants app (/plants/). Sections by URL hash:
  *   #/due            what to do, soonest first
- *   #/plants[/ID]    plants, or one plant with its care rules
- *   #/journal[/ID]   a plant's care log, notes and photos
+ *   #/plants[/ID]    plants, or one plant with its care rules and its
+ *                    journal (care log, notes and photos)
  *   #/types          care types
  *
  * Colour has three jobs, each with its own shape:
@@ -67,7 +67,6 @@ function careTypeDropdown(label, types, selected, noteOption) {
 const TABS = [
   ["due", "Due"],
   ["plants", "Plants"],
-  ["journal", "Journal"],
   ["types", "Care types"],
 ];
 
@@ -470,8 +469,9 @@ function ruleForm(plant, rule, types, onCancel) {
 }
 
 async function plantPage(id) {
-  const [plant, data] = await Promise.all([api("GET", `/api/plants/plant?id=${id}`),
-                                           api("GET", "/api/plants")]);
+  const [plant, data, log] = await Promise.all([api("GET", `/api/plants/plant?id=${id}`),
+                                                api("GET", "/api/plants"),
+                                                api("GET", `/api/plants/log?plant_id=${id}`)]);
   const ruled = new Set(plant.rules.map((r) => r.care_type_id));
   const freeTypes = data.care_types.filter((t) => !t.archived && !ruled.has(t.id));
 
@@ -515,11 +515,6 @@ async function plantPage(id) {
 
       el("div", { class: "side" },
         el("section", { class: "section" },
-          el("header", {},
-            el("h2", {}, "Journal"),
-            navButton("Open journal", `#/journal/${plant.id}`))),
-
-        el("section", { class: "section" },
           el("header", {}, el("h2", {}, "Details")),
           details,
           el("div", { class: "actions" },
@@ -529,7 +524,8 @@ async function plantPage(id) {
                    "Restore plant")
               : el("button", { class: "btn danger", type: "button",
                                onclick: () => setPlantArchived(plant, true).catch(handleError) },
-                   "Archive plant"))))));
+                   "Archive plant")))),
+    journalSection(plant, log, data.care_types)));
 }
 
 /* ---- journal ----------------------------------------------------------- */
@@ -694,44 +690,17 @@ function entryCard(entry, typeById, types) {
   return li;
 }
 
-async function journalPage(id) {
-  const data = await api("GET", "/api/plants");
-  const plants = data.plants;
-  if (plants.length === 0) {
-    return shell("journal",
-      el("div", { class: "empty" },
-        el("p", {}, "Add a plant to start its journal."),
-        el("div", { class: "actions" }, navButton("Go to Plants", "#/plants"))));
-  }
-  const plant = plants.find((p) => p.id === id) ||
-                plants.find((p) => !p.archived) || plants[0];
-  if (plant.id !== id) {
-    history.replaceState(null, "", `#/journal/${plant.id}`);
-  }
-
-  const log = await api("GET", `/api/plants/log?plant_id=${plant.id}`);
-  const types = data.care_types;
+/* The plant's journal: its entries, newest first, with Show older entries,
+ * and the form for a new one. log: its first page of entries. */
+function journalSection(plant, log, types) {
   const typeById = new Map(types.map((t) => [t.id, t]));
-  const active = types.filter((t) => !t.archived);
-
-  const picker = dropdown({
-    label: "Show another plant",
-    options: plants.map((p) => ({
-      value: String(p.id),
-      label: p.archived ? `${p.name} (archived)` : p.name,
-      render: () => plantName(p.archived ? `${p.name} (archived)` : p.name, p.color),
-    })),
-    value: String(plant.id),
-    onchange: (value) => go(`#/journal/${value}`),
-  });
-
-  const inputs = entryInputs(null, active);
+  const inputs = entryInputs(null, types.filter((t) => !t.archived));
   const add = form({ class: "raised" }, async () => {
     await api("POST", "/api/plants/log/add", { plant_id: plant.id, ...entryBody(inputs) });
     setStatus("Added the entry");
     refresh();
   },
-    el("h2", {}, "New entry"),
+    el("h3", {}, "New entry"),
     entryFields(inputs),
     el("div", { class: "actions" },
       el("button", { class: "btn go", type: "submit" }, "Add entry")));
@@ -752,14 +721,10 @@ async function journalPage(id) {
   } }, "Show older entries");
   olderButton.hidden = !log.more;
 
-  return shell("journal",
-    el("div", { class: `card marked plant-picker c-${plant.color}` },
-      plantName(plant.name, plant.color, "h2"),
-      field("Show another plant", picker),
-      navButton("Open plant", `#/plants/${plant.id}`)),
+  return el("section", { class: "section" },
+    el("header", {}, el("h2", {}, "Journal")),
     el("div", { class: "split" },
-      el("section", { class: "section" },
-        el("header", {}, el("h2", {}, "Entries")),
+      el("div", { class: "stack" },
         log.entries.length ? list : el("p", { class: "empty" }, "Nothing written yet."),
         el("div", { class: "actions" }, olderButton)),
       el("div", { class: "side first" }, add)));
@@ -852,7 +817,10 @@ function route(parts) {
   }
   if (section === "due" && id === null) return duePage();
   if (section === "plants") return id ? plantPage(id) : plantsPage();
-  if (section === "journal") return journalPage(id);
+  if (section === "journal") { /* the journal is on the plant's page now */
+    go(id ? `#/plants/${id}` : "#/plants");
+    return null;
+  }
   if (section === "types" && id === null) return typesPage();
   go("#/due");
   return null;
