@@ -1783,7 +1783,7 @@ async function duplicatesPage() {
 /* ---- fixes --------------------------------------------------------------- */
 
 const FIX_ALBUMS = 10; /* albums one fix changes at once (the server's limit) */
-const MB_GENRES = 3;   /* genres taken from MusicBrainz for an album, at most */
+const MB_GENRES = 5;   /* genres taken from MusicBrainz's votes, at most */
 const DELIMITERS = [[",", "Comma ,"], [";", "Semicolon ;"], [":", "Colon :"]];
 let splitDelimiter = ",";
 const fixResults = {}; /* the last result of each fix, shown while the app is open */
@@ -1884,7 +1884,8 @@ function musicbrainzSection(mb) {
     el("p", {}, `Looks up the next ${FIX_ALBUMS} albums without a genre whose tracks share one ` +
                 "MusicBrainz album id: the genres MusicBrainz's users voted for the release " +
                 `group (else the release), the ${MB_GENRES} with the most votes that fit the ` +
-                "rules, queued for the tracks without a genre. Each album is looked up once; " +
+                "rules, and the release's language (\"spanish\", \"instrumental\"), queued " +
+                "for the tracks without a genre. Each album is looked up once; " +
                 "a failed lookup is tried again next time."),
     status,
     mb.running ? null : start,

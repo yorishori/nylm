@@ -51,9 +51,14 @@ static void test_genres(void)
     /* the most votes first; between equal votes MusicBrainz's order */
     CHECK_STR(chosen("{\"genres\":[{\"name\":\"pop\",\"count\":1},{\"name\":\"rock\",\"count\":5},"
                      "{\"name\":\"jazz\",\"count\":2},{\"name\":\"soul\",\"count\":2}]}"),
-              "rock|jazz|soul");
+              "rock|jazz|soul|pop");
     CHECK_STR(chosen("{\"genres\":[{\"name\":\"a\",\"count\":1},{\"name\":\"b\",\"count\":1}]}"),
               "a|b");
+    /* MB_GENRES at most */
+    CHECK_STR(chosen("{\"genres\":[{\"name\":\"a\",\"count\":1},{\"name\":\"b\",\"count\":2},"
+                     "{\"name\":\"c\",\"count\":3},{\"name\":\"d\",\"count\":4},"
+                     "{\"name\":\"e\",\"count\":5},{\"name\":\"f\",\"count\":6}]}"),
+              "f|e|d|c|b");
     /* names the genre rule allows: spaces, & and / */
     CHECK_STR(chosen("{\"genres\":[{\"name\":\"pop rock\",\"count\":3},"
                      "{\"name\":\"r&b\",\"count\":2},{\"name\":\"rock/pop\",\"count\":1}]}"),
@@ -94,6 +99,55 @@ static void test_genres(void)
         len += (size_t)snprintf(many + len, sizeof many - len, "{\"name\":\"Bad\",\"count\":9},");
     snprintf(many + len, sizeof many - len, "{\"name\":\"late\",\"count\":9}]}");
     CHECK_STR(chosen(many), "");
+}
+
+/* The language of release json as a genre, then its code: "genre code",
+ * "-" for NULL. */
+static const char *language(const char *json)
+{
+    static char out[128];
+    const char *code = "x";
+    cJSON *obj = cJSON_Parse(json);
+    const char *name = obj != NULL ? mb_language(obj, &code) : "bad json";
+    snprintf(out, sizeof out, "%s %s", name != NULL ? name : "-", code != NULL ? code : "-");
+    cJSON_Delete(obj);
+    return out;
+}
+
+static void test_language(void)
+{
+    CHECK_STR(language("{\"text-representation\":{\"language\":\"spa\"}}"), "spanish spa");
+    CHECK_STR(language("{\"text-representation\":{\"language\":\"zxx\"}}"),
+              "instrumental zxx");
+    CHECK_STR(language("{\"text-representation\":{\"language\":\"afr\"}}"), "afrikaans afr");
+    CHECK_STR(language("{\"text-representation\":{\"language\":\"zho\"}}"), "chinese zho");
+    CHECK_STR(language("{\"text-representation\":{\"language\":\"mul\"}}"), "- mul");
+    CHECK_STR(language("{\"text-representation\":{\"language\":\"xyz\"}}"), "- xyz");
+    /* not a code: 2 or 4 letters, uppercase, not a string, null, absent */
+    CHECK_STR(language("{\"text-representation\":{\"language\":\"sp\"}}"), "- -");
+    CHECK_STR(language("{\"text-representation\":{\"language\":\"span\"}}"), "- -");
+    CHECK_STR(language("{\"text-representation\":{\"language\":\"SPA\"}}"), "- -");
+    CHECK_STR(language("{\"text-representation\":{\"language\":\"\"}}"), "- -");
+    CHECK_STR(language("{\"text-representation\":{\"language\":3}}"), "- -");
+    CHECK_STR(language("{\"text-representation\":{\"language\":null}}"), "- -");
+    CHECK_STR(language("{\"text-representation\":{}}"), "- -");
+    CHECK_STR(language("{\"text-representation\":\"spa\"}"), "- -");
+    CHECK_STR(language("{}"), "- -");
+}
+
+/* Adding genres: no name twice, and no more than MB_GENRES + 1. */
+static void test_add_genre(void)
+{
+    struct mb_genres g = { .n = 0 };
+    mb_add_genre(&g, "rock");
+    mb_add_genre(&g, "rock");
+    CHECK(g.n == 1);
+    const char *names[] = { "a", "b", "c", "d", "e", "f", "g" };
+    for (size_t i = 0; i < sizeof names / sizeof names[0]; i++)
+        mb_add_genre(&g, names[i]);
+    CHECK(g.n == MB_GENRES + 1);
+    CHECK_STR(g.v[0], "rock");
+    CHECK_STR(g.v[MB_GENRES], "e");
 }
 
 static void test_release_group(void)
@@ -253,6 +307,8 @@ int main(void)
     json_init();
     test_ids();
     test_genres();
+    test_language();
+    test_add_genre();
     test_release_group();
     test_albums();
     CHECK(rmdir(dir) == 0);

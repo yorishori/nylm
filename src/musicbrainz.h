@@ -13,18 +13,22 @@
 
 #define MB_ID_LEN    36  /* a MusicBrainz id: lowercase hex 8-4-4-4-12 */
 #define MB_ALBUMS    10  /* albums looked up in one run */
-#define MB_GENRES    3   /* genres queued for an album, at most */
+#define MB_GENRES    5   /* genres taken from MusicBrainz's votes, at most */
 #define MB_MAX_GENRE 100 /* bytes in a genre taken from MusicBrainz */
 
 /* 1 if s is a MusicBrainz id: lowercase hex 8-4-4-4-12. */
 int mb_id_valid(const char *s);
 
-/* Genres chosen from MusicBrainz: name[i] for i < n; v points at them. */
+/* Genres chosen from MusicBrainz: name[i] for i < n; v points at them.
+ * The voted ones, then the language. */
 struct mb_genres {
     size_t n;
-    char name[MB_GENRES][MB_MAX_GENRE + 1];
-    const char *v[MB_GENRES];
+    char name[MB_GENRES + 1][MB_MAX_GENRE + 1];
+    const char *v[MB_GENRES + 1];
 };
+
+/* Adds name to g unless it is there already or g is full. */
+void mb_add_genre(struct mb_genres *g, const char *name);
 
 /*
  * The genres of a MusicBrainz release or release group (its JSON, with
@@ -34,6 +38,15 @@ struct mb_genres {
  * The count.
  */
 size_t mb_genres(const cJSON *entity, struct mb_genres *out);
+
+/*
+ * The language of a release (its JSON, "text-representation": {"language"},
+ * an ISO 639-3 code) as a genre: its English name ("spanish"),
+ * "instrumental" for no lyrics (zxx); NULL if it has none, several (mul)
+ * or one not in nylm's list. *code is the code as given (NULL if none or
+ * not 3 lowercase letters).
+ */
+const char *mb_language(const cJSON *release, const char **code);
 
 /* The id of a release's release group (its JSON); NULL if none or not an id. */
 const char *mb_release_group(const cJSON *release);

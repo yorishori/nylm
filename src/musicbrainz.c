@@ -6,8 +6,8 @@
  * MusicBrainz album id (a release id) are looked up: the release, then its
  * release group, whose genres (voted by MusicBrainz's users) are usually
  * the fuller ones; the release's own are used when the group has none.
- * The top MB_GENRES are queued as the genre of the album's tracks without
- * one, as one batch, like any edit: nothing is written to the files here.
+ * The top MB_GENRES and the release's language are queued as the genre of
+ * the album's tracks without one, as one batch, like any edit: nothing is written to the files here.
  * Every lookup is recorded, so an album is asked once.
  *
  * MusicBrainz allows one request a second and asks for a User-Agent that
@@ -84,17 +84,60 @@ size_t mb_genres(const cJSON *entity, struct mb_genres *out)
                 best = i;
         if (best < 0)
             break;
-        int twice = 0;
-        for (size_t k = 0; k < out->n && !twice; k++)
-            twice = strcmp(out->name[k], names[best]) == 0;
-        if (!twice) {
-            snprintf(out->name[out->n], sizeof out->name[out->n], "%s", names[best]);
-            out->v[out->n] = out->name[out->n];
-            out->n++;
-        }
+        mb_add_genre(out, names[best]);
         names[best] = NULL;
     }
     return out->n;
+}
+
+void mb_add_genre(struct mb_genres *g, const char *name)
+{
+    for (size_t k = 0; k < g->n; k++)
+        if (strcmp(g->name[k], name) == 0)
+            return;
+    if (g->n == MB_GENRES + 1)
+        return;
+    snprintf(g->name[g->n], sizeof g->name[g->n], "%s", name);
+    g->v[g->n] = g->name[g->n];
+    g->n++;
+}
+
+/* ISO 639-3 codes and their names as genres. */
+static const char *const languages[][2] = {
+    { "afr", "afrikaans" }, { "ara", "arabic" },      { "ben", "bengali" },
+    { "bul", "bulgarian" }, { "cat", "catalan" },     { "ces", "czech" },
+    { "cmn", "chinese" },   { "dan", "danish" },      { "deu", "german" },
+    { "ell", "greek" },     { "eng", "english" },     { "est", "estonian" },
+    { "eus", "basque" },    { "fas", "persian" },     { "fin", "finnish" },
+    { "fra", "french" },    { "gle", "irish" },       { "glg", "galician" },
+    { "heb", "hebrew" },    { "hin", "hindi" },       { "hrv", "croatian" },
+    { "hun", "hungarian" }, { "ind", "indonesian" },  { "isl", "icelandic" },
+    { "ita", "italian" },   { "jpn", "japanese" },    { "kor", "korean" },
+    { "lat", "latin" },     { "lav", "latvian" },     { "lit", "lithuanian" },
+    { "msa", "malay" },     { "nld", "dutch" },       { "nor", "norwegian" },
+    { "pol", "polish" },    { "por", "portuguese" },  { "ron", "romanian" },
+    { "rus", "russian" },   { "slk", "slovak" },      { "slv", "slovenian" },
+    { "spa", "spanish" },   { "srp", "serbian" },     { "swa", "swahili" },
+    { "swe", "swedish" },   { "tam", "tamil" },       { "tgl", "filipino" },
+    { "tha", "thai" },      { "tur", "turkish" },     { "ukr", "ukrainian" },
+    { "urd", "urdu" },      { "vie", "vietnamese" },  { "yue", "cantonese" },
+    { "zho", "chinese" },   { "zxx", "instrumental" },
+};
+#define NLANGUAGES (sizeof languages / sizeof languages[0])
+
+const char *mb_language(const cJSON *release, const char **code)
+{
+    const cJSON *text = cJSON_GetObjectItemCaseSensitive(release, "text-representation");
+    const cJSON *lang = cJSON_GetObjectItemCaseSensitive(text, "language");
+    const char *s = cJSON_IsString(lang) ? lang->valuestring : NULL;
+    int ok = s != NULL && strlen(s) == 3;
+    for (int i = 0; ok && i < 3; i++)
+        ok = s[i] >= 'a' && s[i] <= 'z';
+    *code = ok ? s : NULL;
+    for (size_t i = 0; ok && i < NLANGUAGES; i++)
+        if (strcmp(languages[i][0], s) == 0)
+            return languages[i][1];
+    return NULL;
 }
 
 const char *mb_release_group(const cJSON *release)
@@ -230,7 +273,7 @@ int mb_next_albums(struct mb_album *out, int max)
  * memory. */
 static const char *genres_json(const struct mb_genres *g)
 {
-    const char *names[MB_GENRES];
+    const char *names[MB_GENRES + 1];
     struct tag_values v = { 0, names };
     for (size_t i = 0; g != NULL && i < g->n; i++)
         names[v.n++] = g->name[i];
@@ -371,13 +414,28 @@ static const char *lookup(const char *mbid, struct mb_genres *g, char *note, siz
         if (r < 0)
             state = "failed";
         else if (r > 0 && mb_genres(rg, g) > 0)
-            snprintf(note, notelen, "from the release group");
+            snprintf(note, notelen, "genres from the release group");
     }
     if (state == NULL && g->n == 0 && mb_genres(release, g) > 0)
-        snprintf(note, notelen, "from the release");
-    if (state == NULL && g->n == 0) {
-        state = "none";
-        snprintf(note, notelen, "MusicBrainz has no genres for it that nylm can use");
+        snprintf(note, notelen, "genres from the release");
+    if (state == NULL && g->n == 0)
+        snprintf(note, notelen, "no genres that nylm can use");
+    if (state == NULL) {
+        const char *code;
+        const char *language = mb_language(release, &code);
+        size_t len = strlen(note);
+        if (language != NULL)
+            mb_add_genre(g, language);
+        snprintf(note + len, notelen - len, "%s",
+                 language != NULL                 ? ", and the release's language"
+                 : code == NULL                   ? ", no language"
+                 : strcmp(code, "mul") == 0       ? ", several languages (left out)"
+                                                  : ", a language nylm does not know: ");
+        len = strlen(note);
+        if (language == NULL && code != NULL && strcmp(code, "mul") != 0)
+            snprintf(note + len, notelen - len, "%s", code);
+        if (g->n == 0)
+            state = "none";
     }
     arena_rewind(mark);
     return state != NULL ? state : "queued";

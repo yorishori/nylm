@@ -292,8 +292,10 @@ without a planned genre, in the order of the albums list, whose tracks
 without a genre all have one planned MusicBrainz album id (a release id,
 lowercase `8-4-4-4-12` hex), and asks musicbrainz.org (one request a
 second) for the release, then its release group: the genres MusicBrainz's
-users voted for the group, else for the release; the 3 with the most votes
-that fit the genre rule (and are at most 100 bytes). Holding the library
+users voted for the group, else for the release; the 5 with the most votes
+that fit the genre rule (and are at most 100 bytes), then the release's
+language as a genre (`spanish`, `instrumental` for no lyrics; left out
+when it has several or one not in nylm's list). Holding the library
 lock as the server does, it queues them as one batch, like any edit, for
 those tracks that still have no genre (it never touches the files), and
 records every lookup in `musicbrainz_lookups`: queued, none, not_found,
