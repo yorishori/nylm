@@ -10,3 +10,4 @@ build/
 *.db-wal
 *.db-shm
 /dev-data/
+ideas/
