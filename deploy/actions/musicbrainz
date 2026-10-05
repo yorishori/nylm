@@ -1,9 +1,14 @@
 #!/bin/sh
-# Starts the MusicBrainz service (nylm-musicbrainz.service, which runs
-# nylm-musicbrainz as user nylm) and returns at once. Takes no arguments.
+# Starts one job of the MusicBrainz service (nylm-musicbrainz@JOB.service,
+# which runs nylm-musicbrainz JOB as user nylm) and returns at once.
+# Argument: ids (find album ids) or genres (find genres).
 set -eu
-if [ "$#" -ne 0 ]; then
-    echo "musicbrainz: takes no arguments" >&2
+if [ "$#" -ne 1 ]; then
+    echo "musicbrainz: takes one argument: ids or genres" >&2
     exit 2
 fi
-exec /usr/bin/systemctl start --no-block nylm-musicbrainz.service
+case $1 in
+    ids|genres) ;;
+    *) echo "musicbrainz: not ids or genres: $1" >&2; exit 2 ;;
+esac
+exec /usr/bin/systemctl start --no-block "nylm-musicbrainz@$1.service"

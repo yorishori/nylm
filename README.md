@@ -36,7 +36,7 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 | `src/dupes.c`     | when two names are the same, for the duplicates          |
 | `src/qobuz.c`     | Qobuz without the network: links, login, bundle, tags    |
 | `src/qobuz_*.c`   | `nylm-qobuz`, the Qobuz service (its own binary)         |
-| `src/musicbrainz*.c` | `nylm-musicbrainz`, genres from MusicBrainz (own binary) |
+| `src/musicbrainz*.c` | `nylm-musicbrainz`, album ids and genres from MusicBrainz |
 | `src/https.c`     | HTTPS client (libssl), only in the two services above    |
 | `src/tags.c`      | music file tags through TagLib: read, write, verify      |
 | `src/art.c`       | album art files, named by SHA-256; base64                |
@@ -191,7 +191,7 @@ a genre holding the delimiter becomes several, each part trimmed, spaces
 made one, lowercase; other genres stay as they are. Composer from the
 album artist (`fix/composers`): each track without a composer gets its
 album artist; compilations are not changed, an album without an album
-artist is left alone. Genres from MusicBrainz (below). Files: the naming
+artist is left alone. Album ids and genres from MusicBrainz (below). Files: the naming
 rule, the tracks
 that move (from, to) and those that can not (why), Move files, and what
 the moves did (`GET /api/music/moves`). Qobuz: connect, download albums,
@@ -284,25 +284,46 @@ downloads, so the library can be edited meanwhile. The signing scheme is
 Qobuz's own and may change; then the service says that no secret signs
 downloads.
 
-Genres from MusicBrainz (`nylm-musicbrainz`, `nylm-musicbrainz.service`,
-root action `musicbrainz`; Fixes tab): started with the password again
-(`POST /api/music/musicbrainz/start`, audited), its lookups in `GET
-/api/music/musicbrainz` (the latest 100). Each run takes the next 10 albums
-without a planned genre, in the order of the albums list, whose tracks
-without a genre all have one planned MusicBrainz album id (a release id,
-lowercase `8-4-4-4-12` hex), and asks musicbrainz.org (one request a
-second) for the release, then its release group: the genres MusicBrainz's
-users voted for the group, else for the release; the 5 with the most votes
-that fit the genre rule (and are at most 100 bytes), then the release's
-language as a genre (`spanish`, `instrumental` for no lyrics; left out
-when it has several or one not in nylm's list). Holding the library
-lock as the server does, it queues them as one batch, like any edit, for
-those tracks that still have no genre (it never touches the files), and
-records every lookup in `musicbrainz_lookups`: queued, none, not_found,
-failed, skipped (the album got a genre meanwhile). An album whose id was
-queued, none or not_found is not asked again; failed and skipped are. It
-holds `$NYLM_DATA/music/musicbrainz.lock` while it runs, so the library
-can be edited meanwhile; it does not need `NYLM_MUSIC`.
+MusicBrainz (`nylm-musicbrainz ids|genres`, `nylm-musicbrainz@.service`,
+root action `musicbrainz ids|genres`; Fixes tab): two jobs, each started
+with the password again (`POST /api/music/musicbrainz/start {password,
+what}`, audited), what they did in `GET /api/music/musicbrainz` (the
+latest 100 searches and lookups). Both ask musicbrainz.org (one request a
+second) about 10 albums a run and queue what they find as one batch, like
+any edit, holding the library lock as the server does; they never touch
+the files.
+
+Album ids (`ids`): the next 10 albums, by their planned album and album
+artist (both present), none of whose tracks has a valid planned
+MusicBrainz album id (a release id, lowercase `8-4-4-4-12` hex; anything
+else counts as none), in the order of the albums list. Each is searched
+for (`release:"album" AND artist:"album artist"`, the first 25 releases;
+again without a leading "The " in the artist when that finds nothing
+sure). Only a release whose title and artist credit are the same names
+once normalised (ASCII case and punctuation, typographic quotes and
+dashes, spaces, a leading "the" aside) is taken, an Official one first;
+its id is queued for the tracks still without a valid one. Recorded in
+`musicbrainz_searches`: queued, unsure (releases found, none with these
+names), not_found, failed, skipped (the album got an id meanwhile). An
+album searched by the same names with queued, unsure or not_found is not
+searched again; failed and skipped are.
+
+Genres (`genres`): the next 10 albums without a planned genre, in the
+order of the albums list, whose tracks without a genre all have one
+planned MusicBrainz album id (one queued by `ids` counts). It asks for
+the release, then its release group: the genres MusicBrainz's users voted
+for the group, else for the release; the 5 with the most votes that fit
+the genre rule (and are at most 100 bytes), then the release's language
+as a genre (`spanish`, `instrumental` for no lyrics; left out when it has
+several or one not in nylm's list). They are queued for the tracks that
+still have no genre. Recorded in `musicbrainz_lookups`: queued, none,
+not_found, failed, skipped (the album got a genre meanwhile). An album
+whose id was queued, none or not_found is not asked again; failed and
+skipped are.
+
+The service holds `$NYLM_DATA/music/musicbrainz.lock` while it runs (one
+job at a time), so the library can be edited meanwhile; it does not need
+`NYLM_MUSIC`.
 
 ## Server
 
@@ -467,11 +488,12 @@ sudo systemctl start nylm-music-scan   # scan the music folder (or what is queue
 sudo systemctl start nylm-music-write  # write the pending tag changes
 sudo systemctl start nylm-music-move   # move the files where their tags put them
 sudo systemctl start nylm-qobuz        # Qobuz: what the web app queued
-sudo systemctl start nylm-musicbrainz  # genres from MusicBrainz, 10 albums
+sudo systemctl start nylm-musicbrainz@ids     # MusicBrainz album ids, 10 albums
+sudo systemctl start nylm-musicbrainz@genres  # genres from MusicBrainz, 10 albums
 sudo -u nylm env NYLM_DATA=/mnt/data/nylm NYLM_MUSIC=/mnt/data/music \
     nylm music-scan /mnt/data/music/Some/Album   # scan one folder or file
 journalctl -u nylm-music-scan -u nylm-music-write -u nylm-music-move -u nylm-qobuz \
-    -u nylm-musicbrainz
+    -u 'nylm-musicbrainz@*'
 sudo systemctl start nylm-disk-usage    # measure the folders (see the System tab)
 journalctl -u nylm-disk-usage
 sudo systemctl start nylm-updates-check # list the package updates
@@ -493,7 +515,7 @@ NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-debug music-scan
 NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-debug music-write
 NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-debug music-move
 NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-qobuz-debug
-NYLM_DATA=dev-data ./nylm-musicbrainz-debug
+NYLM_DATA=dev-data ./nylm-musicbrainz-debug ids      # or genres
 ```
 
 Configuration is environment variables; `nylm --help` lists them.

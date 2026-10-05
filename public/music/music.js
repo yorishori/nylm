@@ -10,7 +10,8 @@
  *   #/duplicates   possible duplicate tracks, albums and names: copy a
  *                  path, open an album, merge spellings of a name
  *   #/fixes        changes made for a few albums at a time: split genres,
- *                  composers from the album artist, genres from MusicBrainz
+ *                  composers from the album artist, album ids and genres
+ *                  from MusicBrainz
  *   #/files        where the move service puts each file (its plan, its
  *                  problems, what it did), and starting it
  *   #/qobuz        connect to Qobuz, download albums into the library
@@ -1842,57 +1843,57 @@ function fixSection(key, title, about, controls, button, why) {
 
 const LOOKUP_STATE = { queued: "Genres queued", none: "No genres", not_found: "Not on MusicBrainz",
                        failed: "Failed", skipped: "Skipped" };
+const SEARCH_STATE = { queued: "Id queued", unsure: "No sure match",
+                       not_found: "Not on MusicBrainz", failed: "Failed", skipped: "Skipped" };
 
-/* One MusicBrainz lookup: the album, what was found. Rose failed, peach
- * nothing found. */
-function lookupItem(l) {
-  const tone = l.state === "failed" ? "late" : l.state === "none" || l.state === "not_found"
-                                      ? "today" : "";
+/* One MusicBrainz lookup or search (states names its states): the album,
+ * what was found (lines). Rose failed, peach nothing found. */
+function mbItem(l, states, ...lines) {
+  const tone = l.state === "failed" ? "late" : l.state === "queued" || l.state === "skipped"
+                                      ? "" : "today";
   return el("li", { class: "card stack history" },
     el("header", {},
-      el("span", { class: tone ? `due ${tone}` : "muted" }, LOOKUP_STATE[l.state] || l.state),
+      el("span", { class: tone ? `due ${tone}` : "muted" }, states[l.state] || l.state),
       el("span", { class: "muted" }, showTime(l.looked))),
     el("strong", {}, l.album ?? "No album name"),
     el("p", { class: "muted" }, l.albumartist ?? "No album artist"),
-    l.genres.length ? el("p", {}, l.genres.join("; ")) : null,
+    ...lines,
     l.note ? el("p", { class: "note" }, l.note) : null,
     el("div", { class: "actions" }, navButton("Open album", `#/album/${l.track}`)));
 }
 
-/* Genres from MusicBrainz: start the service with the password, and the
- * lookups so far. */
-function musicbrainzSection(mb) {
-  const status = el("p", {}, mb.running ? "Looking up genres on MusicBrainz…" : "");
-  if (mb.running) watchRunning("/api/music/musicbrainz", status, "MusicBrainz finished: see the " +
-                                                                 "queued genres in Changes");
+/*
+ * One job of the MusicBrainz service (what: ids or genres): a section
+ * that starts it with the password, and its lookups so far (list, each
+ * shown by item). While the service runs, only the first section says so
+ * and checks back (watch).
+ */
+function musicbrainzSection(mb, what, title, about, button, list, item, watch) {
+  const status = el("p", {}, mb.running ? "The MusicBrainz service is running…" : "");
+  if (mb.running && watch) watchRunning("/api/music/musicbrainz", status,
+                                        "MusicBrainz finished: see what it queued in Changes");
   const password = el("input", { type: "password", name: "password", required: true,
                                  autocomplete: "current-password" });
   const start = form({ class: "raised" }, async () => {
     try {
-      await api("POST", "/api/music/musicbrainz/start", { password: password.value });
+      await api("POST", "/api/music/musicbrainz/start", { password: password.value, what });
     } finally {
       password.value = "";
     }
-    setStatus("Looking up genres on MusicBrainz");
+    setStatus("The MusicBrainz service is running");
     refresh();
   },
     field("Password", password, "Starting the MusicBrainz service needs your password again."),
-    el("div", { class: "actions" },
-      el("button", { class: "btn go", type: "submit" }, `Look up ${FIX_ALBUMS} albums`)));
+    el("div", { class: "actions" }, el("button", { class: "btn go", type: "submit" }, button)));
   return el("section", { class: "card stack" },
-    el("h2", {}, "Genres from MusicBrainz"),
-    el("p", {}, `Looks up the next ${FIX_ALBUMS} albums without a genre whose tracks share one ` +
-                "MusicBrainz album id: the genres MusicBrainz's users voted for the release " +
-                `group (else the release), the ${MB_GENRES} with the most votes that fit the ` +
-                "rules, and the release's language (\"spanish\", \"instrumental\"), queued " +
-                "for the tracks without a genre. Each album is looked up once; " +
-                "a failed lookup is tried again next time."),
+    el("h2", {}, title),
+    el("p", {}, about),
     status,
     mb.running ? null : start,
-    mb.lookups.length
+    list.length
       ? el("ul", { class: "fold-list" },
-          foldGroup(`Lookups (${mb.lookups.length})`,
-                    () => el("ul", { class: "list cols" }, mb.lookups.map(lookupItem))))
+          foldGroup(`Looked up (${list.length})`,
+                    () => el("ul", { class: "list cols" }, list.map(item))))
       : el("p", { class: "muted" }, "Nothing looked up yet."));
 }
 
@@ -1932,7 +1933,24 @@ async function fixesPage() {
                 `Make the album artist the composer in the next ${FIX_ALBUMS} albums?`,
                 "/api/music/fix/composers", () => ({}), busy),
       "a track has no album artist, or it breaks the rules (fix it in the album)."),
-    musicbrainzSection(mb));
+    musicbrainzSection(mb, "ids", "Album ids from MusicBrainz",
+      `Searches MusicBrainz for the next ${FIX_ALBUMS} albums without a valid MusicBrainz album ` +
+      "id, by album and album artist. Only a release with exactly these names is taken " +
+      "(case, punctuation and a leading \"The\" aside; an Official one first); its id is " +
+      "queued for the album's tracks. Check the ids in Changes before looking up genres. " +
+      "Each album is searched once by its names; a failed search is tried again next time.",
+      `Find ids for ${FIX_ALBUMS} albums`, mb.searches,
+      (l) => mbItem(l, SEARCH_STATE, l.mbid ? el("p", {}, l.mbid) : null), true),
+    musicbrainzSection(mb, "genres", "Genres from MusicBrainz",
+      `Looks up the next ${FIX_ALBUMS} albums without a genre whose tracks share one ` +
+      "MusicBrainz album id (a queued one counts): the genres MusicBrainz's users voted for the " +
+      `release group (else the release), the ${MB_GENRES} with the most votes that fit the ` +
+      "rules, and the release's language (\"spanish\", \"instrumental\"), queued for the " +
+      "tracks without a genre. Each album is looked up once; a failed lookup is tried again " +
+      "next time.",
+      `Look up genres for ${FIX_ALBUMS} albums`, mb.lookups,
+      (l) => mbItem(l, LOOKUP_STATE, l.genres.length ? el("p", {}, l.genres.join("; ")) : null),
+      false));
 }
 
 /* ---- info ---------------------------------------------------------------- */

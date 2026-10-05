@@ -1,0 +1,20 @@
+[Unit]
+Description=nylm MusicBrainz: %i
+Documentation=file:///usr/local/share/nylm/README.md
+Wants=network-online.target
+After=network-online.target
+
+# Started from the web app (action musicbrainz JOB) or by hand:
+#   sudo systemctl start nylm-musicbrainz@ids      # album ids by their names
+#   sudo systemctl start nylm-musicbrainz@genres   # genres by the album ids
+# Each run looks up 10 albums on musicbrainz.org and queues what it found
+# as changes; it never touches the music files. Links libssl, like
+# nylm-qobuz; the server does not.
+[Service]
+Type=oneshot
+User=nylm
+Group=nylm
+EnvironmentFile=/etc/nylm.conf
+ExecStart=/usr/local/bin/nylm-musicbrainz %i
+WorkingDirectory=/var/lib/nylm
+Nice=10

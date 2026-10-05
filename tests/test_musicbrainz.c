@@ -10,6 +10,7 @@
 #include "../src/db.h"
 #include "../src/json.h"
 #include "../src/musicbrainz.h"
+#include "../src/tags.h"
 #include "test.h"
 
 #define ID1 "f2c9c0f4-9c9b-4a7b-8f3a-1234567890ab"
@@ -160,29 +161,172 @@ static void test_release_group(void)
     CHECK(mb_release_group(cJSON_Parse("{}")) == NULL);
 }
 
+/* name normalised, or "error". */
+static const char *normal(const char *name, size_t size)
+{
+    static char out[MB_MAX_NAME];
+    return mb_normalize(name, out, size) == 0 ? out : "error";
+}
+
+static void test_normalize(void)
+{
+    CHECK_STR(normal("OK Computer", MB_MAX_NAME), "ok computer");
+    CHECK_STR(normal("The Pixies", MB_MAX_NAME), "pixies");
+    CHECK_STR(normal("the  PIXIES ", MB_MAX_NAME), "pixies");
+    CHECK_STR(normal("The", MB_MAX_NAME), "the");               /* nothing after it */
+    CHECK_STR(normal("Theatre", MB_MAX_NAME), "theatre");
+    CHECK_STR(normal("Them, The", MB_MAX_NAME), "them the");
+    /* ASCII punctuation out, white space one space, trimmed */
+    CHECK_STR(normal("  Simon & Garfunkel!\t", MB_MAX_NAME), "simon garfunkel");
+    CHECK_STR(normal("AC/DC", MB_MAX_NAME), "acdc");
+    CHECK_STR(normal("Mr. Bungle - (Live)", MB_MAX_NAME), "mr bungle live");
+    /* typographic quotes, dashes and the ellipsis out */
+    CHECK_STR(normal("Don\u2019t \u201cStop\u201d \u2013 Now\u2026", MB_MAX_NAME),
+              "dont stop now");
+    CHECK_STR(normal("Don't Stop", MB_MAX_NAME), "dont stop");
+    /* À..Þ lowercase too, but × (between them) and the rest of UTF-8 kept */
+    CHECK_STR(normal("ROSAL\u00cdA", MB_MAX_NAME), "rosal\u00eda");
+    CHECK_STR(normal("\u00c0\u00c9\u00d1\u00d6\u00d8\u00de", MB_MAX_NAME),
+              "\u00e0\u00e9\u00f1\u00f6\u00f8\u00fe");
+    CHECK_STR(normal("\u00d7 \u00df \u00e9 \u0100 \u2022", MB_MAX_NAME),
+              "\u00d7 \u00df \u00e9 \u0100 \u2022");
+    CHECK_STR(normal("a\u00c3", MB_MAX_NAME), "a\u00e3");               /* c3 83 */
+    CHECK_STR(normal("\xc3", MB_MAX_NAME), "\xc3");                    /* cut short */
+    CHECK_STR(normal("\u00c9", 3), "\u00e9");                          /* 2 bytes + NUL */
+    CHECK_STR(normal("\u00c9", 2), "error");
+    /* empty, only punctuation */
+    CHECK_STR(normal("", MB_MAX_NAME), "");
+    CHECK_STR(normal(" .-! ", MB_MAX_NAME), "");
+    /* the room: "abc" needs 4 bytes */
+    CHECK_STR(normal("abc", 4), "abc");
+    CHECK_STR(normal("abc", 3), "error");
+    CHECK_STR(normal("a b", 3), "error");
+    CHECK_STR(normal("a!!", 2), "a");
+}
+
+/* The search path for album by artist, or "error". */
+static const char *search_path(const char *album, const char *artist, size_t size)
+{
+    static char out[MB_MAX_QUERY];
+    return mb_search_path(album, artist, out, size) == 0 ? out : "error";
+}
+
+static void test_search_path(void)
+{
+    CHECK_STR(search_path("OK Computer", "Radiohead", MB_MAX_QUERY),
+              "release/?query=release%3A%22OK%20Computer%22%20AND%20artist%3A%22Radiohead%22"
+              "&limit=25&fmt=json");
+    /* quotes and backslashes escaped, & and ? encoded */
+    CHECK_STR(search_path("a\"b\\c", "x&y?", MB_MAX_QUERY),
+              "release/?query=release%3A%22a%5C%22b%5C%5Cc%22%20AND%20artist%3A%22x%26y%3F%22"
+              "&limit=25&fmt=json");
+    CHECK_STR(search_path("", "", MB_MAX_QUERY),
+              "release/?query=release%3A%22%22%20AND%20artist%3A%22%22&limit=25&fmt=json");
+    /* the longest names a tag holds fit, even all quotes */
+    char longest[TAGS_MAX_VALUE + 1];
+    memset(longest, '"', TAGS_MAX_VALUE);
+    longest[TAGS_MAX_VALUE] = '\0';
+    CHECK(strcmp(search_path(longest, longest, MB_MAX_QUERY), "error") != 0);
+    /* out of room */
+    const char *whole = search_path("a", "b", MB_MAX_QUERY);
+    size_t len = strlen(whole);
+    CHECK(strcmp(search_path("a", "b", len + 1), "error") != 0);
+    CHECK_STR(search_path("a", "b", len), "error");
+}
+
+/* The release picked from search for album by artist, or "-". */
+static const char *picked(const char *json, const char *album, const char *artist)
+{
+    static char out[MB_ID_LEN + 1];
+    cJSON *obj = cJSON_Parse(json);
+    const char *id = obj != NULL ? mb_pick_release(obj, album, artist) : "bad json";
+    snprintf(out, sizeof out, "%s", id != NULL ? id : "-");
+    cJSON_Delete(obj);
+    return out;
+}
+
+#define REL(id, title, status, credit) \
+    "{\"id\":\"" id "\",\"title\":\"" title "\",\"status\":\"" status "\",\"artist-credit\":" credit "}"
+#define BY(name) "[{\"name\":\"" name "\"}]"
+
+static void test_pick(void)
+{
+    /* the same names, normalised */
+    CHECK_STR(picked("{\"releases\":[" REL(ID1, "OK COMPUTER", "Official", BY("Radiohead")) "]}",
+                     "OK Computer", "Radiohead"), ID1);
+    CHECK_STR(picked("{\"releases\":[" REL(ID1, "Doolittle", "Official", BY("Pixies")) "]}",
+                     "Doolittle", "The Pixies"), ID1);
+    /* an Official one before an earlier other */
+    CHECK_STR(picked("{\"releases\":[" REL(ID2, "A", "Bootleg", BY("B")) ","
+                     REL(ID1, "A", "Official", BY("B")) "]}", "A", "B"), ID1);
+    /* else the first with the same names */
+    CHECK_STR(picked("{\"releases\":[" REL(ID2, "A", "Promotion", BY("B")) ","
+                     REL(ID1, "A", "Bootleg", BY("B")) "]}", "A", "B"), ID2);
+    /* names that differ: never taken, even a single result */
+    CHECK_STR(picked("{\"releases\":[" REL(ID1, "A (Deluxe)", "Official", BY("B")) "]}", "A", "B"),
+              "-");
+    CHECK_STR(picked("{\"releases\":[" REL(ID1, "A", "Official", BY("C")) "]}", "A", "B"), "-");
+    /* the whole credit: names and join phrases */
+    CHECK_STR(picked("{\"releases\":[" REL(ID1, "A", "Official",
+                     "[{\"name\":\"Simon\",\"joinphrase\":\" & \"},{\"name\":\"Garfunkel\"}]")
+                     "]}", "A", "Simon & Garfunkel"), ID1);
+    CHECK_STR(picked("{\"releases\":[" REL(ID1, "A", "Official",
+                     "[{\"name\":\"Simon\",\"joinphrase\":\" & \"},{\"name\":\"Garfunkel\"}]")
+                     "]}", "A", "Simon"), "-");
+    /* not an id, no title, no credit, a credit without a name */
+    CHECK_STR(picked("{\"releases\":[" REL("123456", "A", "Official", BY("B")) "]}", "A", "B"), "-");
+    CHECK_STR(picked("{\"releases\":[{\"id\":\"" ID1 "\",\"artist-credit\":" BY("B") "}]}",
+                     "A", "B"), "-");
+    CHECK_STR(picked("{\"releases\":[{\"id\":\"" ID1 "\",\"title\":\"A\"}]}", "A", "B"), "-");
+    CHECK_STR(picked("{\"releases\":[" REL(ID1, "A", "Official", "[]") "]}", "A", "B"), "-");
+    CHECK_STR(picked("{\"releases\":[" REL(ID1, "A", "Official", "[{\"name\":1}]") "]}", "A", "B"),
+              "-");
+    /* no status is not Official, but may be the first */
+    CHECK_STR(picked("{\"releases\":[{\"id\":\"" ID1 "\",\"title\":\"A\",\"artist-credit\":"
+                     BY("B") "}]}", "A", "B"), ID1);
+    /* nothing found */
+    CHECK_STR(picked("{\"releases\":[]}", "A", "B"), "-");
+    CHECK_STR(picked("{}", "A", "B"), "-");
+    CHECK_STR(picked("{\"releases\":{}}", "A", "B"), "-");
+    /* only the first 25 are read */
+    static char many[8192];
+    size_t len = (size_t)snprintf(many, sizeof many, "{\"releases\":[");
+    for (int i = 0; i < 25; i++)
+        len += (size_t)snprintf(many + len, sizeof many - len, REL(ID2, "X", "Official", BY("B")) ",");
+    snprintf(many + len, sizeof many - len, REL(ID1, "A", "Official", BY("B")) "]}");
+    CHECK_STR(picked(many, "A", "B"), "-");
+}
+
 /* Runs sql on the music database; 0 or -1. */
 static int run(const char *sql)
 {
     return sqlite3_exec(music_db, sql, NULL, NULL, NULL) == SQLITE_OK ? 0 : -1;
 }
 
-/* A track of album (by albumartist "A") with mbid (NULL: none). Its id. */
-static long long track(const char *album, const char *mbid)
+/* A track of album by artist (NULL: none) with mbid (NULL: none). Its id. */
+static long long track_by(const char *album, const char *artist, const char *mbid)
 {
     static int next;
     char path[64];
     snprintf(path, sizeof path, "/m/%d.flac", ++next);
     sqlite3_stmt *st = db_prepare(music_db,
         "INSERT INTO tracks (path, size, ext, scanned, album, albumartist, musicbrainz_albumid)"
-        " VALUES (?, 1, 'flac', 1, ?, 'A', ?)");
+        " VALUES (?, 1, 'flac', 1, ?, ?, ?)");
     long long id = st != NULL && sqlite3_bind_text(st, 1, path, -1, SQLITE_TRANSIENT) == SQLITE_OK &&
                            sqlite3_bind_text(st, 2, album, -1, SQLITE_STATIC) == SQLITE_OK &&
-                           sqlite3_bind_text(st, 3, mbid, -1, SQLITE_STATIC) == SQLITE_OK &&
+                           sqlite3_bind_text(st, 3, artist, -1, SQLITE_STATIC) == SQLITE_OK &&
+                           sqlite3_bind_text(st, 4, mbid, -1, SQLITE_STATIC) == SQLITE_OK &&
                            sqlite3_step(st) == SQLITE_DONE
                        ? sqlite3_last_insert_rowid(music_db)
                        : -1;
     sqlite3_finalize(st);
     return id;
+}
+
+/* A track of album by "A" with mbid (NULL: none). Its id. */
+static long long track(const char *album, const char *mbid)
+{
+    return track_by(album, "A", mbid);
 }
 
 /* Runs sql with %lld replaced by id. */
@@ -300,6 +444,111 @@ static void test_albums(void)
     unlink(path);
 }
 
+/* The albums mb_next_unidentified(max) gives, as "artist/album:tracks"
+ * joined by " ". */
+static const char *unidentified(int max)
+{
+    static char out[512];
+    struct mb_album a[MB_ALBUMS];
+    int n = mb_next_unidentified(a, max);
+    out[0] = '\0';
+    for (int i = 0; i < n; i++) {
+        size_t len = strlen(out);
+        snprintf(out + len, sizeof out - len, "%s%s/%s:%zu", i > 0 ? " " : "", a[i].albumartist,
+                 a[i].album, a[i].ntracks);
+    }
+    return n < 0 ? "error" : out;
+}
+
+/* The pending MusicBrainz album id of track id, or "-". */
+static const char *pending_id(long long id)
+{
+    static char out[64];
+    sqlite3_stmt *st = db_prepare(music_db,
+        "SELECT value FROM changes WHERE state = 'pending' AND field = 'musicbrainz_albumid'"
+        " AND track_id = ?");
+    snprintf(out, sizeof out, "-");
+    if (st != NULL && sqlite3_bind_int64(st, 1, id) == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW)
+        snprintf(out, sizeof out, "%s", (const char *)sqlite3_column_text(st, 0));
+    sqlite3_finalize(st);
+    return out;
+}
+
+static void test_unidentified(void)
+{
+    char path[64];
+    snprintf(path, sizeof path, "%s/ids.db", dir);
+    music_db = db_open(path, music_migrations, music_migration_count);
+    CHECK(music_db != NULL);
+    CHECK_STR(unidentified(MB_ALBUMS), "");                       /* empty library */
+
+    long long u1 = track("u1", NULL), u1b = track("u1", NULL);    /* no id */
+    track("u2", NULL);                                            /* one has an id */
+    track("u2", ID1);
+    track("u3", "123456");                                        /* not an id */
+    track("u3", "F2C9C0F4-9C9B-4A7B-8F3A-1234567890AB");
+    track_by("u4", NULL, NULL);                                   /* no album artist */
+    track_by(NULL, "A", NULL);                                    /* no album */
+    long long u5 = track("old", NULL);                            /* album renamed */
+    long long u6 = track("u6", NULL);                             /* id planned */
+    long long u7 = track("u7", ID2);                              /* id removed */
+    track("u8", NULL);                                            /* unsure before */
+    track("u9", NULL);                                            /* failed before */
+    track_by("u8", "b", NULL);                                    /* other names */
+    track("u10", "");                                             /* empty id */
+    CHECK(run_id("INSERT INTO changes (batch, track_id, field, value)"
+                 " VALUES (1, %lld, 'album', 'u5')", u5) == 0);
+    CHECK(run_id("INSERT INTO changes (batch, track_id, field, value) VALUES (1, %lld,"
+                 " 'musicbrainz_albumid', '" ID1 "')", u6) == 0);
+    CHECK(run_id("INSERT INTO changes (batch, track_id, field, value)"
+                 " VALUES (1, %lld, 'musicbrainz_albumid', '')", u7) == 0);
+    CHECK(run("INSERT INTO musicbrainz_searches (track, album, albumartist, state) VALUES"
+              " (1, 'u8', 'A', 'unsure'), (1, 'u9', 'A', 'failed'), (1, 'u9', 'A', 'skipped')")
+          == 0);
+    CHECK_STR(unidentified(MB_ALBUMS), "A/u1:2 A/u10:1 A/u3:2 A/u5:1 A/u7:1 A/u9:1 b/u8:1");
+    CHECK_STR(unidentified(2), "A/u1:2 A/u10:1");
+    CHECK_STR(unidentified(1), "A/u1:2");
+
+    /* queueing: the tracks still without a valid id */
+    struct mb_album a[MB_ALBUMS];
+    CHECK(mb_next_unidentified(a, MB_ALBUMS) == 7);
+    CHECK(run_id("UPDATE tracks SET musicbrainz_albumid = '" ID2 "' WHERE id = %lld", u1b) == 0);
+    CHECK(mb_queue_id(&a[0], ID1, 9) == 1);                       /* u1b got one meanwhile */
+    CHECK_STR(pending_id(u1), ID1);
+    CHECK_STR(pending_id(u1b), "-");
+    CHECK(mb_queue_id(&a[0], ID2, 9) == 0);                       /* now u1 has one */
+    CHECK(mb_queue_id(&a[4], ID1, 9) == 1);                       /* the pending '' replaced */
+    CHECK_STR(pending_id(u7), ID1);
+
+    /* recording: an answered search is not asked again by these names */
+    CHECK(mb_record_search(&a[1], "unsure", NULL, "3 releases found") == 0);
+    CHECK(mb_record_search(&a[2], "not_found", NULL, "") == 0);
+    CHECK(mb_record_search(&a[3], "failed", NULL, "MusicBrainz answered 500") == 0);
+    CHECK(mb_record_search(&a[5], "queued", ID2, "a release with these names") == 0);
+    CHECK_STR(unidentified(MB_ALBUMS), "A/u5:1 b/u8:1");          /* u1, u7 have ids now */
+    sqlite3_stmt *st = db_prepare(music_db,
+        "SELECT track, album, albumartist, state, mbid, note FROM musicbrainz_searches"
+        " ORDER BY id DESC LIMIT 1");
+    CHECK(st != NULL && sqlite3_step(st) == SQLITE_ROW);
+    CHECK(sqlite3_column_int64(st, 0) == a[5].tracks[0]);
+    CHECK_STR((const char *)sqlite3_column_text(st, 1), "u9");
+    CHECK_STR((const char *)sqlite3_column_text(st, 2), "A");
+    CHECK_STR((const char *)sqlite3_column_text(st, 3), "queued");
+    CHECK_STR((const char *)sqlite3_column_text(st, 4), ID2);
+    CHECK_STR((const char *)sqlite3_column_text(st, 5), "a release with these names");
+    sqlite3_finalize(st);
+    CHECK(mb_record_search(&a[3], "unknown", NULL, "") == -1);    /* the table's states only */
+    CHECK(mb_record_search(&a[3], "queued", "123456", "") == -1); /* an id or nothing */
+
+    /* u5 is searched by its planned name */
+    CHECK_STR(a[3].album, "u5");
+    CHECK_STR(a[3].mbid, "");
+
+    sqlite3_close(music_db);
+    music_db = NULL;
+    unlink(path);
+}
+
 int main(void)
 {
     if (arena_init(1024 * 1024) != 0 || mkdtemp(dir) == NULL)
@@ -310,7 +559,11 @@ int main(void)
     test_language();
     test_add_genre();
     test_release_group();
+    test_normalize();
+    test_search_path();
+    test_pick();
     test_albums();
+    test_unidentified();
     CHECK(rmdir(dir) == 0);
     TEST_DONE();
 }
