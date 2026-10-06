@@ -1164,6 +1164,17 @@ async function albumPage(id) {
   const albumLine = el("tr", { class: "album-line" },
     ...TRACK_COLUMNS.map((f) => {
       if (f === "title") return el("th", { scope: "row", class: "col-title" }, "All tracks");
+      if (f === "bpm") {
+        return el("td", { class: "col-bpm" }, el("button", {
+          type: "button", class: "btn mini", "data-key": "album:bpm",
+          disabled: readOnly || !tracks.some((t) => (planned(t, "bpm") ?? "") !== ""),
+          "aria-label": "Remove the BPM of every track",
+          onclick: () => attempt("BPM", async () => {
+            await queue({ album: id, set: { bpm: "" } });
+            await redraw("album:bpm");
+          }),
+        }, "Clear all"));
+      }
       if (PER_TRACK.includes(f)) return el("td", { class: `col-${f}` });
       const values = new Set(tracks.map((t) => JSON.stringify(planned(t, f) ?? null)));
       const mixed = values.size > 1;
