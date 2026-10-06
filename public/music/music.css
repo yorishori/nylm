@@ -172,17 +172,39 @@ td.col-cover.edited.differs .thumb { box-shadow: 0 0 0 2px var(--lavender), 0 0 
 
 /* ---- popups -------------------------------------------------------------- */
 
-.popover.floating {
+/* An editing popup: in the middle of the screen over the dimmed page,
+ * scrolling inside when taller than the screen. */
+.modal-backdrop {
   position: fixed;
-  top: auto;
-  left: auto;
-  min-width: min(20rem, calc(100vw - 1rem));
-  max-width: min(26rem, calc(100vw - 1rem));
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 0.5rem;
+  background: rgb(0 0 0 / 0.55);
+}
+.modal-backdrop > .popover.modal {
+  position: static;
+  width: min(26rem, 100%);
+  max-width: none;
+  max-height: calc(100dvh - 1rem);
+  overflow-y: auto;
   display: grid;
   gap: 0.6rem;
 }
 .suggestions { max-height: 12rem; }
 .suggestions:empty { display: none; }
+/* A table cell's suggestions, placed under (or over) its input. */
+.cell-suggestions {
+  position: fixed;
+  z-index: 10;
+  max-width: calc(100vw - 1rem);
+  padding: 0.4rem;
+  border-radius: 16px;
+  background: var(--panel);
+  border: 1px solid var(--edge);
+  box-shadow: 8px 8px 20px var(--shade);
+}
 
 /* An ordered list of values: each with up, down, remove. */
 .ordered { margin: 0; padding-left: 1.6rem; display: grid; gap: 0.3rem; }
@@ -217,14 +239,6 @@ td.col-cover.edited.differs .thumb { box-shadow: 0 0 0 2px var(--lavender), 0 0 
 .rules { margin: 0; padding-left: 1.2rem; display: grid; gap: 0.3rem; }
 
 @media (max-width: 21rem) {
-  /* The popup is a sheet along the bottom, like the other popovers. */
-  .popover.floating {
-    left: 0.5rem;
-    right: 0.5rem;
-    bottom: 0.5rem;
-    min-width: 0;
-    max-width: none;
-  }
   .grid { font-size: 0.8rem; }
   .grid .col-album, .grid .col-title { min-width: 9rem; }
 }

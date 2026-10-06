@@ -163,7 +163,10 @@ a value that differs from the rest of the album is ringed rose. Set
 cover reads a picture file in the browser, scales it to at most 1200
 pixels on a canvas and makes it a JPEG of at most 700 KiB, shows it, and
 queues it.
-Disc and track numbers are set in a popup, X first and Y worked out:
+Artist and album artist are typed in the cell, which lists the library's
+names holding what is typed: choosing one saves it, else what is typed is
+saved. Genres, composers and disc and track numbers are set in a popup in
+the middle of the screen. Disc and track numbers: X first and Y worked out:
 saving numbers the whole album again (Y per disc for track numbers; a
 missing X gets the lowest free number). Every edit is queued at once as
 one batch (`changes` table), and colours what will change. Changes: the

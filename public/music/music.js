@@ -35,7 +35,7 @@ const FIELDS = {
   discnumber: { label: "Disc", kind: "number", required: true },
   tracknumber: { label: "Track", kind: "number", required: true },
   title: { label: "Title", kind: "text", required: true },
-  artist: { label: "Artist", kind: "text", required: true },
+  artist: { label: "Artist", kind: "combo", required: true },
   album: { label: "Album", kind: "text", required: true },
   albumartist: { label: "Album artist", kind: "combo", required: true },
   date: { label: "Date", kind: "whole", required: true },
@@ -66,7 +66,7 @@ const MAX_BYTES = 500;
 const MAX_VALUES = 64;
 const MAX_SUGGESTIONS = 50;
 const SHOW_STEP = 200; /* albums shown at a time */
-const POPUP_ROOM = 320; /* pixels an editing popup may grow to */
+const SUGGEST_ROOM = 200; /* pixels a cell's suggestions need under it */
 const GENRE_SLICES = 12;  /* genres in the donut; the rest are "other" */
 const YEAR_BAR = 6;       /* pixels per year in the years chart */
 const GENRE_RE = /^[a-z0-9&/-]+( [a-z0-9&/-]+)*$/; /* words, one space between */
@@ -374,54 +374,42 @@ function knownValues(field) {
 }
 
 /*
- * A popup under anchor (fixed, so a scrolling table does not cut it off)
- * that closes on Escape or a press outside. onClose(refocus) is called
- * once. Returns {pop, close}.
+ * A popup in the middle of the screen over a dimmed page, so its buttons
+ * are never cut off. It closes on Escape or a press outside. onClose(refocus)
+ * is called once. Returns {pop, close}.
  */
-function floatingPopup(anchor, label, onClose) {
-  const pop = el("div", { class: "popover floating", role: "dialog", "aria-label": label });
-  const owner = { contains: (n) => pop.contains(n) || anchor.contains(n) };
+function modalPopup(label, onClose) {
+  const pop = el("div", { class: "popover floating modal", role: "dialog", "aria-modal": "true",
+                          "aria-label": label });
+  const backdrop = el("div", { class: "modal-backdrop" }, pop);
+  const owner = { contains: (n) => pop.contains(n) };
   let closed = false;
   const close = (refocus) => {
     if (closed) return;
     closed = true;
-    pop.remove();
+    backdrop.remove();
     popoverClosed(owner);
     onClose(refocus);
   };
-  document.body.append(pop);
-  if (!window.matchMedia("(max-width: 21rem)").matches) {
-    /* Positioned with the CSS object model: not an inline style attribute.
-     * Below the anchor, or above it (growing upwards) when it would not fit
-     * below and there is more room above. */
-    const r = anchor.getBoundingClientRect();
-    const below = window.innerHeight - r.bottom;
-    /* Its suggestions come later: plan for at least POPUP_ROOM pixels. */
-    const need = Math.max(pop.offsetHeight, POPUP_ROOM);
-    if (r.bottom + 6 + need > window.innerHeight - 8 && r.top > below) {
-      pop.style.bottom = `${Math.round(window.innerHeight - r.top + 6)}px`;
-    } else {
-      pop.style.top = `${Math.round(r.bottom + 6)}px`;
-    }
-    pop.style.left = `${Math.round(Math.max(8, Math.min(r.left,
-                                                        window.innerWidth - 8 - pop.offsetWidth)))}px`;
-  }
+  document.body.append(backdrop);
   popoverOpened(owner, pop, close);
   return { pop, close };
 }
 
 /*
- * A text input with suggestions from the library's values of field
- * (combobox). onPick(value) when one is chosen with Enter or a press;
- * exclude() lists values not to suggest. Returns {input, list}.
+ * Suggestions for input from the library's values of field (combobox):
+ * the values holding what is typed. onPick(value) when one is chosen with
+ * Enter or a press (Enter without a choice picks what is typed); exclude()
+ * lists values not to suggest. Returns the list; list.refresh() draws it
+ * again.
  */
-function suggestInput(field, label, onPick, exclude) {
-  const input = el("input", { placeholder: "Type or choose…", "aria-label": label,
-                              role: "combobox", "aria-autocomplete": "list",
-                              "aria-expanded": "false" });
+function suggest(input, field, onPick, exclude) {
   const listId = uniqueId("suggest");
   const list = el("ul", { class: "listbox suggestions", role: "listbox", id: listId,
                           "aria-label": "Suggestions" });
+  input.setAttribute("role", "combobox");
+  input.setAttribute("aria-autocomplete", "list");
+  input.setAttribute("aria-expanded", "false");
   input.setAttribute("aria-controls", listId);
   let known = [];
   let shown = [];
@@ -439,12 +427,13 @@ function suggestInput(field, label, onPick, exclude) {
       onpointerdown: (e) => e.preventDefault(), /* keep the focus in the input */
       onclick: () => onPick(v),
     }, v)));
-    input.setAttribute("aria-expanded", String(shown.length > 0));
+    input.setAttribute("aria-expanded", String(shown.length > 0 && list.isConnected));
     if (active >= 0) input.setAttribute("aria-activedescendant", `${listId}-${active}`);
     else input.removeAttribute("aria-activedescendant");
   }
   input.addEventListener("input", () => { active = -1; render(); });
   input.addEventListener("keydown", (e) => {
+    if (!list.isConnected) return; /* a cell's list that is closed */
     if (e.key === "ArrowDown" && shown.length) active = Math.min(active + 1, shown.length - 1);
     else if (e.key === "ArrowUp" && shown.length) active = Math.max(active - 1, -1);
     else if (e.key === "Enter") onPick(active >= 0 ? shown[active] : input.value);
@@ -452,12 +441,62 @@ function suggestInput(field, label, onPick, exclude) {
     e.preventDefault();
     render();
   });
-  input.refresh = () => { active = -1; render(); };
+  list.refresh = () => { active = -1; render(); };
   knownValues(field).then((values) => {
     known = values;
     render();
   }).catch(handleError);
-  return { input, list };
+  return list;
+}
+
+/* A text input with suggestions under it, inside a popup. Returns {input, list}. */
+function suggestInput(field, label, onPick, exclude) {
+  const input = el("input", { placeholder: "Type or choose…", "aria-label": label });
+  return { input, list: suggest(input, field, onPick, exclude) };
+}
+
+/*
+ * Suggestions for a table cell's input (artist, album artist): from the
+ * first key typed, the matching values in a list under the input (fixed,
+ * so a scrolling table does not cut it off), or over it when there is
+ * more room there. pick(value) when one is chosen.
+ */
+function cellSuggestions(input, field, pick) {
+  let list = null;
+  const owner = { contains: (n) => input.contains(n) || (list !== null && list.contains(n)) };
+  const close = () => {
+    if (list === null || !list.isConnected) return;
+    list.remove();
+    input.setAttribute("aria-expanded", "false");
+    popoverClosed(owner);
+  };
+  input.addEventListener("input", () => {
+    if (list === null) {
+      list = suggest(input, field, (v) => {
+        close();
+        pick(v);
+      });
+      list.classList.add("floating", "cell-suggestions");
+    }
+    if (!list.isConnected) {
+      document.body.append(list);
+      popoverOpened(owner, list, close);
+    }
+    list.refresh();
+    /* Positioned with the CSS object model: not an inline style attribute. */
+    const r = input.getBoundingClientRect();
+    const below = window.innerHeight - r.bottom;
+    list.style.top = list.style.bottom = "";
+    if (below < SUGGEST_ROOM && r.top > below) {
+      list.style.bottom = `${Math.round(window.innerHeight - r.top + 4)}px`;
+    } else {
+      list.style.top = `${Math.round(r.bottom + 4)}px`;
+    }
+    list.style.minWidth = `${Math.round(r.width)}px`;
+    list.style.left = `${Math.round(Math.max(8, Math.min(r.left,
+                                                         window.innerWidth - 8 - list.offsetWidth)))}px`;
+  });
+  input.addEventListener("blur", close);
 }
 
 /* Save and Cancel for a popup. */
@@ -467,37 +506,15 @@ function popupActions(save, close) {
     el("button", { class: "btn", type: "button", onclick: () => close(true) }, "Cancel"));
 }
 
-/* One value from the library's values or typed in (album artist).
- * onSave(value) resolves true when queued. */
-function comboEditor(anchor, { field, value, onSave, onDone }) {
-  const spec = FIELDS[field];
-  const { pop, close } = floatingPopup(anchor, spec.label, onDone);
-  const error = el("p", { class: "form-error", role: "alert" });
-  const save = async (v) => {
-    const why = problem(field, v);
-    if (why) {
-      error.textContent = `${spec.label} ${why}.`;
-      return;
-    }
-    if (v === value || (await onSave(v))) close(true);
-  };
-  const { input, list } = suggestInput(field, spec.label, save);
-  input.value = value ?? "";
-  pop.append(el("strong", {}, spec.label), input, list, error,
-             popupActions(() => save(input.value), close));
-  input.focus();
-  input.select();
-}
-
 /*
  * An ordered list of values (genres, composers): reorder, remove, add from
  * the library's values or typed in. onSave(list) resolves true when queued.
  */
-function listEditor(anchor, { field, values, mixed, onSave, onDone }) {
+function listEditor({ field, values, mixed, onSave, onDone }) {
   const spec = FIELDS[field];
   let chosen = [...values];
   let touched = false;
-  const { pop, close } = floatingPopup(anchor, spec.label, onDone);
+  const { pop, close } = modalPopup(spec.label, onDone);
   const items = el("ol", { class: "ordered", "aria-label": `${spec.label} in order` });
   const error = el("p", { class: "form-error", role: "alert" });
 
@@ -519,7 +536,7 @@ function listEditor(anchor, { field, values, mixed, onSave, onDone }) {
     if (!chosen.length) {
       items.append(el("li", { class: "muted" }, mixed && !touched ? "Differs between tracks" : "None"));
     }
-    if (input.refresh) input.refresh();
+    list.refresh();
   }
   const add = (v) => {
     const why = v === "" ? "Type a value first." : problem(field, [...chosen, v]);
@@ -558,9 +575,9 @@ function listEditor(anchor, { field, values, mixed, onSave, onDone }) {
 
 /* Disc or track number X/Y: X first, Y worked out but changeable.
  * onSave(x, y) resolves true when queued. */
-function numberEditor(anchor, { field, x, y, onSave, onDone }) {
+function numberEditor({ field, x, y, onSave, onDone }) {
   const spec = FIELDS[field];
-  const { pop, close } = floatingPopup(anchor, spec.label, onDone);
+  const { pop, close } = modalPopup(spec.label, onDone);
   const number = (value, label) => el("input", { type: "number", min: "1", max: "9999", step: "1",
                                                  inputmode: "numeric", value, "aria-label": label });
   const xs = number(x ?? "", spec.label);
@@ -645,7 +662,7 @@ function editCell({ field, value, mixed, marks, key, disabled, save, number, sum
   const run = (v) => attempt(label, save, v);
   const shown = mixed ? "mixed" : summary ? summary(value) : showValue(field, value);
 
-  if (spec.kind === "text" || spec.kind === "whole") {
+  if (spec.kind === "text" || spec.kind === "whole" || spec.kind === "combo") {
     const whole = spec.kind === "whole";
     const input = el("input", {
       class: "cell-input", "data-key": key, disabled, value: mixed ? "" : value ?? "",
@@ -653,14 +670,9 @@ function editCell({ field, value, mixed, marks, key, disabled, save, number, sum
       ...(whole ? { type: "number", min: "1", max: "9999", step: "1", inputmode: "numeric" } : {}),
     });
     const initial = input.value;
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") {
-        input.value = initial;
-        input.blur();
-      }
-    });
-    input.addEventListener("change", async () => {
-      const v = input.value;
+    let saving = false;
+    const commit = async (v) => {
+      if (saving || v === initial) return;
       if (mixed && v === "") return; /* nothing typed for differing tracks: keep each */
       const why = problem(field, v);
       if (why) {
@@ -668,12 +680,27 @@ function editCell({ field, value, mixed, marks, key, disabled, save, number, sum
         input.value = initial;
         return;
       }
+      saving = true;
       input.disabled = true;
       if (!(await run(v))) {
         input.value = initial;
         input.disabled = false;
+        saving = false;
+      }
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        input.value = initial;
+        input.blur();
       }
     });
+    input.addEventListener("change", () => commit(input.value));
+    if (spec.kind === "combo") {
+      cellSuggestions(input, field, (v) => {
+        input.value = v;
+        commit(v);
+      });
+    }
     td.append(input);
     return td;
   }
@@ -697,12 +724,10 @@ function editCell({ field, value, mixed, marks, key, disabled, save, number, sum
       if (refocus && button.isConnected) button.focus();
     };
     if (spec.kind === "list") {
-      listEditor(button, { field, values: mixed ? [] : value || [], mixed, onSave: run, onDone });
-    } else if (spec.kind === "combo") {
-      comboEditor(button, { field, value: mixed ? "" : value, onSave: run, onDone });
+      listEditor({ field, values: mixed ? [] : value || [], mixed, onSave: run, onDone });
     } else {
-      numberEditor(button, { field, x: number.x, y: number.y,
-                             onSave: (x, y) => attempt(label, () => number.save(x, y)), onDone });
+      numberEditor({ field, x: number.x, y: number.y,
+                     onSave: (x, y) => attempt(label, () => number.save(x, y)), onDone });
     }
   });
   td.append(button);
@@ -1635,7 +1660,7 @@ async function changeName(path, body) {
 /* A popup for v's new name, the library's names suggested. */
 function renameEditor(anchor, field, v) {
   const spec = FIELDS[field];
-  const { pop, close } = floatingPopup(anchor, `Rename ${v.name}`, (again) => {
+  const { pop, close } = modalPopup(`Rename ${v.name}`, (again) => {
     if (again && anchor.isConnected) anchor.focus();
   });
   const error = el("p", { class: "form-error", role: "alert" });
