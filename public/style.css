@@ -494,7 +494,6 @@ legend { padding: 0; }
   .split > .side { position: sticky; top: 1rem; }
   .side.first { order: 0; }
   .split .list.cols { grid-template-columns: 1fr; }
-  .tabs { max-width: 40rem; }
 }
 
 /* ---- small: 3-inch phones ------------------------------------------------ */
