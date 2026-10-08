@@ -173,9 +173,10 @@ missing X gets the lowest free number). Every edit is queued at once as
 one batch (`changes` table), and colours what will change. Changes: the
 pending changes by album, then track, each opening on its own (those of tracks a scan removed in
 one group), a search over every field, Discard for an album, a track or
-all, and Write; a track whose changes the write would refuse (another tag
-breaks a rule, after the write's own fixes such as the disc number) is
-marked ⚠, a button to its album. Names (`GET /api/music/names?field=`, by
+all, and Write; a change the write would refuse (its tag breaks a rule,
+after the write's own fixes such as the disc number) is marked ⚠ with
+why, and its track has ⚠, a button to its album: a track's changes are
+written together, so none of them is written. Names (`GET /api/music/names?field=`, by
 the planned tags, at most 20000): every artist, album artist, composer or
 genre with how many tracks and albums have it, by name or by count, with a
 search; one opens on its albums (`&name=`, each a button to it), Rename
@@ -225,12 +226,15 @@ The write service, per track, only through TagLib (`src/tags.c`): applies
 the track's pending changes to the cached tags; mirrors TITLESORT,
 ALBUMSORT, ARTISTSORT, ALBUMARTISTSORT and COMPOSERSORT (the composers
 joined by `"; "`) from the tags that change, cutting them to 500 bytes;
-sets a missing or invalid disc number to `1/1`; checks every tag against
-the rules; checks that the file still has the cached tags; writes what
-differs and reads the file back. Each change ends `done`, `warning` (done,
-and what nylm also changed, e.g. the disc number) or `failed` (with the
-cause: an invalid tag, a file changed since the scan, a file that does not
-read back as written).
+sets a missing or invalid disc number to `1/1`; checks the tags it sets
+against the rules (those the changes set, and those it changes itself:
+the sort tags, the disc number), not the track's others, which stay as
+they are, valid or not; checks that the file still has the cached tags;
+writes what differs and reads the file back. A track's changes are
+written together: when one fails, they all do. Each change ends `done`,
+`warning` (done, and what nylm also changed, e.g. the disc number) or
+`failed` (with the cause: an invalid tag, a file changed since the scan, a
+file that does not read back as written).
 
 The naming rule, from the cached tags: `ALBUMARTIST/ALBUM/NN - TITLE.ext`
 below the music folder, or `D-NN - TITLE.ext` when the disc total is more

@@ -1175,29 +1175,30 @@ static int load_cover(struct tags *want, char *note, size_t size)
     return 0;
 }
 
-/* Lists in note what is wrong with want ("DATE is required; ..."). 1 if
- * anything is. */
-static int check_all(const struct tags *want, char *note, size_t size)
+/* Lists in note what is wrong with the tags a write of want over now
+ * would set (tags_check_written(); the others are not checked): "DATE is
+ * required; ...". 1 if anything is. */
+static int check_written(const struct tags *now, const struct tags *want, unsigned changed,
+                         char *note, size_t size)
 {
-    int bad = 0;
+    unsigned bad = tags_check_written(now, want, changed);
     for (int i = 0; i < TAG_FIELDS; i++) {
-        const char *why = tags_check((enum tag_field)i, &want->value[i]);
-        if (why == NULL)
+        if (!(bad & (1u << i)))
             continue;
         size_t len = strlen(note);
         if (len < size)
-            snprintf(note + len, size - len, "%s%s %s", bad ? "; " : "not written: ",
-                     tags_key[i], why);
-        bad = 1;
+            snprintf(note + len, size - len, "%s%s %s", len > 0 ? "; " : "not written: ",
+                     tags_key[i], tags_check((enum tag_field)i, &want->value[i]));
     }
-    return bad;
+    return bad != 0;
 }
 
 /*
  * Writes one track's pending changes (all at once) and records the result:
  * failed with the reason if the file no longer matches the cache, or a tag
- * would be invalid; done, or warning (what nylm also changed, e.g. a disc
- * number set to 1/1); failed if the file does not read back as written.
+ * the write sets would be invalid (the track's other tags are not checked);
+ * done, or warning (what nylm also changed, e.g. a disc number set to
+ * 1/1); failed if the file does not read back as written.
  * Then reads the file back into the cache. 0, or -1 on a database error
  * (the service stops).
  */
@@ -1225,7 +1226,7 @@ static int write_track(struct scan *s, long long track_id, struct write_counts *
         ; /* note says why */
     else if (tags_prepare(&want, changed, warning, sizeof warning) != 0)
         snprintf(note, sizeof note, "not written: out of memory");
-    else if (!check_all(&want, note, sizeof note)) {
+    else if (!check_written(&now, &want, changed, note, sizeof note)) {
         result = tags_write(path, &now, &want, note, sizeof note);
         if (result == TAGS_WRITTEN) {
             state = warning[0] != '\0' ? "warning" : "done";

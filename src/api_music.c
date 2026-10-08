@@ -794,11 +794,29 @@ void music_charts(struct request *req, struct response *res)
     " ELSE (SELECT json_group_array(value ORDER BY position) FROM track_values v"       \
     "  WHERE v.track_id = t.id AND v.field = c.field) END"
 
+/* The id of the change to field in the run of listed changes that starts
+ * at c (all of one track), or -1 when it is not listed. */
+static long long change_of(const cJSON *c, long long track, const char *field)
+{
+    for (; c != NULL; c = c->next) {
+        const cJSON *t = cJSON_GetObjectItemCaseSensitive(c, "track");
+        if (!cJSON_IsNumber(t) || (long long)t->valuedouble != track)
+            break;
+        const cJSON *f = cJSON_GetObjectItemCaseSensitive(c, "field");
+        const cJSON *id = cJSON_GetObjectItemCaseSensitive(c, "id");
+        if (cJSON_IsString(f) && strcmp(f->valuestring, field) == 0 && cJSON_IsNumber(id))
+            return (long long)id->valuedouble;
+    }
+    return -1;
+}
+
 /*
- * Adds to blocked a {track, fields} for each track in pending (the listed
- * changes, by track) whose changes the write service would refuse: its
- * planned tags, made ready as it does (tags_prepare()), break a rule
- * (tags_check()) in fields. 0 or -1 (logged).
+ * Adds to blocked a {change, track, field, why} for each tag that keeps
+ * the write service from writing a track in pending (the listed changes,
+ * by track): one it would set (tags_check_written(), on the planned tags
+ * made ready as it does, tags_prepare()) that breaks a rule, why says
+ * which. change is the change to that tag, null when no listed change
+ * sets it. The track's other tags are not checked. 0 or -1 (logged).
  */
 static int add_blocked(cJSON *blocked, const cJSON *pending)
 {
@@ -816,26 +834,41 @@ static int add_blocked(cJSON *blocked, const cJSON *pending)
             continue; /* removed by a scan, or done */
         long long id = last = (long long)track->valuedouble;
         int rc = sqlite3_bind_int64(st, 1, id) == SQLITE_OK ? sqlite3_step(st) : SQLITE_ERROR;
+        /* The tags are only needed until why is known (tags_check() gives
+         * constant strings): the reply is built after the rewind, as it
+         * is in the arena too. */
         size_t mark = arena_mark();
-        struct tags t;
+        struct tags now, t;
         unsigned changed, bad = 0;
+        const char *why[TAG_FIELDS];
         char note[TAGS_MAX_NOTE] = "";
-        ok = rc == SQLITE_ROW && planned_tags(st, 0, id, changes, &t, &changed) == 0 &&
+        ok = rc == SQLITE_ROW && music_track_tags(st, 0, &now) == 0 &&
+             planned_tags(st, 0, id, changes, &t, &changed) == 0 &&
              tags_prepare(&t, changed, note, sizeof note) == 0;
-        for (int f = 0; ok && f < TAG_FIELDS; f++)
-            bad |= tags_check((enum tag_field)f, &t.value[f]) != NULL ? 1u << f : 0;
+        if (ok)
+            bad = tags_check_written(&now, &t, changed);
+        for (int f = 0; f < TAG_FIELDS; f++)
+            why[f] = bad & (1u << f) ? tags_check((enum tag_field)f, &t.value[f]) : NULL;
         arena_rewind(mark);
         sqlite3_reset(st);
         if (!ok) {
             fprintf(stderr, "music: track %lld: can not check its pending changes\n", id);
             break;
         }
-        if (bad == 0)
-            continue;
-        cJSON *o = cJSON_CreateObject();
-        ok = o != NULL && cJSON_AddItemToArray(blocked, o) &&
-             cJSON_AddNumberToObject(o, "track", (double)id) != NULL &&
-             add_field_names(o, "fields", bad) != NULL;
+        for (int f = 0; ok && f < TAG_FIELDS; f++) {
+            if (why[f] == NULL)
+                continue;
+            long long change = change_of(c, id, tags_name[f]);
+            cJSON *o = cJSON_CreateObject();
+            ok = o != NULL && cJSON_AddItemToArray(blocked, o) &&
+                 (change >= 0 ? cJSON_AddNumberToObject(o, "change", (double)change)
+                              : cJSON_AddNullToObject(o, "change")) != NULL &&
+                 cJSON_AddNumberToObject(o, "track", (double)id) != NULL &&
+                 cJSON_AddStringToObject(o, "field", tags_name[f]) != NULL &&
+                 cJSON_AddStringToObject(o, "why", why[f]) != NULL;
+            if (!ok)
+                fprintf(stderr, "music: track %lld: out of memory listing what blocks it\n", id);
+        }
     }
     sqlite3_finalize(st);
     sqlite3_finalize(changes);
@@ -845,11 +878,11 @@ static int add_blocked(cJSON *blocked, const cJSON *pending)
 /*
  * GET /api/music/changes: the pending changes (at most 5000, by album (the
  * files' album and album artist), track and change; now is the file's
- * value), how many there are, the listed tracks the write service would
- * refuse (add_blocked()), and the latest written ones (done, warning,
- * failed) with their notes and the track's album, album artist and title
- * now. track and path are null when a scan removed the track. Genre and
- * composer values are JSON arrays.
+ * value), how many there are, the tags that keep the write service from
+ * writing a listed track, each with its change (add_blocked()), and the
+ * latest written ones (done, warning, failed) with their notes and the
+ * track's album, album artist and title now. track and path are null when
+ * a scan removed the track. Genre and composer values are JSON arrays.
  */
 void music_changes(struct request *req, struct response *res)
 {
