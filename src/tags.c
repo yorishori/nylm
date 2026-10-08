@@ -244,6 +244,18 @@ const char *tags_check(enum tag_field f, const struct tag_values *v)
     return NULL;
 }
 
+unsigned tags_check_written(const struct tags *now, const struct tags *want, unsigned changed)
+{
+    unsigned bad = 0;
+    for (int i = 0; i < TAG_FIELDS; i++) {
+        enum tag_field f = (enum tag_field)i;
+        int written = (changed & (1u << i)) || !tags_equal(&now->value[i], &want->value[i]);
+        if (written && tags_check(f, &want->value[i]) != NULL)
+            bad |= 1u << i;
+    }
+    return bad;
+}
+
 /* Adds s to out unless it holds it already. */
 static void add_once(struct tag_values *out, const char *s)
 {

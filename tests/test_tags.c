@@ -302,6 +302,81 @@ static void test_prepare(void)
     CHECK(strstr(note, "COMPOSERSORT cut to 500 bytes") != NULL);
 }
 
+static void test_check_written(void)
+{
+    struct tags now, want;
+    const char *bad_genres[] = { "Rock", "pop" };
+
+    /* a track whose other tags break the rules: only the written ones count */
+    memset(&now, 0, sizeof now);
+    now.value[TAG_TITLE] = one("Title");
+    now.value[TAG_DATE] = one("abc");
+    now.value[TAG_TRACKNUMBER] = one("0/0");
+    now.value[TAG_GENRE] = (struct tag_values){ 2, bad_genres };
+    /* COMPOSER, ALBUM, ... are missing */
+    want = now;
+    CHECK(tags_check_written(&now, &want, 0) == 0); /* nothing written */
+    want.value[TAG_BPM] = one("120");
+    CHECK(tags_check_written(&now, &want, 1u << TAG_BPM) == 0);
+    want.value[TAG_TITLE] = one("New Title");
+    CHECK(tags_check_written(&now, &want, (1u << TAG_BPM) | (1u << TAG_TITLE)) == 0);
+
+    /* a change that breaks a rule */
+    want = now;
+    want.value[TAG_BPM] = one("fast");
+    CHECK(tags_check_written(&now, &want, 1u << TAG_BPM) == 1u << TAG_BPM);
+    /* ... with a valid one: only the bad one is named */
+    want.value[TAG_TITLE] = one("New Title");
+    CHECK(tags_check_written(&now, &want, (1u << TAG_BPM) | (1u << TAG_TITLE)) ==
+          1u << TAG_BPM);
+
+    /* a change that empties a required tag */
+    want = now;
+    want.value[TAG_TITLE] = one(NULL);
+    CHECK(tags_check_written(&now, &want, 1u << TAG_TITLE) == 1u << TAG_TITLE);
+    /* a change sets its tag even to the value it has: still checked */
+    want = now;
+    CHECK(tags_check_written(&now, &want, 1u << TAG_COMPOSER) == 1u << TAG_COMPOSER);
+    CHECK(tags_check_written(&now, &want, 1u << TAG_DATE) == 1u << TAG_DATE);
+    /* changing a list to one that still holds a bad value */
+    const char *still_bad[] = { "Rock", "jazz" };
+    want.value[TAG_GENRE] = (struct tag_values){ 2, still_bad };
+    CHECK(tags_check_written(&now, &want, 1u << TAG_GENRE) == 1u << TAG_GENRE);
+
+    /* a tag set without a change (a mirrored sort tag) is checked */
+    want = now;
+    want.value[TAG_TITLESORT] = one("Bad\x01Sort");
+    CHECK(tags_check_written(&now, &want, 0) == 1u << TAG_TITLESORT);
+    /* and one it leaves as it is is not, valid or not */
+    now.value[TAG_TITLESORT] = one("Bad\x01Sort");
+    want = now;
+    CHECK(tags_check_written(&now, &want, 1u << TAG_BPM) == 0);
+
+    /* boundaries: 500 bytes is the most a changed text may have */
+    static char max[TAGS_MAX_VALUE + 2];
+    memset(max, 'a', TAGS_MAX_VALUE);
+    max[TAGS_MAX_VALUE] = '\0';
+    want = now;
+    want.value[TAG_ALBUM] = one(max);
+    CHECK(tags_check_written(&now, &want, 1u << TAG_ALBUM) == 0);
+    static char over[TAGS_MAX_VALUE + 2];
+    memset(over, 'a', TAGS_MAX_VALUE + 1);
+    over[TAGS_MAX_VALUE + 1] = '\0';
+    want.value[TAG_ALBUM] = one(over);
+    CHECK(tags_check_written(&now, &want, 1u << TAG_ALBUM) == 1u << TAG_ALBUM);
+    /* an empty value in a list */
+    const char *with_empty[] = { "rock", "" };
+    want = now;
+    want.value[TAG_GENRE] = (struct tag_values){ 2, with_empty };
+    CHECK(tags_check_written(&now, &want, 1u << TAG_GENRE) == 1u << TAG_GENRE);
+    /* several bad tags at once */
+    want.value[TAG_DATE] = one("0");
+    want.value[TAG_ARTIST] = one(NULL);
+    CHECK(tags_check_written(&now, &want, (1u << TAG_GENRE) | (1u << TAG_DATE) |
+                                          (1u << TAG_ARTIST)) ==
+          ((1u << TAG_GENRE) | (1u << TAG_DATE) | (1u << TAG_ARTIST)));
+}
+
 /* Copies tests/data/name into the test folder as `as`; its path in out. */
 static void copy_fixture(const char *name, const char *as, char *out, size_t size)
 {
@@ -728,6 +803,7 @@ int main(void)
     test_check();
     test_split();
     test_prepare();
+    test_check_written();
     test_read();
     test_pictures();
     test_write();

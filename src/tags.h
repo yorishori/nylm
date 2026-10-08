@@ -132,6 +132,15 @@ int tags_same_pictures(const struct tags *a, const struct tags *b);
  */
 const char *tags_check(enum tag_field f, const struct tag_values *v);
 
+/*
+ * The tags a write of want over now would set that break a rule
+ * (tags_check()), as bits (1u << field); 0 when they are all valid. A
+ * tag is set when changed has its bit (a change sets it, even to the
+ * value it has) or its values differ from now's (e.g. a mirrored sort
+ * tag); the others stay as they are and are not checked.
+ */
+unsigned tags_check_written(const struct tags *now, const struct tags *want, unsigned changed);
+
 /* Parses "X/Y" as tags_check() allows it. 0 and *x, *y; or -1. */
 int tags_number(const char *s, int *x, int *y);
 

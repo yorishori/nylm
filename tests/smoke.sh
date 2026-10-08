@@ -972,18 +972,36 @@ logged "the file changed since it was scanned (TRACKNUMBER); scan it again" "fai
 same_file "a refused write leaves the file alone" "$TMP/before.flac" "$M/Artist/Album/02.FLAC"
 query "2" "the refused file is read again" "SELECT tracknumber FROM tracks WHERE id = $T2"
 
-# The service checks the whole track itself: a bad value put in the table
-# directly is not written.
+# The service checks the tags it writes itself: bad values put in the
+# table directly (a date that is not a year, a required title emptied) are
+# not written, and neither is the track's valid change: a track's changes
+# are written together.
 sqlite3 "$MDB" "INSERT INTO changes (batch, track_id, field, value) VALUES (99, $T1, 'date', 'abc')"
-service 0 "music-write, invalid value" music-write
-logged "not written: DATE must be a year" "service validates values"
-query "1999" "invalid value not written" "SELECT date FROM tracks WHERE id = $T1"
-# ... and a track with an invalid track number is not written at all.
+sqlite3 "$MDB" "INSERT INTO changes (batch, track_id, field, value) VALUES (99, $T1, 'title', '')"
+CDATE=$(sqlite3 "$MDB" "SELECT id FROM changes WHERE state = 'pending' AND track_id = $T1 AND field = 'date'")
+CTITLE=$(sqlite3 "$MDB" "SELECT id FROM changes WHERE state = 'pending' AND track_id = $T1 AND field = 'title'")
+post "queue a valid change too" 200 $Q "{\"edits\":[{\"track\":$T1,\"field\":\"mood\",\"value\":\"calm\"}]}"
+CMOOD=$(sqlite3 "$MDB" "SELECT id FROM changes WHERE state = 'pending' AND track_id = $T1 AND field = 'mood'")
+expect 200 "changes, bad values" -b "$JAR" "$B/api/music/changes"
+expect_body "\"blocked\":[{\"change\":$CTITLE,\"track\":$T1,\"field\":\"title\",\"why\":\"is required\"},{\"change\":$CDATE,\"track\":$T1,\"field\":\"date\",\"why\":\"must be a year: a positive whole number\"}]" "the changes list each bad change, and why"
+service 0 "music-write, invalid values" music-write
+logged "not written: TITLE is required; DATE must be a year" "service validates the changes"
+logged "0 tracks written; 0 changes done, 0 with warnings, 3 failed" "the track's changes fail together"
+query "1999|New Title|" "no change of the track written" "SELECT date, title, mood FROM tracks WHERE id = $T1"
+query "failed|failed|failed" "the valid change failed with them" \
+    "SELECT group_concat(state, '|') FROM changes WHERE id IN ($CDATE, $CTITLE, $CMOOD)"
+# A track whose other tags break the rules (track number, genre, composer)
+# is written: only the tags the write sets are checked.
+query "2||" "the track's other tags break the rules" \
+    "SELECT tracknumber, (SELECT group_concat(value) FROM track_values WHERE track_id = $T2 AND field = 'composer'), bpm FROM tracks WHERE id = $T2"
 post "queue on a bad track"    200 $Q "{\"edits\":[{\"track\":$T2,\"field\":\"bpm\",\"value\":\"120\"}]}"
 expect 200 "changes, a bad track" -b "$JAR" "$B/api/music/changes"
-expect_body "\"blocked\":[{\"track\":$T2,\"fields\":[\"tracknumber\",\"genre\",\"composer\"]}]" "the changes list the track the write refuses, and why"
+expect_body '"blocked":[]' "its other tags do not block the change"
 service 0 "music-write, bad track number" music-write
-logged "not written: TRACKNUMBER must be two positive whole numbers" "track number blocks the track"
+logged "1 tracks written; 0 changes done, 1 with warnings, 0 failed" "the change is written"
+logged "disc number set to 1/1" "the write still fixes the disc number"
+query "2|120|1/1" "the change written, the other tags left as they are" \
+    "SELECT tracknumber, bpm, discnumber FROM tracks WHERE id = $T2"
 
 # A track removed by a scan: its pending change fails.
 post "queue on the other folder" 200 $Q "{\"edits\":[{\"track\":$T3,\"field\":\"mood\",\"value\":\"calm\"}]}"
@@ -1172,11 +1190,15 @@ post "cover hash missing album" 404 $C "{\"album\":999,\"hash\":\"$FRONT\"}"
 expect 200 "back to the uploaded cover" -b "$JAR" -H "$J" --data-binary "@$TMP/cover.json" "$B$C"
 expect_body "\"queued\":$N,\"dropped\":0" "the upload replaces the pending covers"
 
-# The write: each valid track gets the cover as its only picture (the Art
-# copies and 02.FLAC break the rules and are not written); the cover is
-# decoded and gets a thumbnail.
+# The write: each track gets the cover as its only picture, also those
+# whose tags break the rules (a cover sets no tag; Art/01.flac's disc
+# number is fixed, a warning), but not Art/02.flac, changed since the
+# scan; the cover is decoded and gets a thumbnail.
+sleep 1 # a cp in the second of the last scan would look unchanged
+cp tests/data/tagged.flac "$M/Artist/Art/02.flac"
 service 0 "music-write, cover"  music-write
-logged "2 tracks written; 2 changes done, 0 with warnings, 3 failed" "cover write counts"
+logged "4 tracks written; 3 changes done, 1 with warnings, 1 failed" "cover write counts"
+logged "the file changed since it was scanned" "the changed file is not written"
 query "0|$COVER|Front Cover|" "the cover is the only picture (FLAC)" \
     "SELECT position, hash, type, description FROM track_pictures
      WHERE track_id = (SELECT id FROM tracks WHERE path LIKE '%Multi/01.flac')"
@@ -1189,7 +1211,7 @@ expect_body "\"no_art\":true,\"cover\":\"$COVER\",\"mixed_art\":true}" "the art 
 if [ -f "$ART/$COVER.thumb" ]; then PASSED=$((PASSED + 1)); else
     FAILED=$((FAILED + 1)); echo "FAIL: no thumbnail of the cover"; fi
 expect 200 "same cover, now in the files" -b "$JAR" -H "$J" --data-binary "@$TMP/cover.json" "$B$C"
-expect_body '"queued":3,"dropped":0' "only the tracks without it are queued"
+expect_body '"queued":1,"dropped":0' "only the tracks without it are queued"
 post "discard that"            200 $D "{\"album\":$TA}"
 
 # A cover that does not decode is not written; the files stay as they were.

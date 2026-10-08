@@ -1268,17 +1268,24 @@ function searchButtons(artist, name) {
 
 /* ---- changes ------------------------------------------------------------- */
 
+/* What blocks a tag: "Date must be a year: ...". */
+function blockedText(b) {
+  return `${fieldLabel(b.field)} ${b.why}`;
+}
+
 /* One pending change as a table row: tag, now, new. A cover shows as
- * pictures: the track's now, the new one. */
-function pendingRow(c) {
+ * pictures: the track's now, the new one. A change that breaks a rule
+ * (bad: its entry of blocked, if any) is marked ⚠, with why. */
+function pendingRow(c, bad) {
   const cover = c.field === COVER_FIELD;
   const now = cover ? JSON.parse(c.now || "[]") : fromStored(c.field, c.now);
   const next = cover ? c.value : fromStored(c.field, c.value);
   return el("tr", {},
-    el("td", {}, fieldLabel(c.field)),
+    el("td", {}, bad ? el("span", { class: "due late" }, "⚠ ") : null, fieldLabel(c.field)),
     el("td", { class: cover ? "" : "old" }, cover ? thumbList(now, "Picture now") : showValue(c.field, now)),
     el("td", { class: "edited-text" },
-       cover ? thumbList([next], "New cover") : next === "" ? "(removed)" : showValue(c.field, next)));
+       cover ? thumbList([next], "New cover") : next === "" ? "(removed)" : showValue(c.field, next),
+       bad ? el("div", { class: "due late small" }, `Not written: ${blockedText(bad)}`) : null));
 }
 
 /* The text the pending search looks in: album, artist, track, file, tag,
@@ -1308,53 +1315,61 @@ function discardButton(body, what, total, disabled) {
 }
 
 /* A warning button that opens the album of a track the write would refuse
- * (fields: the tags that break a rule). */
-function blockedButton(track, fields) {
-  const names = fields.map(fieldLabel).join(", ");
+ * (bad: what blocks it). */
+function blockedButton(track, bad) {
+  const what = bad.map(blockedText).join("; ");
   const button = navButton("⚠", `#/album/${track}`, "warn");
-  button.setAttribute("aria-label", `Not written (${names}): open the album`);
-  button.title = `Not written: ${names} breaks a rule. Open the album to fix it.`;
+  button.setAttribute("aria-label", `Not written (${what}): open the album`);
+  button.title = `Not written: ${what}. Open the album to fix it.`;
   return button;
 }
 
 /* A group of pending changes that opens and closes (foldGroup): the label,
- * how many changes, and how many of its tracks the write would refuse. */
+ * how many changes, and how many of them the write would not write (all of
+ * a blocked track's: they are written together). */
 function pendingGroup(label, changes, blocked, content) {
-  const refused = new Set(changes.filter((c) => blocked.has(c.track)).map((c) => c.track)).size;
+  const refused = changes.filter((c) => blocked.tracks.has(c.track)).length;
   return foldGroup([
     el("span", { class: "fold-label" }, label), " ",
     el("span", { class: "count" }, String(changes.length)),
     refused ? el("span", { class: "due late" },
-                 ` ⚠ ${plural(refused, "track", "tracks")} not written`) : null,
+                 ` ⚠ ${plural(refused, "change", "changes")} not written`) : null,
   ], content);
 }
 
 /* One track's pending changes (list): its file, ⚠ and Discard track
- * (total: all its changes), and the changes. */
+ * (total: all its changes), and the changes, each that breaks a rule
+ * marked. A tag the write would set without a listed change (a mirrored
+ * sort tag) is named here. */
 function trackChanges(track, list, total, blocked, readOnly) {
   const removed = track == null;
+  const bad = blocked.tracks.get(track);
+  const unlisted = bad ? bad.filter((b) => !list.some((c) => c.id === b.change)) : [];
   return el("div", { class: "stack" },
     el("div", { class: "path muted small" }, relative(list[0].path)),
     removed ? null : el("div", { class: "actions" },
-      blocked.has(track) ? blockedButton(track, blocked.get(track)) : null,
+      bad ? blockedButton(track, bad) : null,
       discardButton({ track }, "track", total, readOnly)),
-    blocked.has(track)
+    bad
       ? el("p", { class: "warn small" },
-           `Not written: ${blocked.get(track).map(fieldLabel).join(", ")} breaks a rule, so ` +
-           "none of this track's changes will be written. Fix it in the album.")
+           (unlisted.length ? `${unlisted.map(blockedText).join("; ")}. ` : "") +
+           (unlisted.length < bad.length ? "A change marked ⚠ breaks a rule, so none" : "None") +
+           " of this track's changes will be written (they are written together). Fix it in " +
+           "the album.")
       : null,
     el("div", { class: "grid-wrap" },
       el("table", { class: "grid" },
         el("thead", {}, el("tr", {},
           el("th", { scope: "col" }, "Tag"), el("th", { scope: "col" }, "Now"),
           el("th", { scope: "col" }, "New"))),
-        el("tbody", {}, list.map(pendingRow)))));
+        el("tbody", {}, list.map((c) => pendingRow(c, blocked.changes.get(c.id)))))));
 }
 
 /* One album's pending changes (shown: those the search finds) as a group
  * that opens on Discard album and a group per track, each opening on its
  * changes. The changes of tracks no longer in the library are one group.
- * blocked: track -> the tags that keep the write from writing it. */
+ * blocked: {changes: change id -> what blocks it, tracks: track -> what
+ * blocks it}. */
 function albumChanges(changes, shown, blocked, readOnly) {
   const first = changes[0];
   const removed = first.track == null;
@@ -1388,11 +1403,18 @@ async function changesPage() {
     albums.get(key).push(c);
   }
   const tracks = new Set(ch.pending.map((c) => c.track)).size;
-  const blocked = new Map(ch.blocked.map((b) => [b.track, b.fields]));
+  const blocked = { changes: new Map(), tracks: new Map() };
+  for (const b of ch.blocked) {
+    if (b.change != null) blocked.changes.set(b.change, b);
+    if (!blocked.tracks.has(b.track)) blocked.tracks.set(b.track, []);
+    blocked.tracks.get(b.track).push(b);
+  }
+  const refused = ch.pending.filter((c) => blocked.tracks.has(c.track)).length;
   const write = passwordForm("/api/music/write", {},
     `Writes ${plural(ch.count, "change", "changes")} into the files, track by track. Each ` +
-    "file is checked first (it must still be as scanned, and every tag valid), then written " +
-    "and read back; each result is listed in Info.",
+    "file is checked first (it must still be as scanned, and every tag the write sets valid; " +
+    "the others are left as they are), then written and read back; each result is listed in " +
+    "Info.",
     "Write changes", "Writing started");
   const text = el("p", {}, busyText(o));
   const panel = el("section", { class: "card stack" },
@@ -1407,10 +1429,10 @@ async function changesPage() {
            `${plural(ch.count, "change", "changes")} to ${plural(tracks, "track", "tracks")} ` +
            `in ${plural(albums.size, "group", "groups")}` +
            (ch.pending.length < ch.count ? ` (the first ${ch.pending.length} are listed)` : "") + "."),
-    blocked.size
+    refused
       ? el("p", { class: "warn" },
-           `${plural(blocked.size, "track", "tracks")} will not be written: another tag breaks a ` +
-           "rule (marked ⚠ below).")
+           `${plural(refused, "change", "changes")} will not be written: a change breaks a ` +
+           "rule (marked ⚠ below), and a track's changes are written together.")
       : null,
     ch.count === 0 || o.busy ? null
       : el("div", { class: "actions" },
