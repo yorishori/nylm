@@ -21,6 +21,7 @@ PORT=${NYLM_PORT:-8080}
 WG_IF=${WG_IF:-wg0}
 CONF=/etc/nylm.conf
 HOME_DIR=/var/lib/nylm # nylm's home and working directory; holds no data
+TLS=/etc/nylm/tls      # the HTTPS certificate, and its certificate authority
 SHARE=/usr/local/share/nylm
 ACTIONS=/usr/local/lib/nylm/actions
 JOBS=/usr/local/lib/nylm/jobs
@@ -136,6 +137,9 @@ NYLM_PORT=$PORT
 #NYLM_MUSIC=/mnt/data/music
 # Addresses to listen on: WireGuard and LAN only, never 0.0.0.0.
 NYLM_LISTEN="${wg%/*} ${lan%/*}"
+# HTTPS: the certificate install.sh makes for the NYLM_LISTEN addresses.
+NYLM_TLS_CERT=$TLS/server.crt
+NYLM_TLS_KEY=$TLS/server.key
 # Client subnets accepted; everything else is closed immediately.
 NYLM_ALLOW="$wg $lan"
 # Server app (see the README): more systemd units to show; the backups:
@@ -150,6 +154,24 @@ EOF
     echo "wrote $CONF:"
     sed 's/^/    /' "$CONF"
 fi
+
+step "HTTPS certificate"
+if ! grep -q '^NYLM_TLS_CERT=' "$CONF"; then
+    printf '%s\n' "# HTTPS: the certificate install.sh makes for the NYLM_LISTEN addresses." \
+        "NYLM_TLS_CERT=$TLS/server.crt" "NYLM_TLS_KEY=$TLS/server.key" >> "$CONF"
+    echo "added NYLM_TLS_CERT and NYLM_TLS_KEY to $CONF: nylm is HTTPS now"
+fi
+install -d -m 755 -o root -g root /etc/nylm
+install -d -m 750 -o root -g nylm "$TLS"
+# shellcheck disable=SC1090
+deploy/tls-cert.sh "$TLS" $(. "$CONF" && printf '%s' "$NYLM_LISTEN")
+chown root:root "$TLS/ca.key" "$TLS/ca.crt" "$TLS/server.crt" "$TLS/server.san"
+chown root:nylm "$TLS/server.key"
+chmod 600 "$TLS/ca.key"
+chmod 640 "$TLS/server.key"
+chmod 644 "$TLS/ca.crt" "$TLS/server.crt" "$TLS/server.san"
+# Devices download the authority from nylm itself, to trust it.
+install -m 644 "$TLS/ca.crt" "$SHARE/public/nylm-ca.crt"
 
 step "music folder"
 # shellcheck disable=SC1090
@@ -180,5 +202,7 @@ step "done"
 # shellcheck disable=SC1090
 . "$CONF"
 for addr in $NYLM_LISTEN; do
-    echo "nylm: http://$addr:$NYLM_PORT"
+    echo "nylm: https://$addr:$NYLM_PORT"
 done
+echo "On each device, install https://<address>:$NYLM_PORT/nylm-ca.crt as a CA certificate"
+echo "(see the README): then the browser trusts nylm."

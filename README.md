@@ -7,7 +7,7 @@ WireGuard and the home LAN.
 ## How it works
 
 ```
-browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> SQLite
+browser ── HTTPS ─> nylm ──> /api/*  router ──> handler ──> SQLite
                          │                          └──> sudo actions/ (root)
                          └─> /*      files from public/
 ```
@@ -17,7 +17,8 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 - The frontend (`public/`) builds the whole UI in JavaScript, one page per app
   (`/plants/`) plus the home page; the server only serves files and JSON.
 - Access: bind to WireGuard + LAN addresses only → drop clients outside the
-  allowed subnets → password login with a session cookie.
+  allowed subnets → HTTPS, with nylm's own certificate authority → password
+  login with a session cookie.
 - nylm runs as user `nylm`. Root work happens only through scripts in
   `/usr/local/lib/nylm/actions/`, via a sudo rule that allows nothing else.
 
@@ -27,6 +28,7 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 |-------------------|----------------------------------------------------------|
 | `src/main.c`      | config from env vars, CLI (`nylm`, `nylm set-password`)  |
 | `src/server.c`    | sockets, subnet allowlist, request loop                  |
+| `src/conn.c`      | a connection's reads and writes, through TLS (HTTPS)     |
 | `src/http.c`      | parse requests, write responses                          |
 | `src/router.c`    | route table: method, path, handler, login required       |
 | `src/api_*.c`     | handlers, one file per feature                           |
@@ -53,7 +55,8 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 | `tests/`          | unit tests (`test_*.c`), end-to-end (`smoke.sh`)         |
 | `deploy/`         | `install.sh`, systemd unit, root action scripts          |
 
-On the server: binary `/usr/local/bin/nylm`, config `/etc/nylm.conf`, data
+On the server: binary `/usr/local/bin/nylm`, config `/etc/nylm.conf`, HTTPS
+certificate `/etc/nylm/tls/`, data
 in `NYLM_DATA` (on the data drive), frontend `/usr/local/share/nylm/public/`, actions
 `/usr/local/lib/nylm/actions/`, sudo rule `/etc/sudoers.d/nylm`.
 
@@ -79,6 +82,28 @@ Point `NYLM_DATA` at a folder *inside* the drive (`/mnt/data/nylm`), not at
 the mount point: when the drive is not mounted the folder is missing, so nylm
 stops (and systemd retries) instead of starting empty on the system disk.
 Create the folder and make it writable by user `nylm` before installing.
+
+## HTTPS
+
+nylm serves HTTPS when `NYLM_TLS_CERT` and `NYLM_TLS_KEY` are set (both, or
+neither: plain HTTP, as `make run` does); the session cookie is then
+`Secure`. It needs TLS 1.2 or newer. `install.sh` sets them and runs
+`deploy/tls-cert.sh`, which makes, in `/etc/nylm/tls/`:
+
+- `ca.crt`, `ca.key`: a certificate authority for this server alone, made
+  once and kept (the key: root only);
+- `server.crt`, `server.key`: nylm's certificate for the addresses in
+  `NYLM_LISTEN`, signed by it, valid for 10 years; made again when those
+  change (run `install.sh` again).
+
+Each device trusts nylm once it has `ca.crt` installed. `install.sh` puts it
+at `https://<address>:<port>/nylm-ca.crt`; the browser warns the first
+time, as it does not know nylm yet. On Android: download it, then
+Settings → Security → More security settings → Encryption & credentials →
+Install a certificate → CA certificate (the names vary a little by phone).
+On a PC, import it into the browser's or the system's authorities.
+A new `ca.crt` (if `/etc/nylm/tls/ca.*` is deleted) has to be installed
+again everywhere.
 
 ## Plants
 
@@ -561,7 +586,7 @@ In a checkout (a debug build with sanitizers, data in `./dev-data`):
 ```sh
 make test                              # unit + end-to-end tests
 NYLM_DATA=dev-data ./nylm-debug set-password   # once, before make run
-make run                               # server on http://127.0.0.1:8080
+make run                               # server on http://127.0.0.1:8080 (no TLS)
 # The services by hand (the web app's buttons need the deployed root
 # actions); NYLM_MUSIC is the music folder to use:
 NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-debug music-scan
@@ -573,7 +598,7 @@ NYLM_DATA=dev-data ./nylm-musicbrainz-debug ids      # or genres
 
 Configuration is environment variables; `nylm --help` lists them.
 Build needs `gcc`, `make` and the system libraries `sqlite` (3.44+), `cjson`,
-`openssl` (3.2+; libssl only for `nylm-qobuz` and `nylm-musicbrainz`),
+`openssl` (3.2+; the `openssl` command makes the certificate),
 `taglib` (2.0+),
 `libjpeg-turbo` and `libpng`, linked dynamically: `pacman -Syu` brings their
 fixes. `make` builds `nylm`, `nylm-qobuz` and `nylm-musicbrainz`. The server app's root

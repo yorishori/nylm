@@ -1,6 +1,6 @@
 #!/bin/sh
 # End-to-end checks against a running server: the API and static files, then
-# listen addresses and the client allowlist.
+# HTTPS, listen addresses and the client allowlist.
 # Usage: tests/smoke.sh [binary]   (default: ./nylm-debug, which has sanitizers)
 set -u
 
@@ -2041,6 +2041,72 @@ if [ "$(id -u)" != 0 ]; then # root reads anything
     check "backups untouched"   [ "$(count "$BK/out/app" 'app-*.tar.zst')" = 2 ]
     chmod 600 "$BK/app/data/unreadable"
 fi
+
+# ---- HTTPS -------------------------------------------------------------------
+
+# The certificate as install.sh makes it, for 127.0.0.1.
+TLS="$TMP/tls"
+mkdir "$TLS"
+# tls_cert WANT DESCRIPTION ADDRESS...: deploy/tls-cert.sh exits with WANT.
+tls_cert() {
+    want=$1 desc=$2
+    shift 2
+    if deploy/tls-cert.sh "$TLS" "$@" >"$TMP/tls.log" 2>&1; then got=0; else got=$?; fi
+    if [ "$got" = "$want" ]; then PASSED=$((PASSED + 1)); else
+        FAILED=$((FAILED + 1)); echo "FAIL: $desc: exit $got: $(cat "$TMP/tls.log")"; fi
+}
+tls_cert 2 "tls-cert, no address"
+tls_cert 2 "tls-cert, a name"           nylm.lan
+tls_cert 2 "tls-cert, an option"        -days
+tls_cert 2 "tls-cert, ends in a dot"    127.0.0.
+tls_cert 2 "tls-cert, two dots"         127..0.1
+tls_cert 0 "tls-cert"                   127.0.0.2
+tls_cert 0 "tls-cert, other addresses"  127.0.0.1
+CA_SUM=$(cksum <"$TLS/ca.crt") CERT_SUM=$(cksum <"$TLS/server.crt")
+tls_cert 0 "tls-cert, same addresses"   127.0.0.1
+if [ "$(cksum <"$TLS/ca.crt")" = "$CA_SUM" ] && [ "$(cksum <"$TLS/server.crt")" = "$CERT_SUM" ] &&
+   [ "$(cat "$TLS/server.san")" = "IP:127.0.0.1" ]; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: tls-cert made a certificate again for the same addresses"; fi
+if [ "$(stat -c %a "$TLS/ca.key")" = 600 ] && [ "$(stat -c %a "$TLS/server.key")" = 600 ]; then
+    PASSED=$((PASSED + 1)); else FAILED=$((FAILED + 1)); echo "FAIL: tls keys readable by others"; fi
+if openssl verify -CAfile "$TLS/ca.crt" "$TLS/server.crt" >/dev/null 2>&1; then
+    PASSED=$((PASSED + 1)); else FAILED=$((FAILED + 1)); echo "FAIL: certificate not signed by the CA"; fi
+
+# tls_refuses DESCRIPTION ENV-ARGS...: nylm does not start, and says why.
+tls_refuses() {
+    desc=$1
+    shift
+    if env "$@" "$BIN" >"$TMP/log" 2>&1 </dev/null; then
+        FAILED=$((FAILED + 1)); echo "FAIL: $desc: started anyway"
+    elif grep -q "NYLM_TLS\|tls:" "$TMP/log"; then PASSED=$((PASSED + 1)); else
+        FAILED=$((FAILED + 1)); echo "FAIL: $desc: unclear error: $(cat "$TMP/log")"; fi
+}
+tls_refuses "certificate without key"   NYLM_TLS_CERT="$TLS/server.crt"
+tls_refuses "key without certificate"   NYLM_TLS_KEY="$TLS/server.key"
+tls_refuses "certificate missing"       NYLM_TLS_CERT="$TMP/nope.crt" NYLM_TLS_KEY="$TLS/server.key"
+tls_refuses "key missing"               NYLM_TLS_CERT="$TLS/server.crt" NYLM_TLS_KEY="$TMP/nope.key"
+tls_refuses "not the certificate's key" NYLM_TLS_CERT="$TLS/server.crt" NYLM_TLS_KEY="$TLS/ca.key"
+tls_refuses "key is not PEM"            NYLM_TLS_CERT="$TLS/server.crt" NYLM_TLS_KEY="$TLS/server.san"
+
+export NYLM_TLS_CERT="$TLS/server.crt" NYLM_TLS_KEY="$TLS/server.key"
+start "https://127.0.0.1:$PORT/" --cacert "$TLS/ca.crt"
+S="https://127.0.0.1:$PORT"
+expect 200 "https index"                  --cacert "$TLS/ca.crt" "$S/"
+expect 000 "certificate not trusted"      "$S/"
+expect 000 "plain http to the https port" "http://127.0.0.1:$PORT/"
+expect 200 "https after a plain request"  --cacert "$TLS/ca.crt" "$S/api/health"
+if grep -q "127.0.0.1 tls handshake failed" "$TMP/log"; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: failed handshake not logged"; fi
+expect_header "set-cookie: nylm_session=.*HttpOnly; SameSite=Strict; Secure" "cookie Secure over https" \
+    --cacert "$TLS/ca.crt" -H "$J" -d '{"password":"smoke test password"}' "$S/api/login"
+expect_header "set-cookie: nylm_session=; .*SameSite=Strict; Secure" "logout cookie Secure" \
+    --cacert "$TLS/ca.crt" -X POST "$S/api/logout"
+expect_header "content-security-policy: default-src 'self'" "CSP header over https" \
+    --cacert "$TLS/ca.crt" "$S/"
+stop
+grep -q "listening on https://127.0.0.1:$PORT" "$TMP/log" && PASSED=$((PASSED + 1)) ||
+    { FAILED=$((FAILED + 1)); echo "FAIL: https listen address not logged"; }
+unset NYLM_TLS_CERT NYLM_TLS_KEY
 
 # ---- listen addresses and client allowlist ----------------------------------
 
