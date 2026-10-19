@@ -801,6 +801,12 @@ function handleError(err) {
  * home page (no Home button).
  */
 async function startApp(route, { home } = {}) {
+  /* The service worker keeps the pages for offline use and makes nylm an
+   * app a phone can install. Browsers have it only over HTTPS. */
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/sw.js")
+      .catch((err) => setStatus("Offline use is off: " + err.message, true));
+  }
   pageRoute = route;
   homeButton.hidden = Boolean(home);
   logoutButton.addEventListener("click", async () => {

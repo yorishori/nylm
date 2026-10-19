@@ -62,11 +62,21 @@ const APPS = [
   { name: "Server", href: "/server/", summary: serverSummary },
 ];
 
+/* A tile's pills; "Offline" when the server is out of reach. */
+async function summaryOf(a) {
+  try {
+    return await a.summary();
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 0) return [el("span", { class: "pill" }, "Offline")];
+    throw err;
+  }
+}
+
 async function homePage() {
   const tiles = await Promise.all(APPS.map(async (a) =>
     el("a", { class: "tile", href: a.href },
       el("h2", {}, a.name),
-      el("div", { class: "pills" }, await a.summary()))));
+      el("div", { class: "pills" }, await summaryOf(a)))));
   return el("section", {},
     el("h1", {}, "Apps"),
     el("nav", { class: "tiles", "aria-label": "Apps" }, tiles));

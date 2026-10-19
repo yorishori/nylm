@@ -206,7 +206,7 @@ function takeReply(reply, sent) {
 
 function waitingText() {
   const n = Object.keys(state.pending).length;
-  return n ? ` ${plural(n, "change", "changes")} wait on this device.` : "";
+  return n ? ` ${plural(n, "change waits", "changes wait")} on this device.` : "";
 }
 
 /*

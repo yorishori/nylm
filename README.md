@@ -52,6 +52,7 @@ browser ── HTTPS ─> nylm ──> /api/*  router ──> handler ──> SQ
 | `src/migrations.c`| the schema, one appended entry per change                |
 | `public/`         | home page, `common.js` + `style.css` shared by all pages |
 | `public/<app>/`   | one page per app: `index.html`, `<app>.js`, `<app>.css`  |
+| `public/sw.js`    | service worker: keeps the pages on the device (offline)  |
 | `tests/`          | unit tests (`test_*.c`), end-to-end (`smoke.sh`)         |
 | `deploy/`         | `install.sh`, systemd unit, root action scripts          |
 
@@ -104,6 +105,17 @@ Install a certificate → CA certificate (the names vary a little by phone).
 On a PC, import it into the browser's or the system's authorities.
 A new `ca.crt` (if `/etc/nylm/tls/ca.*` is deleted) has to be installed
 again everywhere.
+
+## The app on a phone
+
+Over HTTPS nylm is a web app a phone can install: open it in Chrome, then
+menu → Install app (or Add to home screen). It opens like an app, from its
+own icon (`manifest.json`, `icon-*.png`). Its service worker (`sw.js`)
+keeps the pages on the phone: they come from the server when it answers
+(within 4 seconds) and from the phone's copy when it does not, so the app
+opens offline. It never keeps API answers; the notes app works offline
+from its own copy of the notes (see Notes). Over plain HTTP browsers allow
+neither.
 
 ## Plants
 
