@@ -829,7 +829,7 @@ function entryCard(entry, typeById, types) {
     el("header", {},
       el("strong", {}, showDate(entry.date)),
       type ? careChip(type.name, type.color) : careChip(null)),
-    entry.note ? el("p", { class: "note" }, entry.note) : null,
+    entry.note ? el("p", { class: "note" }, entry.note) : "",
     photoStrip(entry, view, viewer) || "",
     el("div", { class: "actions" },
       el("button", { class: "btn", type: "button", onclick: () => {
