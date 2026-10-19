@@ -41,6 +41,8 @@ static const struct route routes[] = {
     { "POST",   "/api/plants/photos/add",     plants_photo_add,    0 },
     { "POST",   "/api/plants/photos/delete",  plants_photo_delete, 0 },
 
+    { "POST",   "/api/notes/sync",            notes_sync,          0 },
+
     { "GET",    "/api/music",                 music_overview,      0 },
     { "GET",    "/api/music/albums",          music_albums,        0 },
     { "GET",    "/api/music/album",           music_album,         0 },

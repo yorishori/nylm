@@ -18,6 +18,19 @@ async function plantsSummary() {
   ];
 }
 
+/* Pills for the notes this device has: how many, reminders, unsynced. */
+async function notesSummary() {
+  const s = await localGet("notes");
+  if (!s) return [el("span", { class: "pill" }, "Open to sync")];
+  const reminders = Object.keys(s.reminders).length;
+  return [
+    el("span", { class: "pill" }, plural(Object.keys(s.notes).length, "note", "notes")),
+    reminders ? el("span", { class: "pill today" }, plural(reminders, "reminder", "reminders"))
+              : null,
+    s.unsynced ? el("span", { class: "pill" }, `${s.unsynced} not synced`) : null,
+  ];
+}
+
 /* Pills for the music library: albums, pending changes, a running service. */
 async function musicSummary() {
   const o = await api("GET", "/api/music");
@@ -43,6 +56,7 @@ async function serverSummary() {
 }
 
 const APPS = [
+  { name: "Notes", href: "/notes/", summary: notesSummary },
   { name: "Plants", href: "/plants/", summary: plantsSummary },
   { name: "Music", href: "/music/", summary: musicSummary },
   { name: "Server", href: "/server/", summary: serverSummary },

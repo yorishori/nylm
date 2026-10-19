@@ -31,6 +31,7 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 | `src/router.c`    | route table: method, path, handler, login required       |
 | `src/api_*.c`     | handlers, one file per feature                           |
 | `src/care.c`      | plant care dates: when a care rule is next due           |
+| `src/notes.c`     | the notes app's ids, and names for clashing tags         |
 | `src/music.c`     | music folder, lock, `nylm music-scan` and `music-write`  |
 | `src/move.c`      | the naming rule, `nylm music-move`                       |
 | `src/dupes.c`     | when two names are the same, for the duplicates          |
@@ -69,6 +70,7 @@ $NYLM_DATA/music/music.db     music tags cache, changes, scans, audit log
 $NYLM_DATA/music/art/         album art: each picture once, and its thumbnail
 $NYLM_DATA/music/*.lock       the library's lock, the Qobuz and MusicBrainz services
 $NYLM_DATA/server/server.db   server app: audit log, WireGuard peer names
+$NYLM_DATA/notes/notes.db     reminders, notes and their tags
 ```
 
 nylm refuses to start if the folder does not exist. In an empty folder it
@@ -103,6 +105,30 @@ Each plant and care type has a colour from a fixed palette (butter, lime,
 mint, teal, sky, periwinkle, lavender, orchid). In the app a plant's colour
 is the stripe on its card and the dot before its name, a care type's colour
 is its chip, and only late (rose) and today (peach) colour the due label.
+
+## Notes
+
+Quick reminders and notes (`src/api_notes.c`, `public/notes/`). Reminders
+are one line each (200 bytes), added and ticked off. Notes have no title,
+up to 20000 bytes of text with a little Markdown (`#` headings, `**bold**`,
+`*italic*`, `` `code` ``, lists, `- [ ]` tasks ticked in place, `>`
+quotes, ```` ``` ```` code blocks; never HTML), and up to 20 tags. Tags
+have a name and a colour from the palette; the Tags tab adds, renames and
+deletes them, the Notes tab shows notes by tag and by text, and Stats counts
+it all.
+
+Each device keeps everything in the browser (IndexedDB) and works on that,
+with or without the server; logging out clears it. One call,
+`POST /api/notes/sync {since, changes}`, sends what changed on the device
+and brings back every row changed since the device's last sync, 100 at a
+time. Ids are made by the device (32 hex characters) and every row has a
+rev, the value of one counter when it last changed. When two devices
+changed the same thing: a removed reminder stays removed; a tag's latest
+change wins, and a name another tag has gets a number ("work 2"); a note
+edited from an older rev keeps the server's note and comes back as a new
+note next to it (nothing is lost), and removing such a note does nothing.
+A change sent twice changes nothing. Removed rows stay, emptied, so other
+devices learn of them.
 
 ## Music
 

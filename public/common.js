@@ -45,14 +45,20 @@ class ApiError extends Error {
   }
 }
 
-/* Calls the JSON API. Resolves to the parsed body (null for 204). */
+/* Calls the JSON API. Resolves to the parsed body (null for 204). A
+ * server out of reach rejects with an ApiError of status 0. */
 async function api(method, path, body) {
   const options = { method, headers: {}, credentials: "same-origin" };
   if (body !== undefined || method !== "GET") {
     options.headers["Content-Type"] = "application/json";
     if (body !== undefined) options.body = JSON.stringify(body);
   }
-  const res = await fetch(path, options);
+  let res;
+  try {
+    res = await fetch(path, options);
+  } catch (err) {
+    throw new ApiError(0, "Can't reach nylm: offline?");
+  }
   const data = res.status === 204 ? null : await res.json().catch(() => null);
   if (!res.ok) {
     throw new ApiError(res.status, (data && data.error) || res.statusText);
@@ -660,6 +666,63 @@ function passwordForm(path, extra, intro, submitLabel, started, then = refresh) 
   return node;
 }
 
+/* ---- data kept on this device ------------------------------------------ */
+
+/*
+ * A small key-value store in this browser (IndexedDB), for the apps that
+ * work offline. Each app keeps its data under its own key; a value with
+ * `unsynced` > 0 has changes the server has not got yet. Logging out
+ * clears it all.
+ */
+let localDbOpen = null;
+
+function localDb() {
+  if (!localDbOpen) {
+    localDbOpen = new Promise((resolve, reject) => {
+      const req = indexedDB.open("nylm", 1);
+      req.addEventListener("upgradeneeded", () => req.result.createObjectStore("kv"));
+      req.addEventListener("success", () => resolve(req.result));
+      req.addEventListener("error", () => {
+        localDbOpen = null;
+        reject(new Error("This browser can't keep data on this device."));
+      });
+    });
+  }
+  return localDbOpen;
+}
+
+/* Runs fn(store) in a transaction; resolves to its request's result. */
+async function localRun(mode, fn) {
+  const db = await localDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("kv", mode);
+    const req = fn(tx.objectStore("kv"));
+    tx.addEventListener("complete", () => resolve(req.result));
+    tx.addEventListener("error", () => reject(new Error("Saving on this device failed: " +
+                                                        (tx.error && tx.error.message))));
+    tx.addEventListener("abort", () => reject(new Error("Saving on this device failed: " +
+                                                        (tx.error && tx.error.message))));
+  });
+}
+
+function localGet(key) {
+  return localRun("readonly", (store) => store.get(key));
+}
+
+function localSet(key, value) {
+  return localRun("readwrite", (store) => store.put(value, key));
+}
+
+/* How many changes on this device the server has not got yet. */
+async function localUnsynced() {
+  const values = await localRun("readonly", (store) => store.getAll());
+  return values.reduce((n, v) => n + ((v && v.unsynced) || 0), 0);
+}
+
+function localClear() {
+  return localRun("readwrite", (store) => store.clear());
+}
+
 /* ---- pages and session ------------------------------------------------- */
 
 /* The page's router: (parts of the hash) -> Promise of the page, or null if
@@ -741,8 +804,13 @@ async function startApp(route, { home } = {}) {
   pageRoute = route;
   homeButton.hidden = Boolean(home);
   logoutButton.addEventListener("click", async () => {
+    /* What this device keeps goes with the session. */
     try {
+      const unsynced = await localUnsynced();
+      if (unsynced && !sure(`${plural(unsynced, "change", "changes")} on this device ` +
+                            "did not reach nylm yet. Log out and lose them?")) return;
       await api("POST", "/api/logout");
+      await localClear();
       setStatus("Logged out");
     } catch (err) {
       setStatus("Logout failed: " + err.message, true);
@@ -755,6 +823,8 @@ async function startApp(route, { home } = {}) {
     await api("GET", "/api/session");
     refresh();
   } catch (err) {
-    handleError(err);
+    /* Out of reach: an app that works offline shows what it has. */
+    if (err instanceof ApiError && err.status === 0) refresh();
+    else handleError(err);
   }
 }

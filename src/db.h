@@ -32,6 +32,11 @@ extern const char *const server_migrations[];
 extern const int server_migration_count;
 extern sqlite3 *server_db;
 
+/* notes: quick reminders, notes and tags, synced with each device. */
+extern const char *const notes_migrations[];
+extern const int notes_migration_count;
+extern sqlite3 *notes_db;
+
 /*
  * Opens every app's database under data_dir, which must already exist (it
  * lives on the data drive: missing means not mounted). Creates missing app
