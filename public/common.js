@@ -817,6 +817,7 @@ async function startApp(route, { home } = {}) {
                             "did not reach nylm yet. Log out and lose them?")) return;
       await api("POST", "/api/logout");
       await localClear();
+      if (window.caches) await caches.delete("nylm-photos"); /* public/sw.js's PHOTOS */
       setStatus("Logged out");
     } catch (err) {
       setStatus("Logout failed: " + err.message, true);

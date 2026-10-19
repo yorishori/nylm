@@ -138,6 +138,18 @@ stored once, named by the SHA-256 of the photo, in `$NYLM_DATA/plants/photos/`
 size=full|thumb`. Removing a photo or deleting its entry removes the files
 no other entry has.
 
+Offline (the app on a phone, see above): the app keeps every answer it
+reads on the device (IndexedDB), and every plant's page every 10 minutes
+it is open, and shows them when the server is out of reach, with the due
+dates counted from today; journal photos once seen are kept too. Care
+logged then (Done, a new journal entry, photos on it) waits on the device,
+shown as "Logged, waiting to sync", and is sent when the server answers
+again (when the app opens, comes back to the screen or the device is back
+online). An entry the server refuses keeps its reason, to discard or try
+again. Editing plants, rules and care types needs the server. If the
+server's reply to a sent entry is lost, it is sent again: a duplicate entry
+to delete by hand.
+
 Each plant and care type has a colour from a fixed palette (butter, lime,
 mint, teal, sky, periwinkle, lavender, orchid). In the app a plant's colour
 is the stripe on its card and the dot before its name, a care type's colour
