@@ -643,7 +643,7 @@ function tagRow(tag, count) {
     color.hidden = false;
     showColors.hidden = true;
   } }, "Change colour");
-  return el("li", { class: "card" },
+  return el("li", { class: "card tag-row" },
     form({}, async () => {
       const n = checkTagName(name.value, tag.id);
       await saveTag(tag.id, n, color.value);

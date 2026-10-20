@@ -112,7 +112,17 @@
 .count-bar meter::-webkit-meter-optimum-value { background: var(--lavender); border-radius: 999px; }
 .count-bar meter::-moz-meter-bar { background: var(--lavender); border-radius: 999px; }
 
+/* Small (3-inch) phones: three tabs in one row, a tag's buttons two by two,
+ * the numbers two by two, and tasks easier to tick with a thumb. */
 @media (max-width: 21rem) {
+  .tabs { grid-template-columns: repeat(3, 1fr); }
+  .tabs a { padding-inline: 0.25rem; }
+  main .tag-row .actions { grid-template-columns: 1fr 1fr; }
+  .stats { grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+  .stats > div { padding: 0.6rem 0.7rem; }
+  .stats dd { font-size: 1.1rem; overflow-wrap: anywhere; }
+  .md .tasks input { width: 1.3rem; height: 1.3rem; margin-top: 0.1em; }
+  .md .tasks .choice { gap: 0.7rem; }
   .count-bar { grid-template-columns: 1fr 2.5rem; }
   .count-bar meter { grid-column: 1 / -1; grid-row: 2; }
 }
