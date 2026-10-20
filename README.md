@@ -111,11 +111,12 @@ again everywhere.
 Over HTTPS nylm is a web app a phone can install: open it in Chrome, then
 menu → Install app (or Add to home screen). It opens like an app, from its
 own icon (`manifest.json`, `icon-*.png`). Its service worker (`sw.js`)
-keeps the pages on the phone: they come from the server when it answers
-(within 4 seconds) and from the phone's copy when it does not, so the app
-opens offline. It never keeps API answers; the notes app works offline
-from its own copy of the notes (see Notes). Over plain HTTP browsers allow
-neither.
+keeps the pages of home, notes and plants on the phone: they come from the
+server when it answers (within 4 seconds) and from the phone's copy when it
+does not, so they open offline. Music and server are online only: their
+pages are never kept. It never keeps API answers; notes and plants work
+offline from their own copies (see Notes, Plants). Over plain HTTP browsers
+allow neither.
 
 ## Plants
 

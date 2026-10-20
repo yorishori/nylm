@@ -1,13 +1,15 @@
 "use strict";
 
 /*
- * nylm's service worker: it keeps the pages on the device, so the app
- * opens without the server (the notes app then works from what it keeps,
- * see public/notes/notes.js). Browsers run it only over HTTPS.
+ * nylm's service worker: it keeps the pages of the apps that work offline
+ * (home, notes, plants) on the device, so they open without the server and
+ * work from what they keep (see notes.js, plants.js). Browsers run it only
+ * over HTTPS. The other apps (music, server) are online only: their pages
+ * are never kept, so offline the browser says it can't reach them.
  *
- * Pages, scripts and styles come from the server whenever it answers, and
- * each answer is kept; when it does not answer within NETWORK_MS (or the
- * device is offline), the kept copy is used. The API always goes to the
+ * The kept pages (SHELL_FILES) come from the server whenever it answers,
+ * and each answer is kept; when it does not answer within NETWORK_MS (or
+ * the device is offline), the kept copy is used. The API always goes to the
  * server (the apps keep what they need themselves), except the plants
  * journal's photos: a photo's URL names its bytes (a hash), so once kept
  * it is used as it is. Logging out deletes them (PHOTOS, see common.js).
@@ -17,8 +19,8 @@ const SHELL = "nylm-shell";
 const PHOTOS = "nylm-photos";
 const NETWORK_MS = 4000;
 
-/* Kept when the worker is installed, so they open offline even if never
- * opened online before. */
+/* The files kept, from the moment the worker is installed: they open
+ * offline even if never opened online before. Nothing else is. */
 const SHELL_FILES = [
   "/", "/common.js", "/home.js", "/style.css", "/favicon.svg", "/manifest.json",
   "/icon-192.png", "/icon-512.png",
@@ -31,8 +33,17 @@ self.addEventListener("install", (event) => {
     .then(() => self.skipWaiting()));
 });
 
+/* Drops what an older worker kept that is no longer in SHELL_FILES. */
+async function dropOthers() {
+  const cache = await caches.open(SHELL);
+  const keep = new Set(SHELL_FILES.map((path) => new URL(path, self.location.origin).href));
+  for (const request of await cache.keys()) {
+    if (!keep.has(request.url)) await cache.delete(request);
+  }
+}
+
 self.addEventListener("activate", (event) => {
-  event.waitUntil(self.clients.claim());
+  event.waitUntil(dropOthers().then(() => self.clients.claim()));
 });
 
 /* The server's answer (kept for later), or the kept copy if the server is
@@ -69,5 +80,5 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (event.request.method !== "GET" || url.origin !== self.location.origin) return;
   if (url.pathname === "/api/plants/photo") event.respondWith(keptFirst(event.request));
-  else if (!url.pathname.startsWith("/api/")) event.respondWith(networkFirst(event.request));
+  else if (SHELL_FILES.includes(url.pathname)) event.respondWith(networkFirst(event.request));
 });
