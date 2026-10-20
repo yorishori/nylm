@@ -715,23 +715,6 @@ function bar(label, n, max) {
     el("span", { class: "num" }, String(n)));
 }
 
-/* Notes added in each of the last 12 months, oldest first: [{label, n}]. */
-function notesPerMonth(notes) {
-  const now = new Date();
-  const months = [];
-  for (let i = 11; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
-    months.push({ y: d.getFullYear(), m: d.getMonth(), n: 0,
-                  label: `${MONTHS[d.getMonth()]} ${d.getFullYear()}` });
-  }
-  for (const note of notes) {
-    const d = new Date(note.created * 1000);
-    const month = months.find((x) => x.y === d.getFullYear() && x.m === d.getMonth());
-    if (month) month.n++;
-  }
-  return months;
-}
-
 function statsPage() {
   const notes = Object.values(state.notes);
   const reminders = Object.values(state.reminders);
@@ -744,8 +727,6 @@ function statsPage() {
   const oldest = reminders.reduce((a, r) => (!a || r.created < a.created ? r : a), null);
   const byTag = tags.map((t) => ({ tag: t, n: counts.get(t.id) || 0 })).sort((a, b) => b.n - a.n);
   const tagMax = Math.max(1, ...byTag.map((x) => x.n));
-  const months = notesPerMonth(notes);
-  const monthMax = Math.max(1, ...months.map((x) => x.n));
 
   return shell("stats",
     el("section", { class: "section" },
@@ -764,9 +745,6 @@ function statsPage() {
       byTag.length
         ? el("ul", { class: "count-bars" }, byTag.map((x) => bar(tagChip(x.tag), x.n, tagMax)))
         : el("p", { class: "empty" }, "No tags yet.")),
-    el("section", { class: "section" },
-      el("header", {}, el("h2", {}, "Notes added per month")),
-      el("ul", { class: "count-bars" }, months.map((x) => bar(x.label, x.n, monthMax)))),
     el("section", { class: "section" },
       el("header", {}, el("h2", {}, "This device")),
       el("dl", { class: "stats" },
