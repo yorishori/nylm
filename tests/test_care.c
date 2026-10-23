@@ -71,6 +71,28 @@ static void test_parse_date(void)
     }
 }
 
+/* The Monday on or before a date, as text. */
+static const char *week_of(const char *date)
+{
+    static char out[16];
+    care_format_date(care_week_start(D(date)), out);
+    return out;
+}
+
+static void test_week_start(void)
+{
+    CHECK_STR(week_of("2026-10-19"), "2026-10-19"); /* a Monday: itself */
+    CHECK_STR(week_of("2026-10-20"), "2026-10-19");
+    CHECK_STR(week_of("2026-10-25"), "2026-10-19"); /* Sunday: same week */
+    CHECK_STR(week_of("2026-10-26"), "2026-10-26");
+    CHECK_STR(week_of("1970-01-01"), "1969-12-29"); /* day 0, a Thursday */
+    CHECK_STR(week_of("1969-12-28"), "1969-12-22"); /* negative day numbers */
+    CHECK_STR(week_of("1900-01-01"), "1900-01-01"); /* CARE_MIN_YEAR, a Monday */
+    CHECK_STR(week_of("9999-12-31"), "9999-12-27"); /* CARE_MAX_YEAR */
+    CHECK_STR(week_of("2027-01-03"), "2026-12-28"); /* across the year end */
+    CHECK_STR(week_of("2024-03-01"), "2024-02-26"); /* across Feb 29 */
+}
+
 static void test_month_day(void)
 {
     CHECK(care_month_day_valid(1, 1));
@@ -224,6 +246,7 @@ int main(void)
 {
     test_colors();
     test_parse_date();
+    test_week_start();
     test_month_day();
     test_overlap();
     test_interval();

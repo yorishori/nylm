@@ -5,6 +5,7 @@
  *   #/due            what to do, soonest first
  *   #/plants[/ID]    plants, or one plant with its care rules and its
  *                    journal (care log, notes and photos)
+ *   #/year           the last 52 weeks of care, one square per week
  *   #/types          care types
  *
  * Colour has three jobs, each with its own shape:
@@ -98,6 +99,7 @@ async function keepAll() {
   try {
     const data = await keepGet("/api/plants");
     await keepGet("/api/plants/due");
+    await keepGet("/api/plants/year");
     for (const p of data.plants) {
       await keepGet(`/api/plants/plant?id=${p.id}`);
       await keepGet(`/api/plants/log?plant_id=${p.id}`);
@@ -231,6 +233,7 @@ function careTypeDropdown(label, types, selected, noteOption) {
 const TABS = [
   ["due", "Due"],
   ["plants", "Plants"],
+  ["year", "Year"],
   ["types", "Care types"],
 ];
 
@@ -947,6 +950,185 @@ function journalSection(plant, log, types) {
       el("div", { class: "side first" }, add)));
 }
 
+/* ---- year -------------------------------------------------------------- */
+
+const YEAR_WEEKS = 52;   /* as the server's: this week and the 51 before */
+const DAY_MS = 86400000;
+
+/* "YYYY-MM-DD" <-> days since 1970-01-01. */
+function dayOf(iso) {
+  const { y, m, d } = parseDate(iso);
+  return Date.UTC(y, m - 1, d) / DAY_MS;
+}
+
+function isoOf(day) {
+  const d = new Date(day * DAY_MS);
+  return isoDate(d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate());
+}
+
+/* The Monday on or before day (1970-01-01 was a Thursday). */
+function weekStart(day) {
+  return day - (((day % 7) + 7 + 3) % 7);
+}
+
+/* What the year shows, kept while the app is open. plant: "" all, else an
+ * id; type: "" all, "note" plain notes, else a care type id. week: the
+ * Monday (day) picked, null for this week. */
+const yearView = { plant: "", type: "", week: null };
+
+/*
+ * The answer of /api/plants/year as one list of counts per week, oldest
+ * first, counted from the Monday first. An answer kept on this device from
+ * an earlier week is shifted to match.
+ */
+function yearWeeks(year, first) {
+  const weeks = Array.from({ length: YEAR_WEEKS }, () => []);
+  const shift = (dayOf(year.from) - first) / 7;
+  for (const c of year.counts) {
+    const i = c.week + shift;
+    if (i >= 0 && i < YEAR_WEEKS) weeks[i].push(c);
+  }
+  return weeks;
+}
+
+/* Whether a count {plant_id, care_type_id} passes the filters. */
+function yearShows(c) {
+  if (yearView.plant && c.plant_id !== Number(yearView.plant)) return false;
+  if (yearView.type === "note") return c.care_type_id === null;
+  return !yearView.type || c.care_type_id === Number(yearView.type);
+}
+
+function entriesOf(counts) {
+  return counts.reduce((sum, c) => sum + c.count, 0);
+}
+
+/* Shade 0 (nothing) to 4 (the busiest week shown). */
+function shade(n, max) {
+  return n === 0 ? 0 : Math.ceil((n / max) * 4);
+}
+
+/* "Jan" if the 1st of a month falls in the week of monday, else "". */
+function monthStarting(monday) {
+  for (let day = monday; day < monday + 7; day++) {
+    const { m, d } = parseDate(isoOf(day));
+    if (d === 1) return MONTHS[m - 1];
+  }
+  return "";
+}
+
+/* The squares; onPick(i) when week i is pressed. */
+function yearGrid(weeks, first, color, onPick) {
+  const totals = weeks.map((w) => entriesOf(w.filter(yearShows)));
+  const max = Math.max(...totals);
+  return el("div", { class: "year-grid" }, totals.map((n, i) => {
+    const monday = first + i * 7;
+    return el("div", { class: "week" },
+      el("span", { class: "month", "aria-hidden": "true" }, monthStarting(monday)),
+      el("button", { type: "button", class: `square l${shade(n, max)} c-${color}`,
+                     "aria-pressed": "false",
+                     "aria-label": `Week of ${showDate(isoOf(monday))}: ${plural(n, "entry", "entries")}`,
+                     onclick: () => onPick(i) }));
+  }));
+}
+
+function yearLegend(color) {
+  return el("div", { class: "year-legend", "aria-hidden": "true" }, "Less",
+    [0, 1, 2, 3, 4].map((l) => el("span", { class: `square l${l} c-${color}` })), "More");
+}
+
+/* A count as a chip: "Watering ×2"; null type: a plain note. */
+function countChip(type, count) {
+  if (!type) return el("span", { class: "chip note" }, `Note ×${count}`);
+  return careChip(`${type.name} ×${count}`, type.color);
+}
+
+/* What was logged in the week of monday, by plant. */
+function weekDetail(counts, monday, data) {
+  const shown = counts.filter(yearShows);
+  const typeOrder = new Map(data.care_types.map((t, i) => [t.id, i]));
+  const order = (c) => (c.care_type_id === null ? Infinity : typeOrder.get(c.care_type_id));
+  const plants = data.plants.filter((p) => shown.some((c) => c.plant_id === p.id));
+  return el("section", { class: "section" },
+    el("header", {},
+      el("h2", {}, `${showDate(isoOf(monday))} – ${showDate(isoOf(monday + 6))} `,
+         el("span", { class: "count" }, entriesOf(shown)))),
+    plants.length
+      ? el("ul", { class: "list cols" }, plants.map((p) =>
+          el("li", { class: `card marked week-plant c-${p.color}` },
+            plantName(p.name, p.color, "strong"),
+            el("div", { class: "chips" }, shown
+              .filter((c) => c.plant_id === p.id)
+              .sort((a, b) => order(a) - order(b))
+              .map((c) => countChip(data.care_types.find((t) => t.id === c.care_type_id),
+                                    c.count))),
+            el("div", { class: "actions" }, navButton("Open", `#/plants/${p.id}`)))))
+      : el("p", { class: "empty" }, "Nothing logged this week."));
+}
+
+async function yearPage() {
+  const [data, year] = await Promise.all([plantsGet("/api/plants"),
+                                          plantsGet("/api/plants/year")]);
+  const first = weekStart(dayOf(today())) - (YEAR_WEEKS - 1) * 7;
+  const weeks = yearWeeks(year, first);
+  const archived = (name, item) => (item.archived ? `${name} (archived)` : name);
+  if (!data.plants.some((p) => String(p.id) === yearView.plant)) yearView.plant = "";
+  if (!data.care_types.some((t) => String(t.id) === yearView.type) && yearView.type !== "note") {
+    yearView.type = "";
+  }
+
+  const plantPick = dropdown({
+    label: "Plant",
+    options: [{ value: "", label: "All plants" }, ...data.plants.map((p) => ({
+      value: String(p.id), label: archived(p.name, p),
+      render: () => plantName(archived(p.name, p), p.color),
+    }))],
+    value: yearView.plant,
+    onchange: (v) => { yearView.plant = v; show(); },
+  });
+  const typePick = dropdown({
+    label: "Care",
+    options: [{ value: "", label: "All care" }, { value: "note", label: "Notes",
+                                                  render: () => careChip(null) },
+              ...data.care_types.map((t) => ({
+                value: String(t.id), label: archived(t.name, t),
+                render: () => careChip(archived(t.name, t), t.color),
+              }))],
+    value: yearView.type,
+    onchange: (v) => { yearView.type = v; show(); },
+  });
+
+  const chart = el("div", { class: "card year" });
+  const detail = el("div");
+  let squares = [];
+
+  /* Marks week i as picked and shows what it holds. */
+  function pick(i) {
+    yearView.week = first + i * 7;
+    squares.forEach((b, j) => b.setAttribute("aria-pressed", String(j === i)));
+    detail.replaceChildren(weekDetail(weeks[i], yearView.week, data));
+  }
+
+  function show() {
+    const type = data.care_types.find((t) => String(t.id) === yearView.type);
+    const plant = data.plants.find((p) => String(p.id) === yearView.plant);
+    const color = type ? type.color : plant ? plant.color : "lavender";
+    const grid = yearGrid(weeks, first, color, pick);
+    squares = [...grid.querySelectorAll("button")];
+    chart.replaceChildren(grid,
+      el("div", { class: "year-foot" },
+        el("span", { class: "hint" }, "One square per week, Monday to Sunday; this week last."),
+        yearLegend(color)));
+    const i = yearView.week === null ? YEAR_WEEKS - 1 : (yearView.week - first) / 7;
+    pick(i >= 0 && i < YEAR_WEEKS ? i : YEAR_WEEKS - 1);
+  }
+  show();
+
+  return shell("year",
+    el("div", { class: "year-filters" }, field("Plant", plantPick), field("Care", typePick)),
+    chart,
+    detail);
+}
+
 /* ---- care types -------------------------------------------------------- */
 
 async function setTypeArchived(type, archived) {
@@ -1051,6 +1233,7 @@ function pageOf(parts) {
     go(id ? `#/plants/${id}` : "#/plants");
     return null;
   }
+  if (section === "year" && id === null) return yearPage();
   if (section === "types" && id === null) return typesPage();
   go("#/due");
   return null;

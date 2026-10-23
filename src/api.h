@@ -13,6 +13,7 @@ void session_check(struct request *req, struct response *res);
 /* api_plants.c */
 void plants_list(struct request *req, struct response *res);
 void plants_due(struct request *req, struct response *res);
+void plants_year(struct request *req, struct response *res);
 void plants_get(struct request *req, struct response *res);
 void plants_add(struct request *req, struct response *res);
 void plants_update(struct request *req, struct response *res);

@@ -96,6 +96,12 @@ long care_today(void)
     return care_day(tm.tm_year + 1900L, tm.tm_mon + 1L, tm.tm_mday);
 }
 
+long care_week_start(long day)
+{
+    /* Day 0, 1970-01-01, was a Thursday: 3 days after a Monday. */
+    return day - ((day % 7 + 7 + 3) % 7);
+}
+
 int care_month_day_valid(long month, long day)
 {
     /* 2000 is a leap year: Feb 29 is allowed. */

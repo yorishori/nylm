@@ -63,6 +63,57 @@
   border-radius: 10px;
 }
 
+/* The year: one square per week, this week last; 13 weeks (a quarter) to a
+ * row, one row of 52 on wide screens. Shade: how much care, against the
+ * busiest week shown; colour: the care type or plant filtered on. */
+.year-filters { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+.year-filters > .field { flex: 1 1 12rem; }
+.year { display: grid; gap: 0.9rem; }
+.year-grid {
+  display: grid;
+  grid-template-columns: repeat(13, minmax(0, 1fr));
+  gap: 0.3rem 4px;
+  max-width: 32rem;
+}
+.week { display: grid; gap: 2px; }
+.week .month {
+  height: 1.2em;
+  font-size: 0.7rem;
+  line-height: 1.2;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.square {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: var(--shade);
+}
+button.square { cursor: pointer; }
+.square.l1 { background: color-mix(in srgb, var(--c) 30%, var(--shade)); }
+.square.l2 { background: color-mix(in srgb, var(--c) 55%, var(--shade)); }
+.square.l3 { background: color-mix(in srgb, var(--c) 78%, var(--shade)); }
+.square.l4 { background: var(--c); }
+.square[aria-pressed="true"] { outline: 2px solid var(--text); outline-offset: 1px; }
+.year-foot {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem 1rem;
+}
+.year-legend { display: flex; gap: 4px; align-items: center; color: var(--muted); font-size: 0.8rem; }
+.year-legend .square { width: 0.8rem; }
+.week-plant { display: grid; gap: 0.6rem; }
+.chips { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+
+@media (min-width: 56rem) {
+  .year-grid { grid-template-columns: repeat(52, minmax(0, 1fr)); gap: 3px; max-width: none; }
+}
+
 @media (max-width: 21rem) {
   .due-row, .plant-card { grid-template-columns: 1fr; }
   .when { justify-self: start; }

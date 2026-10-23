@@ -33,6 +33,9 @@ void care_format_date(long day, char out[16]);
 /* Today in the server's local time zone. */
 long care_today(void);
 
+/* The Monday on or before day (weeks run Monday to Sunday). */
+long care_week_start(long day);
+
 /* 1 if month/day can exist in some year (Feb 29 allowed). */
 int care_month_day_valid(long month, long day);
 
