@@ -29,6 +29,7 @@
 #define NOTES_MAX        4000 /* plant notes, log notes */
 #define TYPE_NAME_MAX    50
 #define LOG_PAGE         50   /* log entries per GET */
+#define YEAR_WEEKS       52   /* the year view: this week and the 51 before */
 #define PHOTOS_MAX       4    /* photos of one log entry */
 #define PHOTO_MAX_BYTES  (640 * 1024) /* a photo's JPEG; with its thumbnail it fits a body */
 #define THUMB_MAX_BYTES  (64 * 1024)  /* a photo's thumbnail JPEG */
@@ -739,6 +740,41 @@ void plants_due(struct request *req, struct response *res)
     if (list == NULL)
         fprintf(stderr, "plants: out of memory building the due list\n");
     json_reply(res, 200, list);
+}
+
+/*
+ * GET /api/plants/year: how many log entries each plant got of each care
+ * type in each of the last YEAR_WEEKS weeks (Monday to Sunday, this week
+ * last), archived plants and care types included. {from: the Monday of week
+ * 0, counts: [{week, plant_id, care_type_id (null: a note), count}]}
+ */
+void plants_year(struct request *req, struct response *res)
+{
+    (void)req;
+    long from = care_week_start(care_today()) - (YEAR_WEEKS - 1) * 7L;
+    char from_s[16], to_s[16];
+    care_format_date(from, from_s);
+    care_format_date(from + YEAR_WEEKS * 7L - 1, to_s);
+
+    sqlite3_stmt *st = prepare(
+        "SELECT CAST((julianday(date) - julianday(?1)) / 7 AS INTEGER) AS week,"
+        " plant_id, care_type_id, count(*) AS count FROM care_log"
+        " WHERE date BETWEEN ?1 AND ?2"
+        " GROUP BY week, plant_id, care_type_id ORDER BY week, plant_id, care_type_id",
+        "tt", from_s, to_s);
+    cJSON *obj = cJSON_CreateObject();
+    cJSON *counts = obj != NULL && cJSON_AddStringToObject(obj, "from", from_s) != NULL
+                        ? cJSON_AddArrayToObject(obj, "counts")
+                        : NULL;
+    int rc = st != NULL && counts != NULL ? add_rows(counts, st) : -1;
+    sqlite3_finalize(st);
+    if (rc != 0) {
+        if (counts == NULL)
+            fprintf(stderr, "plants: out of memory building the year\n");
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, obj);
 }
 
 /* Validates obj's "periods" array into periods[0..*n). */

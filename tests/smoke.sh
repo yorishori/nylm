@@ -270,7 +270,8 @@ IN4=$(date -d '+4 days' +%F)
 LONG101=$(printf '%0101d' 0 | tr 0 a)
 LONG4001=$(printf '%04001d' 0 | tr 0 a)
 
-for route in "GET /api/plants" "GET /api/plants/due" "GET /api/plants/plant?id=1" \
+for route in "GET /api/plants" "GET /api/plants/due" "GET /api/plants/year" \
+             "GET /api/plants/plant?id=1" \
              "GET /api/plants/log?plant_id=1" \
              "POST /api/plants/add" "POST /api/plants/update" "POST /api/plants/archive" \
              "POST /api/plants/types/add" "POST /api/plants/types/update" \
@@ -560,6 +561,17 @@ expect_body "{\"plant_id\":1,\"plant\":\"Monty II\",\"plant_color\":\"teal\",\"c
 if grep -q '"plant_id":2' "$TMP/body"; then
     FAILED=$((FAILED + 1)); echo "FAIL: due list shows an archived plant"
 else PASSED=$((PASSED + 1)); fi
+
+# year: the 52 weeks up to this one, Monday to Sunday
+FROM=$(date -d "$TODAY -$(( $(date +%u) - 1 + 51 * 7 )) days" +%F)
+post "log add year start"      201 /api/plants/log/add "{\"plant_id\":1,\"care_type_id\":1,\"date\":\"$FROM\",\"note\":\"\"}"
+post "log add before year"     201 /api/plants/log/add "{\"plant_id\":1,\"care_type_id\":1,\"date\":\"$(date -d "$FROM -1 day" +%F)\",\"note\":\"\"}"
+expect 200 "year"              -b "$JAR" "$B/api/plants/year"
+expect_body "{\"from\":\"$FROM\",\"counts\":[{\"week\":0,\"plant_id\":1,\"care_type_id\":1,\"count\":1}," \
+    "year starts 51 Mondays back, without the day before"
+expect_body '{"week":51,"plant_id":3,"care_type_id":null,"count":51}' "year counts notes this week"
+expect_body '{"week":51,"plant_id":2,"care_type_id":null,"count":1}' "year counts archived plants"
+expect 405 "year POST"         -b "$JAR" -X POST -H "$J" -d '{}' "$B/api/plants/year"
 
 # ---- notes -------------------------------------------------------------------
 

@@ -24,6 +24,7 @@ static const struct route routes[] = {
 
     { "GET",    "/api/plants",                plants_list,         0 },
     { "GET",    "/api/plants/due",            plants_due,          0 },
+    { "GET",    "/api/plants/year",           plants_year,         0 },
     { "GET",    "/api/plants/plant",          plants_get,          0 },
     { "POST",   "/api/plants/add",            plants_add,          0 },
     { "POST",   "/api/plants/update",         plants_update,       0 },
