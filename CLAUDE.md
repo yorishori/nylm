@@ -32,8 +32,10 @@ If a rule blocks the task, stop and ask the user; do not work around it.
 1. The only libraries are libc, SQLite, cJSON, OpenSSL libcrypto, TagLib,
    libjpeg-turbo and libpng, all linked dynamically from the distro packages
    (`sqlite`, `cjson`, `openssl`, `taglib`, `libjpeg-turbo`, `libpng`), and
-   (approved) OpenSSL libssl, linked only into `nylm-qobuz` and (approved
-   2026-10-05) `nylm-musicbrainz`, never the server.
+   (approved) OpenSSL libssl, linked into `nylm-qobuz`, (approved
+   2026-10-05) `nylm-musicbrainz` and (approved 2026-10-19) the server, for
+   HTTPS only; `install.sh` runs the `openssl` command to make the
+   certificate.
    (approved) The server app's actions and jobs run these distro tools:
    `pacman-contrib` (checkupdates, which needs `fakeroot`), `smartmontools`,
    `wireguard-tools`, `zstd`, and `rsync` for copying backups to a PC.
@@ -98,7 +100,10 @@ If a rule blocks the task, stop and ask the user; do not work around it.
      subnet check;
    - the HTTP limits (header/body/path sizes, timeouts);
    - the response security headers (CSP, nosniff, Referrer-Policy);
-   - the session cookie attributes (`HttpOnly; SameSite=Strict`);
+   - the session cookie attributes (`HttpOnly; SameSite=Strict`, and
+     `Secure` over HTTPS);
+   - the TLS settings in `src/conn.c` (TLS 1.2 or newer) and
+     `deploy/tls-cert.sh`;
    - the `application/json` requirement on request bodies;
    - Argon2id parameters (they may only go up), the 1 s delay on failed login;
    - static file path checks in `src/static.c`.

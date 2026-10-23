@@ -150,6 +150,16 @@ static int cmd_serve(void)
                             SERVER_MAX_ALLOW, 0);
     if (cfg.nlisten < 0 || cfg.nallow < 0)
         return 1;
+
+    /* HTTPS with both files, plain HTTP with neither. */
+    cfg.tls_cert = env_or("NYLM_TLS_CERT", NULL);
+    cfg.tls_key = env_or("NYLM_TLS_KEY", NULL);
+    if ((cfg.tls_cert == NULL) != (cfg.tls_key == NULL)) {
+        fprintf(stderr, "set both NYLM_TLS_CERT and NYLM_TLS_KEY, or neither\n");
+        return 1;
+    }
+    if (cfg.tls_cert != NULL)
+        auth_secure_cookies();
     for (int i = 0; i < cfg.nlisten; i++)
         cfg.listen[i] = listen[i].addr;
 
@@ -191,7 +201,10 @@ static void usage(void)
             "  NYLM_PUBLIC  [public]       static files directory\n"
             "  NYLM_PORT    [8080]         port to listen on\n"
             "  NYLM_LISTEN  [127.0.0.1]    addresses to listen on, e.g. \"10.0.0.1 192.168.1.5\"\n"
-            "  NYLM_ALLOW   [127.0.0.0/8]  client subnets accepted, e.g. \"10.0.0.0/24 192.168.1.0/24\"\n");
+            "  NYLM_ALLOW   [127.0.0.0/8]  client subnets accepted, e.g. \"10.0.0.0/24 192.168.1.0/24\"\n"
+            "  NYLM_TLS_CERT, NYLM_TLS_KEY (none)\n"
+            "                              certificate chain and private key (PEM): serve\n"
+            "                              HTTPS; unset: plain HTTP\n");
 }
 
 int main(int argc, char **argv)

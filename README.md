@@ -7,7 +7,7 @@ WireGuard and the home LAN.
 ## How it works
 
 ```
-browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> SQLite
+browser ── HTTPS ─> nylm ──> /api/*  router ──> handler ──> SQLite
                          │                          └──> sudo actions/ (root)
                          └─> /*      files from public/
 ```
@@ -17,7 +17,8 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 - The frontend (`public/`) builds the whole UI in JavaScript, one page per app
   (`/plants/`) plus the home page; the server only serves files and JSON.
 - Access: bind to WireGuard + LAN addresses only → drop clients outside the
-  allowed subnets → password login with a session cookie.
+  allowed subnets → HTTPS, with nylm's own certificate authority → password
+  login with a session cookie.
 - nylm runs as user `nylm`. Root work happens only through scripts in
   `/usr/local/lib/nylm/actions/`, via a sudo rule that allows nothing else.
 
@@ -27,10 +28,12 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 |-------------------|----------------------------------------------------------|
 | `src/main.c`      | config from env vars, CLI (`nylm`, `nylm set-password`)  |
 | `src/server.c`    | sockets, subnet allowlist, request loop                  |
+| `src/conn.c`      | a connection's reads and writes, through TLS (HTTPS)     |
 | `src/http.c`      | parse requests, write responses                          |
 | `src/router.c`    | route table: method, path, handler, login required       |
 | `src/api_*.c`     | handlers, one file per feature                           |
 | `src/care.c`      | plant care dates: when a care rule is next due           |
+| `src/notes.c`     | the notes app's ids, and names for clashing tags         |
 | `src/music.c`     | music folder, lock, `nylm music-scan` and `music-write`  |
 | `src/move.c`      | the naming rule, `nylm music-move`                       |
 | `src/dupes.c`     | when two names are the same, for the duplicates          |
@@ -49,10 +52,12 @@ browser ── HTTP ──> nylm ──> /api/*  router ──> handler ──> 
 | `src/migrations.c`| the schema, one appended entry per change                |
 | `public/`         | home page, `common.js` + `style.css` shared by all pages |
 | `public/<app>/`   | one page per app: `index.html`, `<app>.js`, `<app>.css`  |
+| `public/sw.js`    | service worker: keeps the pages on the device (offline)  |
 | `tests/`          | unit tests (`test_*.c`), end-to-end (`smoke.sh`)         |
 | `deploy/`         | `install.sh`, systemd unit, root action scripts          |
 
-On the server: binary `/usr/local/bin/nylm`, config `/etc/nylm.conf`, data
+On the server: binary `/usr/local/bin/nylm`, config `/etc/nylm.conf`, HTTPS
+certificate `/etc/nylm/tls/`, data
 in `NYLM_DATA` (on the data drive), frontend `/usr/local/share/nylm/public/`, actions
 `/usr/local/lib/nylm/actions/`, sudo rule `/etc/sudoers.d/nylm`.
 
@@ -69,6 +74,7 @@ $NYLM_DATA/music/music.db     music tags cache, changes, scans, audit log
 $NYLM_DATA/music/art/         album art: each picture once, and its thumbnail
 $NYLM_DATA/music/*.lock       the library's lock, the Qobuz and MusicBrainz services
 $NYLM_DATA/server/server.db   server app: audit log, WireGuard peer names
+$NYLM_DATA/notes/notes.db     reminders, notes and their tags
 ```
 
 nylm refuses to start if the folder does not exist. In an empty folder it
@@ -77,6 +83,40 @@ Point `NYLM_DATA` at a folder *inside* the drive (`/mnt/data/nylm`), not at
 the mount point: when the drive is not mounted the folder is missing, so nylm
 stops (and systemd retries) instead of starting empty on the system disk.
 Create the folder and make it writable by user `nylm` before installing.
+
+## HTTPS
+
+nylm serves HTTPS when `NYLM_TLS_CERT` and `NYLM_TLS_KEY` are set (both, or
+neither: plain HTTP, as `make run` does); the session cookie is then
+`Secure`. It needs TLS 1.2 or newer. `install.sh` sets them and runs
+`deploy/tls-cert.sh`, which makes, in `/etc/nylm/tls/`:
+
+- `ca.crt`, `ca.key`: a certificate authority for this server alone, made
+  once and kept (the key: root only);
+- `server.crt`, `server.key`: nylm's certificate for the addresses in
+  `NYLM_LISTEN`, signed by it, valid for 10 years; made again when those
+  change (run `install.sh` again).
+
+Each device trusts nylm once it has `ca.crt` installed. `install.sh` puts it
+at `https://<address>:<port>/nylm-ca.crt`; the browser warns the first
+time, as it does not know nylm yet. On Android: download it, then
+Settings → Security → More security settings → Encryption & credentials →
+Install a certificate → CA certificate (the names vary a little by phone).
+On a PC, import it into the browser's or the system's authorities.
+A new `ca.crt` (if `/etc/nylm/tls/ca.*` is deleted) has to be installed
+again everywhere.
+
+## The app on a phone
+
+Over HTTPS nylm is a web app a phone can install: open it in Chrome, then
+menu → Install app (or Add to home screen). It opens like an app, from its
+own icon (`manifest.json`, `icon-*.png`). Its service worker (`sw.js`)
+keeps the pages of home, notes and plants on the phone: they come from the
+server when it answers (within 4 seconds) and from the phone's copy when it
+does not, so they open offline. Music and server are online only: their
+pages are never kept. It never keeps API answers; notes and plants work
+offline from their own copies (see Notes, Plants). Over plain HTTP browsers
+allow neither.
 
 ## Plants
 
@@ -99,10 +139,46 @@ stored once, named by the SHA-256 of the photo, in `$NYLM_DATA/plants/photos/`
 size=full|thumb`. Removing a photo or deleting its entry removes the files
 no other entry has.
 
+Offline (the app on a phone, see above): the app keeps every answer it
+reads on the device (IndexedDB), and every plant's page every 10 minutes
+it is open, and shows them when the server is out of reach, with the due
+dates counted from today; journal photos once seen are kept too. Care
+logged then (Done, a new journal entry, photos on it) waits on the device,
+shown as "Logged, waiting to sync", and is sent when the server answers
+again (when the app opens, comes back to the screen or the device is back
+online). An entry the server refuses keeps its reason, to discard or try
+again. Editing plants, rules and care types needs the server. If the
+server's reply to a sent entry is lost, it is sent again: a duplicate entry
+to delete by hand.
+
 Each plant and care type has a colour from a fixed palette (butter, lime,
 mint, teal, sky, periwinkle, lavender, orchid). In the app a plant's colour
 is the stripe on its card and the dot before its name, a care type's colour
 is its chip, and only late (rose) and today (peach) colour the due label.
+
+## Notes
+
+Quick reminders and notes (`src/api_notes.c`, `public/notes/`). Reminders
+are one line each (200 bytes), added and ticked off. Notes have no title,
+up to 20000 bytes of text with a little Markdown (`#` headings, `**bold**`,
+`*italic*`, `` `code` ``, lists, `- [ ]` tasks ticked in place, `>`
+quotes, ```` ``` ```` code blocks; never HTML), and up to 20 tags. Tags
+have a name and a colour from the palette; the Tags tab adds, renames and
+deletes them, the Notes tab shows notes by tag and by text, and Stats counts
+it all.
+
+Each device keeps everything in the browser (IndexedDB) and works on that,
+with or without the server; logging out clears it. One call,
+`POST /api/notes/sync {since, changes}`, sends what changed on the device
+and brings back every row changed since the device's last sync, 100 at a
+time. Ids are made by the device (32 hex characters) and every row has a
+rev, the value of one counter when it last changed. When two devices
+changed the same thing: a removed reminder stays removed; a tag's latest
+change wins, and a name another tag has gets a number ("work 2"); a note
+edited from an older rev keeps the server's note and comes back as a new
+note next to it (nothing is lost), and removing such a note does nothing.
+A change sent twice changes nothing. Removed rows stay, emptied, so other
+devices learn of them.
 
 ## Music
 
@@ -535,7 +611,7 @@ In a checkout (a debug build with sanitizers, data in `./dev-data`):
 ```sh
 make test                              # unit + end-to-end tests
 NYLM_DATA=dev-data ./nylm-debug set-password   # once, before make run
-make run                               # server on http://127.0.0.1:8080
+make run                               # server on http://127.0.0.1:8080 (no TLS)
 # The services by hand (the web app's buttons need the deployed root
 # actions); NYLM_MUSIC is the music folder to use:
 NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-debug music-scan
@@ -547,7 +623,7 @@ NYLM_DATA=dev-data ./nylm-musicbrainz-debug ids      # or genres
 
 Configuration is environment variables; `nylm --help` lists them.
 Build needs `gcc`, `make` and the system libraries `sqlite` (3.44+), `cjson`,
-`openssl` (3.2+; libssl only for `nylm-qobuz` and `nylm-musicbrainz`),
+`openssl` (3.2+; the `openssl` command makes the certificate),
 `taglib` (2.0+),
 `libjpeg-turbo` and `libpng`, linked dynamically: `pacman -Syu` brings their
 fixes. `make` builds `nylm`, `nylm-qobuz` and `nylm-musicbrainz`. The server app's root

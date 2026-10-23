@@ -11,6 +11,12 @@
  *   a plant's colour      = stripe on its card's left edge, dot before its name
  *   a care type's colour  = filled chip with its name
  *   urgency               = the due label's text: rose late, peach today
+ *
+ * Offline: every read is kept on this device (plantsGet), and when the
+ * server is out of reach the page is built from what was kept, its due
+ * dates counted again from today. Care logged then (Done, a new journal
+ * entry and its photos) waits on this device (the queue) and is sent
+ * when the server can be reached again.
  */
 
 /* ---- due dates --------------------------------------------------------- */
@@ -37,6 +43,164 @@ function dueTone(daysLeft) {
 function dueLabel(daysLeft, due) {
   const tone = dueTone(daysLeft);
   return el("span", { class: tone ? "due " + tone : "due" }, dueText(daysLeft, due));
+}
+
+/* ---- offline ------------------------------------------------------------ */
+
+/* The time (ms) of the oldest kept answer the page shows; null if none. */
+let keptTime = null;
+
+/* Days from today to the date "YYYY-MM-DD". */
+function daysUntil(iso) {
+  const a = parseDate(today());
+  const b = parseDate(iso);
+  return Math.round((Date.UTC(b.y, b.m - 1, b.d) - Date.UTC(a.y, a.m - 1, a.d)) / 86400000);
+}
+
+/* GET path, and keep the answer on this device. */
+async function keepGet(path) {
+  const data = await api("GET", path);
+  try {
+    await localSet(`plants ${path}`, { time: Date.now(), data });
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+  return data;
+}
+
+/*
+ * GET path; when the server is out of reach, the answer kept on this
+ * device, with its due dates counted from today (a due date never depends
+ * on today: only days_left does).
+ */
+async function plantsGet(path) {
+  try {
+    return await keepGet(path);
+  } catch (err) {
+    if (!(err instanceof ApiError && err.status === 0)) throw err;
+    const kept = await localGet(`plants ${path}`);
+    if (!kept) throw new ApiError(0, "Offline, and this page is not on this device yet.");
+    keptTime = keptTime === null ? kept.time : Math.min(keptTime, kept.time);
+    const items = Array.isArray(kept.data) ? kept.data : kept.data.rules || [];
+    for (const item of items) if (item.due) item.days_left = daysUntil(item.due);
+    return kept.data;
+  }
+}
+
+const KEEP_EVERY_MS = 10 * 60 * 1000;
+let keptAllAt = 0;
+
+/* Keeps every plant's page on this device for offline use, at most every
+ * KEEP_EVERY_MS; quietly stops if the server can't be reached. */
+async function keepAll() {
+  if (Date.now() - keptAllAt < KEEP_EVERY_MS) return;
+  keptAllAt = Date.now();
+  try {
+    const data = await keepGet("/api/plants");
+    await keepGet("/api/plants/due");
+    for (const p of data.plants) {
+      await keepGet(`/api/plants/plant?id=${p.id}`);
+      await keepGet(`/api/plants/log?plant_id=${p.id}`);
+    }
+  } catch (err) {
+    keptAllAt = 0;
+    if (!(err instanceof ApiError && err.status === 0)) handleError(err);
+  }
+}
+
+/*
+ * Journal entries made while the server was out of reach: {unsynced,
+ * entries: [{key, plant_id, care_type_id, date, note, photos: [{image,
+ * thumb}], log_id: set once the entry is on the server, error: why the
+ * server refused it}]}, kept on this device until sent.
+ */
+let queue = { unsynced: 0, entries: [] };
+let sending = false;
+
+async function saveQueue() {
+  queue.unsynced = queue.entries.length;
+  await localSet("plants-queue", queue);
+}
+
+/* The waiting entry of care typeId for plantId, if any. */
+function queuedFor(plantId, typeId) {
+  return queue.entries.find((e) => e.plant_id === plantId && e.care_type_id === typeId);
+}
+
+/* Adds a journal entry {plant_id, care_type_id, date, note}; when the
+ * server is out of reach, keeps it on this device. true if it was sent. */
+async function addEntry(entry) {
+  try {
+    await api("POST", "/api/plants/log/add", entry);
+    return true;
+  } catch (err) {
+    if (!(err instanceof ApiError && err.status === 0)) throw err;
+  }
+  queue.entries.push({ key: `${Date.now()}-${Math.random()}`, ...entry, photos: [],
+                       log_id: null, error: null });
+  await saveQueue();
+  return false;
+}
+
+/* What the status line adds for an entry that was not sent. */
+function keptText(sent) {
+  return sent ? "" : ": kept on this device until nylm can be reached";
+}
+
+/* Whether a failed request should be tried again later. */
+function retryLater(err) {
+  return err instanceof ApiError && (err.status === 0 || err.status === 401 || err.status >= 500);
+}
+
+/*
+ * Sends the waiting entries and their photos, oldest first. One the server
+ * refuses keeps its error, to be discarded or tried again. Stops when the
+ * server is out of reach.
+ */
+async function sendQueue() {
+  if (sending || !queue.entries.some((e) => !e.error)) return;
+  sending = true;
+  let sent = 0;
+  try {
+    for (const e of queue.entries.filter((x) => !x.error)) {
+      try {
+        if (!e.log_id) {
+          const created = await api("POST", "/api/plants/log/add", {
+            plant_id: e.plant_id, care_type_id: e.care_type_id, date: e.date, note: e.note,
+          });
+          e.log_id = created.id;
+          await saveQueue();
+        }
+        while (e.photos.length) {
+          try {
+            await api("POST", "/api/plants/photos/add", { log_id: e.log_id, ...e.photos[0] });
+          } catch (err) {
+            if (!(err instanceof ApiError && err.status === 409)) throw err; /* there already */
+          }
+          e.photos.shift();
+          await saveQueue();
+        }
+        queue.entries.splice(queue.entries.indexOf(e), 1);
+        await saveQueue();
+        sent++;
+      } catch (err) {
+        if (retryLater(err)) throw err;
+        e.error = err.message;
+        await saveQueue();
+      }
+    }
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) handleError(err);
+    else if (!retryLater(err)) setStatus(err.message, true);
+  } finally {
+    sending = false;
+  }
+  if (sent) {
+    setStatus(`Sent ${plural(sent, "entry", "entries")} logged on this device`);
+    refresh();
+  } else if (queue.entries.some((e) => e.error)) {
+    refresh();
+  }
 }
 
 /* ---- identity ---------------------------------------------------------- */
@@ -83,10 +247,14 @@ function shell(active, ...content) {
 
 /* Logs care done on a date, then shows the page again. */
 async function logCare(plantId, plantName, typeId, typeName, date) {
-  await api("POST", "/api/plants/log/add",
-            { plant_id: plantId, care_type_id: typeId, date, note: "" });
-  setStatus(`Logged ${typeName.toLowerCase()} for ${plantName}`);
+  const sent = await addEntry({ plant_id: plantId, care_type_id: typeId, date, note: "" });
+  setStatus(`Logged ${typeName.toLowerCase()} for ${plantName}${keptText(sent)}`);
   refresh();
+}
+
+/* What shows instead of the done buttons for care logged on this device. */
+function waitingLabel() {
+  return el("span", { class: "due paused" }, "Logged, waiting to sync");
 }
 
 /*
@@ -136,14 +304,16 @@ const DUE_GROUPS = [
 
 /* One care due; showPlant: false inside its plant's group. */
 function dueRow(item, showPlant = true) {
+  const waiting = queuedFor(item.plant_id, item.care_type_id);
+  const open = navButton("Open plant", `#/plants/${item.plant_id}`);
   return el("li", { class: `card marked due-row c-${item.plant_color}` },
     el("div", { class: "what" },
       showPlant ? plantName(item.plant, item.plant_color, "strong") : null,
       el("span", {}, careChip(item.care_type, item.care_type_color))),
-    el("span", { class: "when" }, dueLabel(item.days_left, item.due)),
+    el("span", { class: "when" }, waiting ? waitingLabel() : dueLabel(item.days_left, item.due)),
     el("div", { class: "done" },
-      doneButtons(item.plant_id, item.plant, item.care_type_id, item.care_type,
-                  navButton("Open plant", `#/plants/${item.plant_id}`))));
+      waiting ? el("div", { class: "actions" }, open)
+              : doneButtons(item.plant_id, item.plant, item.care_type_id, item.care_type, open)));
 }
 
 /* Later: one group per plant (by its soonest care), which opens on its
@@ -162,7 +332,7 @@ function plantGroups(items) {
 }
 
 async function duePage() {
-  const due = await api("GET", "/api/plants/due");
+  const due = await plantsGet("/api/plants/due");
   if (due.length === 0) {
     return shell("due",
       el("div", { class: "empty" },
@@ -269,8 +439,8 @@ async function setPlantArchived(plant, archived) {
 }
 
 async function plantsPage() {
-  const [data, due] = await Promise.all([api("GET", "/api/plants"),
-                                         api("GET", "/api/plants/due")]);
+  const [data, due] = await Promise.all([plantsGet("/api/plants"),
+                                         plantsGet("/api/plants/due")]);
   const urgent = mostUrgent(due);
   const active = data.plants.filter((p) => !p.archived);
   const archived = data.plants.filter((p) => p.archived);
@@ -318,11 +488,12 @@ function seasonText(p) {
 function ruleCard(plant, rule, types) {
   const type = types.find((t) => t.id === rule.care_type_id);
   const typeArchived = Boolean(type && type.archived);
+  const waiting = queuedFor(plant.id, rule.care_type_id);
   const editor = el("div", { hidden: true });
   const view = el("div", { class: "rule" },
     el("header", {},
       el("h3", {}, careChip(rule.care_type, rule.care_type_color)),
-      dueLabel(rule.days_left, rule.due)),
+      waiting ? waitingLabel() : dueLabel(rule.days_left, rule.due)),
     el("p", {}, scheduleText(rule)),
     rule.periods.length
       ? el("ul", { class: "seasons" }, rule.periods.map((p) => el("li", {}, seasonText(p))))
@@ -333,6 +504,7 @@ function ruleCard(plant, rule, types) {
       ? el("div", { class: "stack" },
           el("p", { class: "hint" }, `${rule.care_type} is archived. Restore it to log it.`),
           el("div", { class: "actions" }, navButton("Go to Care types", "#/types")))
+      : waiting ? null
       : rule.due ? doneButtons(plant.id, plant.name, rule.care_type_id, rule.care_type) : null,
     el("div", { class: "actions" },
       el("button", { class: "btn", type: "button", onclick: () => {
@@ -469,9 +641,9 @@ function ruleForm(plant, rule, types, onCancel) {
 }
 
 async function plantPage(id) {
-  const [plant, data, log] = await Promise.all([api("GET", `/api/plants/plant?id=${id}`),
-                                                api("GET", "/api/plants"),
-                                                api("GET", `/api/plants/log?plant_id=${id}`)]);
+  const [plant, data, log] = await Promise.all([plantsGet(`/api/plants/plant?id=${id}`),
+                                                plantsGet("/api/plants"),
+                                                plantsGet(`/api/plants/log?plant_id=${id}`)]);
   const ruled = new Set(plant.rules.map((r) => r.care_type_id));
   const freeTypes = data.care_types.filter((t) => !t.archived && !ruled.has(t.id));
 
@@ -540,9 +712,9 @@ function photoUrl(hash, size) {
   return `/api/plants/photo?hash=${encodeURIComponent(hash)}&size=${size}`;
 }
 
-/* Adds a photo file to entry id: a JPEG and its thumbnail, both made here. */
-async function addPhoto(id, file) {
-  setStatus("Adding the photo…");
+/* A photo file as the server takes it: {image, thumb}, a JPEG and its
+ * thumbnail in base64, both made here. */
+async function photoOf(file) {
   const bitmap = await loadBitmap(file);
   let image, thumb;
   try {
@@ -551,9 +723,13 @@ async function addPhoto(id, file) {
   } finally {
     bitmap.close();
   }
-  await api("POST", "/api/plants/photos/add", {
-    log_id: id, image: await base64Of(image.blob), thumb: await base64Of(thumb.blob),
-  });
+  return { image: await base64Of(image.blob), thumb: await base64Of(thumb.blob) };
+}
+
+/* Adds a photo file to entry id. */
+async function addPhoto(id, file) {
+  setStatus("Adding the photo…");
+  await api("POST", "/api/plants/photos/add", { log_id: id, ...(await photoOf(file)) });
   setStatus("Added the photo");
 }
 
@@ -593,8 +769,9 @@ function photoStrip(entry, view, viewer) {
     } }, el("img", { src: photoUrl(hash, "thumb"), alt: "" }))));
 }
 
-/* A button that adds a photo (from a file, or the camera on a phone). */
-function addPhotoButton(entry) {
+/* A button that adds a photo (from a file, or the camera on a phone) with
+ * add(file); entry.photos: those it has. */
+function addPhotoButton(entry, add) {
   if (entry.photos.length >= PHOTOS_MAX) return null;
   const input = el("input", { type: "file", accept: "image/*", hidden: true });
   const button = el("button", { class: "btn", type: "button", onclick: () => input.click() },
@@ -604,7 +781,7 @@ function addPhotoButton(entry) {
     if (!file) return;
     button.disabled = true;
     try {
-      await addPhoto(entry.id, file);
+      await add(file);
       refresh();
     } catch (err) {
       handleError(err);
@@ -652,7 +829,7 @@ function entryCard(entry, typeById, types) {
     el("header", {},
       el("strong", {}, showDate(entry.date)),
       type ? careChip(type.name, type.color) : careChip(null)),
-    entry.note ? el("p", { class: "note" }, entry.note) : null,
+    entry.note ? el("p", { class: "note" }, entry.note) : "",
     photoStrip(entry, view, viewer) || "",
     el("div", { class: "actions" },
       el("button", { class: "btn", type: "button", onclick: () => {
@@ -672,7 +849,7 @@ function entryCard(entry, typeById, types) {
         view.hidden = true;
         editor.hidden = false;
       } }, "Edit"),
-      addPhotoButton(entry),
+      addPhotoButton(entry, (file) => addPhoto(entry.id, file)),
       el("button", { class: "btn danger", type: "button", onclick: async () => {
         if (!sure(`Delete the entry of ${showDate(entry.date)}` +
                   (entry.photos.length ? ` and its ${plural(entry.photos.length, "photo", "photos")}?`
@@ -690,14 +867,50 @@ function entryCard(entry, typeById, types) {
   return li;
 }
 
+/* An entry waiting on this device: what it is, its photos, and why the
+ * server refused it, if it did. */
+function queuedCard(entry, typeById) {
+  const type = entry.care_type_id == null ? null : typeById.get(entry.care_type_id);
+  return el("li", { class: "card" }, el("div", { class: "entry" },
+    el("header", {},
+      el("strong", {}, showDate(entry.date)),
+      type ? careChip(type.name, type.color) : careChip(null),
+      el("span", { class: "muted" }, "Waiting to sync")),
+    entry.note ? el("p", { class: "note" }, entry.note) : null,
+    entry.photos.length ? el("p", { class: "muted" },
+                             `${plural(entry.photos.length, "photo", "photos")} to send`) : null,
+    entry.error ? el("p", { class: "form-error" }, `nylm refused it: ${entry.error}`) : null,
+    el("div", { class: "actions" },
+      entry.log_id ? null : addPhotoButton(entry, async (file) => {
+        entry.photos.push(await photoOf(file));
+        await saveQueue();
+        setStatus("Kept the photo on this device");
+      }),
+      entry.error ? el("button", { class: "btn", type: "button", onclick: () => {
+        entry.error = null;
+        saveQueue().then(sendQueue).catch(handleError);
+      } }, "Try again") : null,
+      el("button", { class: "btn danger", type: "button", onclick: async () => {
+        if (!sure(`Discard the entry of ${showDate(entry.date)}? It never reached nylm.`)) return;
+        queue.entries.splice(queue.entries.indexOf(entry), 1);
+        try {
+          await saveQueue();
+        } catch (err) {
+          handleError(err);
+        }
+        refresh();
+      } }, "Discard"))));
+}
+
 /* The plant's journal: its entries, newest first, with Show older entries,
  * and the form for a new one. log: its first page of entries. */
 function journalSection(plant, log, types) {
   const typeById = new Map(types.map((t) => [t.id, t]));
   const inputs = entryInputs(null, types.filter((t) => !t.archived));
+  const waiting = queue.entries.filter((e) => e.plant_id === plant.id);
   const add = form({ class: "raised" }, async () => {
-    await api("POST", "/api/plants/log/add", { plant_id: plant.id, ...entryBody(inputs) });
-    setStatus("Added the entry");
+    const sent = await addEntry({ plant_id: plant.id, ...entryBody(inputs) });
+    setStatus(`Added the entry${keptText(sent)}`);
     refresh();
   },
     el("h3", {}, "New entry"),
@@ -725,7 +938,11 @@ function journalSection(plant, log, types) {
     el("header", {}, el("h2", {}, "Journal")),
     el("div", { class: "split" },
       el("div", { class: "stack" },
-        log.entries.length ? list : el("p", { class: "empty" }, "Nothing written yet."),
+        waiting.length ? el("ul", { class: "list" }, waiting.map((e) => queuedCard(e, typeById)))
+                       : null,
+        log.entries.length ? list
+                           : waiting.length ? null
+                                            : el("p", { class: "empty" }, "Nothing written yet."),
         el("div", { class: "actions" }, olderButton)),
       el("div", { class: "side first" }, add)));
 }
@@ -766,7 +983,7 @@ function typeRow(type) {
 }
 
 async function typesPage() {
-  const data = await api("GET", "/api/plants");
+  const data = await plantsGet("/api/plants");
   const active = data.care_types.filter((t) => !t.archived);
   const archived = data.care_types.filter((t) => t.archived);
   const name = el("input", { required: true, maxlength: 50, "aria-label": "New care type",
@@ -807,8 +1024,21 @@ async function typesPage() {
 
 /* ---- routing ----------------------------------------------------------- */
 
+/* The page of parts; built from what this device kept when offline. */
+async function route(parts) {
+  keptTime = null;
+  const page = await pageOf(parts);
+  if (page && keptTime !== null) {
+    const waiting = queue.entries.length;
+    setStatus(`Offline: as of ${showTime(keptTime / 1000)}.` +
+              (waiting ? ` ${plural(waiting, "entry waits", "entries wait")} on this device.`
+                       : ""));
+  }
+  return page;
+}
+
 /* ["plants", "3"] -> the plant page, etc. Unknown hashes go to Due. */
-function route(parts) {
+function pageOf(parts) {
   const [section, rawId] = parts;
   const id = rawId === undefined ? null : Number(rawId);
   if (id !== null && !(Number.isInteger(id) && id > 0)) {
@@ -826,4 +1056,21 @@ function route(parts) {
   return null;
 }
 
-startApp(route);
+/* Sends what waits, then keeps every page for offline use; again when
+ * the device comes back online or the app back to the screen. */
+async function start() {
+  try {
+    queue = (await localGet("plants-queue")) || queue;
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+  const catchUp = () => sendQueue().then(keepAll);
+  window.addEventListener("online", catchUp);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") catchUp();
+  });
+  await startApp(route);
+  catchUp();
+}
+
+start();

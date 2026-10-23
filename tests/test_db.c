@@ -127,6 +127,9 @@ int main(void)
     CHECK(!has_table(plants_db, "user") && !has_table(plants_db, "sessions"));
     CHECK(version(core_db) == core_migration_count);
     CHECK(version(plants_db) == plants_migration_count);
+    CHECK(has_table(notes_db, "notes") && has_table(notes_db, "tags") &&
+          has_table(notes_db, "reminders") && !has_table(plants_db, "notes"));
+    CHECK(version(notes_db) == notes_migration_count);
 
     /* opening again finds the databases and applies nothing twice */
     db_close_all();
@@ -193,12 +196,13 @@ int main(void)
         "plants/plants.db", "plants/plants.db-wal", "plants/plants.db-shm",
         "music/music.db", "music/music.db-wal", "music/music.db-shm",
         "server/server.db", "server/server.db-wal", "server/server.db-shm",
+        "notes/notes.db", "notes/notes.db-wal", "notes/notes.db-shm",
     };
     for (size_t i = 0; i < sizeof files / sizeof files[0]; i++) {
         snprintf(path, sizeof path, "%s/%s", dir, files[i]);
         unlink(path); /* the -wal/-shm files may already be gone */
     }
-    static const char *const dirs[] = { "core", "plants", "music", "server", "" };
+    static const char *const dirs[] = { "core", "plants", "music", "server", "notes", "" };
     for (size_t i = 0; i < sizeof dirs / sizeof dirs[0]; i++) {
         snprintf(path, sizeof path, "%s/%s", dir, dirs[i]);
         CHECK(rmdir(path) == 0);

@@ -399,3 +399,49 @@ const char *const server_migrations[] = {
 };
 
 const int server_migration_count = sizeof server_migrations / sizeof server_migrations[0];
+
+const char *const notes_migrations[] = {
+    /* 1: quick reminders, notes and their tags. Every device keeps a copy
+     * and syncs it (src/api_notes.c): ids are made by the device (32 hex
+     * characters), and each row's rev is the sync counter's value when it
+     * last changed, so a device asks for everything past the last rev it
+     * saw. A deleted row stays, emptied, so other devices learn of it.
+     * Times are unix seconds; a note's tags are a JSON array of tag ids
+     * (a deleted tag's id may stay in it: devices skip ids they lack). */
+    "CREATE TABLE sync ("
+    "    id  INTEGER PRIMARY KEY CHECK (id = 1),"
+    "    rev INTEGER NOT NULL"
+    ") STRICT;"
+    "INSERT INTO sync (id, rev) VALUES (1, 0);"
+    "CREATE TABLE reminders ("
+    "    id      TEXT    PRIMARY KEY CHECK (length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'),"
+    "    text    TEXT    NOT NULL,"
+    "    created INTEGER NOT NULL,"
+    "    rev     INTEGER NOT NULL,"
+    "    deleted INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1))"
+    ") STRICT, WITHOUT ROWID;"
+    "CREATE INDEX reminders_by_rev ON reminders (rev);"
+    "CREATE TABLE notes ("
+    "    id      TEXT    PRIMARY KEY CHECK (length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'),"
+    "    text    TEXT    NOT NULL,"
+    "    tags    TEXT    NOT NULL CHECK (json_valid(tags)),"
+    "    created INTEGER NOT NULL,"
+    "    updated INTEGER NOT NULL,"
+    "    rev     INTEGER NOT NULL,"
+    "    deleted INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1))"
+    ") STRICT, WITHOUT ROWID;"
+    "CREATE INDEX notes_by_rev ON notes (rev);"
+    "CREATE TABLE tags ("
+    "    id      TEXT    PRIMARY KEY CHECK (length(id) = 32 AND id NOT GLOB '*[^0-9a-f]*'),"
+    "    name    TEXT    NOT NULL,"
+    "    color   TEXT    NOT NULL"
+    "        CHECK (color IN ('butter', 'lime', 'mint', 'teal', 'sky', 'periwinkle',"
+    "                         'lavender', 'orchid')),"
+    "    rev     INTEGER NOT NULL,"
+    "    deleted INTEGER NOT NULL DEFAULT 0 CHECK (deleted IN (0, 1))"
+    ") STRICT, WITHOUT ROWID;"
+    "CREATE UNIQUE INDEX tags_by_name ON tags (name COLLATE NOCASE) WHERE deleted = 0;"
+    "CREATE INDEX tags_by_rev ON tags (rev);",
+};
+
+const int notes_migration_count = sizeof notes_migrations / sizeof notes_migrations[0];

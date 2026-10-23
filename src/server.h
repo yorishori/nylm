@@ -19,6 +19,7 @@ struct server_config {
     int nlisten;
     struct subnet allow[SERVER_MAX_ALLOW];  /* accepted client subnets */
     int nallow;
+    const char *tls_cert, *tls_key;         /* PEM files; NULL: plain HTTP */
 };
 
 /*

@@ -1,6 +1,6 @@
 #!/bin/sh
 # End-to-end checks against a running server: the API and static files, then
-# listen addresses and the client allowlist.
+# HTTPS, listen addresses and the client allowlist.
 # Usage: tests/smoke.sh [binary]   (default: ./nylm-debug, which has sanitizers)
 set -u
 
@@ -218,6 +218,13 @@ expect 200 "plants.css"         "$B/plants/plants.css"
 expect 200 "music page"         "$B/music/"
 expect 200 "music.js"           "$B/music/music.js"
 expect 200 "music.css"          "$B/music/music.css"
+expect 200 "manifest"           "$B/manifest.json"
+expect_header "content-type: application/json" "manifest type" "$B/manifest.json"
+expect 200 "service worker"     "$B/sw.js"
+expect_header "content-type: text/javascript" "service worker type" "$B/sw.js"
+expect 200 "icon 192"           "$B/icon-192.png"
+expect 200 "icon 512"           "$B/icon-512.png"
+expect_header "content-type: image/png" "icon type" "$B/icon-512.png"
 expect 404 "plants without /"   "$B/plants"
 expect 404 "old app.js gone"    "$B/app.js"
 expect 404 "missing file"       "$B/nope.html"
@@ -553,6 +560,179 @@ expect_body "{\"plant_id\":1,\"plant\":\"Monty II\",\"plant_color\":\"teal\",\"c
 if grep -q '"plant_id":2' "$TMP/body"; then
     FAILED=$((FAILED + 1)); echo "FAIL: due list shows an archived plant"
 else PASSED=$((PASSED + 1)); fi
+
+# ---- notes -------------------------------------------------------------------
+
+expect 401 "/api/notes/sync needs login" -X POST -H "$J" -d '{"since":0,"changes":[]}' \
+    "$B/api/notes/sync"
+expect 200 "notes page"         "$B/notes/"
+expect 200 "notes.js"           "$B/notes/notes.js"
+expect 200 "notes.css"          "$B/notes/notes.css"
+
+NDB="$TMP/data/notes/notes.db"
+# nquery WANT DESCRIPTION SQL: the notes database answers SQL with WANT.
+nquery() {
+    got=$(sqlite3 "$NDB" "$3")
+    if [ "$got" = "$1" ]; then PASSED=$((PASSED + 1)); else
+        FAILED=$((FAILED + 1)); echo "FAIL: $2: got '$got', want '$1'"; fi
+}
+# sync DESCRIPTION STATUS SINCE CHANGES: a sync with the changes (a JSON list).
+sync() {
+    post "$1" "$2" /api/notes/sync "{\"since\":$3,\"changes\":$4}"
+}
+# nid N: the id 000...N (32 characters).
+nid() { printf '%032d' "$1"; }
+NOW=$(date +%s)
+R1=$(nid 1) N1=$(nid 2) N2=$(nid 3) T1=$(nid 4) T2=$(nid 5)
+REM="{\"kind\":\"reminder\",\"id\":\"$R1\",\"deleted\":false,\"text\":\"buy milk\",\"created\":1700000000}"
+TAG="{\"kind\":\"tag\",\"id\":\"$T1\",\"deleted\":false,\"name\":\"Work\",\"color\":\"mint\"}"
+NOTE="{\"kind\":\"note\",\"id\":\"$N1\",\"base\":0,\"deleted\":false,\"text\":\"# Hi\\n- [ ] eggs\",\"tags\":[\"$T1\"],\"created\":1700000000,\"updated\":1700000000}"
+
+# validation: nothing is written
+expect 415 "sync needs json"    -b "$JAR" -d '{"since":0,"changes":[]}' "$B/api/notes/sync"
+post "sync invalid json"        400 /api/notes/sync '{"since":'
+post "sync not object"          400 /api/notes/sync '[]'
+post "sync no since"            400 /api/notes/sync '{"changes":[]}'
+post "sync since string"        400 /api/notes/sync '{"since":"0","changes":[]}'
+post "sync since negative"      400 /api/notes/sync '{"since":-1,"changes":[]}'
+post "sync since fraction"      400 /api/notes/sync '{"since":1.5,"changes":[]}'
+post "sync since past 2^53"     400 /api/notes/sync '{"since":9007199254740992,"changes":[]}'
+post "sync no changes"          400 /api/notes/sync '{"since":0}'
+post "sync changes object"      400 /api/notes/sync '{"since":0,"changes":{}}'
+MANY=$(i=0; printf '['; while [ $i -lt 501 ]; do
+    [ $i -gt 0 ] && printf ','
+    printf '{"kind":"reminder","id":"%032d","deleted":true}' "$i"; i=$((i + 1)); done; printf ']')
+sync "sync 501 changes"         400 0 "$MANY"
+expect_body "at most 500 changes" "sync 501 changes message"
+sync "change not object"        400 0 '[1]'
+sync "change no kind"           400 0 "[{\"id\":\"$R1\",\"deleted\":true}]"
+sync "change bad kind"          400 0 "[{\"kind\":\"todo\",\"id\":\"$R1\",\"deleted\":true}]"
+expect_body "changes[0]: 'kind' must be reminder, note or tag" "change error names its index"
+sync "change no id"             400 0 '[{"kind":"reminder","deleted":true}]'
+sync "change id short"          400 0 "[{\"kind\":\"reminder\",\"id\":\"$(printf '%031d' 0)\",\"deleted\":true}]"
+sync "change id long"           400 0 "[{\"kind\":\"reminder\",\"id\":\"$(printf '%033d' 0)\",\"deleted\":true}]"
+sync "change id upper case"     400 0 "[{\"kind\":\"reminder\",\"id\":\"$(printf '%032d' 0 | tr 0 A)\",\"deleted\":true}]"
+sync "change id not hex"        400 0 "[{\"kind\":\"reminder\",\"id\":\"$(printf '%032d' 0 | tr 0 g)\",\"deleted\":true}]"
+sync "change no deleted"        400 0 "[{\"kind\":\"reminder\",\"id\":\"$R1\"}]"
+sync "change deleted number"    400 0 "[{\"kind\":\"reminder\",\"id\":\"$R1\",\"deleted\":1}]"
+sync "same change twice"        400 0 "[$REM,$REM]"
+expect_body "changes[1]: the same kind and id" "same change twice message"
+sync "reminder no text"         400 0 "[{\"kind\":\"reminder\",\"id\":\"$R1\",\"deleted\":false,\"created\":1}]"
+sync "reminder empty text"      400 0 "[{\"kind\":\"reminder\",\"id\":\"$R1\",\"deleted\":false,\"text\":\"\",\"created\":1}]"
+sync "reminder 201 bytes"       400 0 "[{\"kind\":\"reminder\",\"id\":\"$R1\",\"deleted\":false,\"text\":\"$(printf '%0201d' 0)\",\"created\":1}]"
+sync "reminder two lines"       400 0 "[{\"kind\":\"reminder\",\"id\":\"$R1\",\"deleted\":false,\"text\":\"a\\nb\",\"created\":1}]"
+sync "reminder no created"      400 0 "[{\"kind\":\"reminder\",\"id\":\"$R1\",\"deleted\":false,\"text\":\"a\"}]"
+sync "reminder created 0"       400 0 "[{\"kind\":\"reminder\",\"id\":\"$R1\",\"deleted\":false,\"text\":\"a\",\"created\":0}]"
+N="\"kind\":\"note\",\"id\":\"$N1\",\"deleted\":false"
+sync "note no base"             400 0 "[{$N,\"text\":\"a\",\"tags\":[],\"created\":1,\"updated\":1}]"
+sync "note base negative"       400 0 "[{$N,\"base\":-1,\"text\":\"a\",\"tags\":[],\"created\":1,\"updated\":1}]"
+sync "note removal no base"     400 0 "[{\"kind\":\"note\",\"id\":\"$N1\",\"deleted\":true}]"
+sync "note no text"             400 0 "[{$N,\"base\":0,\"tags\":[],\"created\":1,\"updated\":1}]"
+sync "note empty text"          400 0 "[{$N,\"base\":0,\"text\":\"\",\"tags\":[],\"created\":1,\"updated\":1}]"
+sync "note 20001 bytes"         400 0 "[{$N,\"base\":0,\"text\":\"$(printf '%020001d' 0)\",\"tags\":[],\"created\":1,\"updated\":1}]"
+sync "note tab"                 400 0 "[{$N,\"base\":0,\"text\":\"a\\tb\",\"tags\":[],\"created\":1,\"updated\":1}]"
+sync "note no tags"             400 0 "[{$N,\"base\":0,\"text\":\"a\",\"created\":1,\"updated\":1}]"
+sync "note tags string"         400 0 "[{$N,\"base\":0,\"text\":\"a\",\"tags\":\"$T1\",\"created\":1,\"updated\":1}]"
+TAGS21=$(i=0; printf '['; while [ $i -lt 21 ]; do
+    [ $i -gt 0 ] && printf ','
+    printf '"%032d"' "$i"; i=$((i + 1)); done; printf ']')
+sync "note 21 tags"             400 0 "[{$N,\"base\":0,\"text\":\"a\",\"tags\":$TAGS21,\"created\":1,\"updated\":1}]"
+sync "note bad tag id"          400 0 "[{$N,\"base\":0,\"text\":\"a\",\"tags\":[\"x\"],\"created\":1,\"updated\":1}]"
+sync "note tag twice"           400 0 "[{$N,\"base\":0,\"text\":\"a\",\"tags\":[\"$T1\",\"$T1\"],\"created\":1,\"updated\":1}]"
+sync "note no updated"          400 0 "[{$N,\"base\":0,\"text\":\"a\",\"tags\":[],\"created\":1}]"
+sync "note created string"      400 0 "[{$N,\"base\":0,\"text\":\"a\",\"tags\":[],\"created\":\"1\",\"updated\":1}]"
+T="\"kind\":\"tag\",\"id\":\"$T1\",\"deleted\":false"
+sync "tag no name"              400 0 "[{$T,\"color\":\"mint\"}]"
+sync "tag empty name"           400 0 "[{$T,\"name\":\"\",\"color\":\"mint\"}]"
+sync "tag 51 bytes"             400 0 "[{$T,\"name\":\"$(printf '%051d' 0)\",\"color\":\"mint\"}]"
+sync "tag name two lines"       400 0 "[{$T,\"name\":\"a\\nb\",\"color\":\"mint\"}]"
+sync "tag no color"             400 0 "[{$T,\"name\":\"a\"}]"
+sync "tag rose"                 400 0 "[{$T,\"name\":\"a\",\"color\":\"rose\"}]"
+sync "a bad change after good"  400 0 "[$REM,$TAG,{\"kind\":\"tag\",\"id\":\"$T2\",\"deleted\":false}]"
+nquery "0|0|0|0" "nothing written by a refused sync" \
+    "SELECT (SELECT count(*) FROM reminders), (SELECT count(*) FROM notes),
+            (SELECT count(*) FROM tags), (SELECT rev FROM sync)"
+
+# boundaries that pass
+sync "nothing to sync"          200 0 '[]'
+expect_body '"applied":{},"reset":false,"reminders":[],"notes":[],"tags":[],"rev":0,"more":false' \
+    "an empty sync"
+sync "500 removals of nothing"  200 0 "$(printf '%s' "$MANY" | sed 's/,{[^{]*}]$/]/')"
+sync "maximum sizes"            200 0 "[{\"kind\":\"reminder\",\"id\":\"$(nid 90)\",\"deleted\":false,\"text\":\"$(printf '%0200d' 0)\",\"created\":1},{\"kind\":\"note\",\"id\":\"$(nid 91)\",\"base\":0,\"deleted\":false,\"text\":\"$(printf '%020000d' 0)\",\"tags\":$(printf '%s' "$TAGS21" | sed 's/,"[0-9]*"]$/]/'),\"created\":1,\"updated\":1},{\"kind\":\"tag\",\"id\":\"$(nid 92)\",\"deleted\":false,\"name\":\"$(printf '%050d' 0)\",\"color\":\"orchid\"}]"
+nquery "200|20000|20|50" "maximum sizes stored" \
+    "SELECT (SELECT length(text) FROM reminders), (SELECT length(text) FROM notes),
+            (SELECT json_array_length(tags) FROM notes), (SELECT length(name) FROM tags)"
+sync "remove them"              200 3 "[{\"kind\":\"reminder\",\"id\":\"$(nid 90)\",\"deleted\":true},{\"kind\":\"note\",\"id\":\"$(nid 91)\",\"base\":2,\"deleted\":true},{\"kind\":\"tag\",\"id\":\"$(nid 92)\",\"deleted\":true}]"
+expect_body '"applied":{"00000000000000000000000000000091":5},' "a removal applied"
+expect_body '{"id":"00000000000000000000000000000091","text":"","tags":[],"created":1,"updated":1,"rev":5,"deleted":true}' \
+    "a removed note comes back emptied"
+nquery "1|1|1" "removed rows stay, emptied" \
+    "SELECT (SELECT deleted FROM reminders WHERE text = ''), (SELECT deleted FROM notes WHERE text = ''),
+            (SELECT deleted FROM tags WHERE name = '')"
+
+# a new device (since 0) gets no removed rows
+sync "first sync of a device"   200 0 "[$REM,$TAG,$NOTE]"
+expect_body '"applied":{"00000000000000000000000000000002":9},"reset":false' "applied note rev"
+expect_body '"reminders":[{"id":"00000000000000000000000000000001","text":"buy milk","created":1700000000,"rev":7,"deleted":false}]' \
+    "reminder sent back"
+expect_body '"notes":[{"id":"00000000000000000000000000000002","text":"# Hi\n- [ ] eggs","tags":["00000000000000000000000000000004"],"created":1700000000,"updated":1700000000,"rev":9,"deleted":false}]' \
+    "note sent back, tags a list"
+expect_body '"tags":[{"id":"00000000000000000000000000000004","name":"Work","color":"mint","rev":8,"deleted":false}],"rev":9,"more":false' \
+    "tag sent back, and the rev"
+sync "the same again"           200 9 "[$REM,$TAG,$NOTE]"
+expect_body '"applied":{"00000000000000000000000000000002":9},"reset":false,"reminders":[],"notes":[],"tags":[]' \
+    "a change sent twice changes nothing"
+nquery "1|1|1" "no copies of a change sent twice" \
+    "SELECT (SELECT count(*) FROM reminders WHERE deleted = 0), (SELECT count(*) FROM notes WHERE deleted = 0),
+            (SELECT count(*) FROM tags WHERE deleted = 0)"
+
+# notes: an edit from the rev it started from; one from an older rev is kept as a new note
+EDIT="{\"kind\":\"note\",\"id\":\"$N1\",\"base\":9,\"deleted\":false,\"text\":\"on A\",\"tags\":[],\"created\":1700000000,\"updated\":1700000100}"
+sync "edit a note"              200 9 "[$EDIT]"
+expect_body '"applied":{"00000000000000000000000000000002":10}' "edit applied"
+OLD="{\"kind\":\"note\",\"id\":\"$N1\",\"base\":9,\"deleted\":false,\"text\":\"on B\",\"tags\":[\"$T1\"],\"created\":1700000000,\"updated\":1700000200}"
+sync "edit from an older rev"   200 9 "[$OLD]"
+expect_body '"applied":{},' "a conflicting edit is not applied"
+expect_body '"text":"on A"' "the server's version comes back"
+expect_body '"text":"on B","tags":["00000000000000000000000000000004"],"created":1700000000,"updated":1700000200,"rev":11' \
+    "the device's version comes back as a new note"
+nquery "2|1" "both versions kept" \
+    "SELECT count(*), sum(id = '$N1') FROM notes WHERE deleted = 0 AND text IN ('on A', 'on B')"
+sync "removal from an older rev" 200 11 "[{\"kind\":\"note\",\"id\":\"$N1\",\"base\":9,\"deleted\":true}]"
+nquery "on A|0" "a conflicting removal is dropped" "SELECT text, deleted FROM notes WHERE id = '$N1'"
+sync "removal of an unknown note" 200 11 "[{\"kind\":\"note\",\"id\":\"$N2\",\"base\":0,\"deleted\":true}]"
+nquery "0" "an unknown removal adds nothing" "SELECT count(*) FROM notes WHERE id = '$N2'"
+sync "a note from the future"   200 11 "[{\"kind\":\"note\",\"id\":\"$N2\",\"base\":0,\"deleted\":false,\"text\":\"x\",\"tags\":[],\"created\":9000000000,\"updated\":9000000000}]"
+nquery "1" "a time in the future is now" \
+    "SELECT created BETWEEN $NOW AND $NOW + 60 AND updated = created FROM notes WHERE id = '$N2'"
+
+# reminders: removed once, never back
+sync "remove a reminder"        200 12 "[{\"kind\":\"reminder\",\"id\":\"$R1\",\"deleted\":true}]"
+sync "add it again"             200 12 "[$REM]"
+nquery "1|" "a removed reminder stays removed" "SELECT deleted, text FROM reminders WHERE id = '$R1'"
+
+# tags: the latest change wins; a name another tag has gets a number
+sync "tag of another device"    200 12 "[{\"kind\":\"tag\",\"id\":\"$T2\",\"deleted\":false,\"name\":\"WORK\",\"color\":\"sky\"}]"
+expect_body '"name":"WORK 2","color":"sky"' "a clashing name gets a number"
+sync "rename a tag"             200 12 "[{\"kind\":\"tag\",\"id\":\"$T1\",\"deleted\":false,\"name\":\"Job\",\"color\":\"teal\"}]"
+nquery "Job|teal" "the latest change of a tag wins" "SELECT name, color FROM tags WHERE id = '$T1'"
+CLASH=$(i=10; printf '['; while [ $i -lt 110 ]; do
+    [ $i -gt 10 ] && printf ','
+    printf '{"kind":"tag","id":"%032d","deleted":false,"name":"x","color":"mint"}' "$i"
+    i=$((i + 1)); done; printf ']')
+sync "100 tags named x"         409 12 "$CLASH"
+nquery "0" "a refused sync writes nothing" "SELECT count(*) FROM tags WHERE name LIKE 'x%'"
+sync "99 tags named x"          200 12 "$(printf '%s' "$CLASH" | sed 's/,{[^{]*}]$/]/')"
+nquery "x 99" "up to x 99" "SELECT max(name) FROM tags WHERE name LIKE 'x 9_'"
+
+# a page is 100 rows, oldest change first
+sync "next page"                200 0 '[]'
+expect_body '"more":true' "a device with nothing gets a page and more"
+nquery "1" "past a page" "SELECT (SELECT count(*) FROM tags WHERE deleted = 0) > 100"
+# a since past the server's counter (data from a backup) gets everything again
+sync "since from the future"    200 999999 '[]'
+expect_body '"reset":true' "reset"
+expect_body '"text":"on A"' "reset sends the rows"
 
 # ---- music -------------------------------------------------------------------
 
@@ -1868,6 +2048,72 @@ if [ "$(id -u)" != 0 ]; then # root reads anything
     check "backups untouched"   [ "$(count "$BK/out/app" 'app-*.tar.zst')" = 2 ]
     chmod 600 "$BK/app/data/unreadable"
 fi
+
+# ---- HTTPS -------------------------------------------------------------------
+
+# The certificate as install.sh makes it, for 127.0.0.1.
+TLS="$TMP/tls"
+mkdir "$TLS"
+# tls_cert WANT DESCRIPTION ADDRESS...: deploy/tls-cert.sh exits with WANT.
+tls_cert() {
+    want=$1 desc=$2
+    shift 2
+    if deploy/tls-cert.sh "$TLS" "$@" >"$TMP/tls.log" 2>&1; then got=0; else got=$?; fi
+    if [ "$got" = "$want" ]; then PASSED=$((PASSED + 1)); else
+        FAILED=$((FAILED + 1)); echo "FAIL: $desc: exit $got: $(cat "$TMP/tls.log")"; fi
+}
+tls_cert 2 "tls-cert, no address"
+tls_cert 2 "tls-cert, a name"           nylm.lan
+tls_cert 2 "tls-cert, an option"        -days
+tls_cert 2 "tls-cert, ends in a dot"    127.0.0.
+tls_cert 2 "tls-cert, two dots"         127..0.1
+tls_cert 0 "tls-cert"                   127.0.0.2
+tls_cert 0 "tls-cert, other addresses"  127.0.0.1
+CA_SUM=$(cksum <"$TLS/ca.crt") CERT_SUM=$(cksum <"$TLS/server.crt")
+tls_cert 0 "tls-cert, same addresses"   127.0.0.1
+if [ "$(cksum <"$TLS/ca.crt")" = "$CA_SUM" ] && [ "$(cksum <"$TLS/server.crt")" = "$CERT_SUM" ] &&
+   [ "$(cat "$TLS/server.san")" = "IP:127.0.0.1" ]; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: tls-cert made a certificate again for the same addresses"; fi
+if [ "$(stat -c %a "$TLS/ca.key")" = 600 ] && [ "$(stat -c %a "$TLS/server.key")" = 600 ]; then
+    PASSED=$((PASSED + 1)); else FAILED=$((FAILED + 1)); echo "FAIL: tls keys readable by others"; fi
+if openssl verify -CAfile "$TLS/ca.crt" "$TLS/server.crt" >/dev/null 2>&1; then
+    PASSED=$((PASSED + 1)); else FAILED=$((FAILED + 1)); echo "FAIL: certificate not signed by the CA"; fi
+
+# tls_refuses DESCRIPTION ENV-ARGS...: nylm does not start, and says why.
+tls_refuses() {
+    desc=$1
+    shift
+    if env "$@" "$BIN" >"$TMP/log" 2>&1 </dev/null; then
+        FAILED=$((FAILED + 1)); echo "FAIL: $desc: started anyway"
+    elif grep -q "NYLM_TLS\|tls:" "$TMP/log"; then PASSED=$((PASSED + 1)); else
+        FAILED=$((FAILED + 1)); echo "FAIL: $desc: unclear error: $(cat "$TMP/log")"; fi
+}
+tls_refuses "certificate without key"   NYLM_TLS_CERT="$TLS/server.crt"
+tls_refuses "key without certificate"   NYLM_TLS_KEY="$TLS/server.key"
+tls_refuses "certificate missing"       NYLM_TLS_CERT="$TMP/nope.crt" NYLM_TLS_KEY="$TLS/server.key"
+tls_refuses "key missing"               NYLM_TLS_CERT="$TLS/server.crt" NYLM_TLS_KEY="$TMP/nope.key"
+tls_refuses "not the certificate's key" NYLM_TLS_CERT="$TLS/server.crt" NYLM_TLS_KEY="$TLS/ca.key"
+tls_refuses "key is not PEM"            NYLM_TLS_CERT="$TLS/server.crt" NYLM_TLS_KEY="$TLS/server.san"
+
+export NYLM_TLS_CERT="$TLS/server.crt" NYLM_TLS_KEY="$TLS/server.key"
+start "https://127.0.0.1:$PORT/" --cacert "$TLS/ca.crt"
+S="https://127.0.0.1:$PORT"
+expect 200 "https index"                  --cacert "$TLS/ca.crt" "$S/"
+expect 000 "certificate not trusted"      "$S/"
+expect 000 "plain http to the https port" "http://127.0.0.1:$PORT/"
+expect 200 "https after a plain request"  --cacert "$TLS/ca.crt" "$S/api/health"
+if grep -q "127.0.0.1 tls handshake failed" "$TMP/log"; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: failed handshake not logged"; fi
+expect_header "set-cookie: nylm_session=.*HttpOnly; SameSite=Strict; Secure" "cookie Secure over https" \
+    --cacert "$TLS/ca.crt" -H "$J" -d '{"password":"smoke test password"}' "$S/api/login"
+expect_header "set-cookie: nylm_session=; .*SameSite=Strict; Secure" "logout cookie Secure" \
+    --cacert "$TLS/ca.crt" -X POST "$S/api/logout"
+expect_header "content-security-policy: default-src 'self'" "CSP header over https" \
+    --cacert "$TLS/ca.crt" "$S/"
+stop
+grep -q "listening on https://127.0.0.1:$PORT" "$TMP/log" && PASSED=$((PASSED + 1)) ||
+    { FAILED=$((FAILED + 1)); echo "FAIL: https listen address not logged"; }
+unset NYLM_TLS_CERT NYLM_TLS_KEY
 
 # ---- listen addresses and client allowlist ----------------------------------
 

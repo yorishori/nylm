@@ -2,19 +2,45 @@
 
 /* nylm home page: one tile per app, each with a short live summary. */
 
-/* Pills summing up the plants due list: late, today, this week. */
+/* Pills summing up the plants due list (late, today, this week) and the
+ * entries waiting on this device. */
 async function plantsSummary() {
-  const due = await api("GET", "/api/plants/due");
+  const queue = await localGet("plants-queue");
+  const waiting = queue && queue.unsynced
+    ? el("span", { class: "pill" }, `${queue.unsynced} not synced`) : null;
+  let due;
+  try {
+    due = await api("GET", "/api/plants/due");
+  } catch (err) {
+    if (waiting && err instanceof ApiError && err.status === 0) {
+      return [el("span", { class: "pill" }, "Offline"), waiting];
+    }
+    throw err;
+  }
   const late = due.filter((d) => d.days_left < 0).length;
   const now = due.filter((d) => d.days_left === 0).length;
   const week = due.filter((d) => d.days_left > 0 && d.days_left <= 7).length;
   if (late + now + week === 0) {
-    return [el("span", { class: "pill" }, "Nothing due this week")];
+    return [el("span", { class: "pill" }, "Nothing due this week"), waiting];
   }
   return [
     late ? el("span", { class: "pill late" }, `${late} late`) : null,
     now ? el("span", { class: "pill today" }, `${now} today`) : null,
     week ? el("span", { class: "pill" }, `${week} this week`) : null,
+    waiting,
+  ];
+}
+
+/* Pills for the notes this device has: how many, reminders, unsynced. */
+async function notesSummary() {
+  const s = await localGet("notes");
+  if (!s) return [el("span", { class: "pill" }, "Open to sync")];
+  const reminders = Object.keys(s.reminders).length;
+  return [
+    el("span", { class: "pill" }, plural(Object.keys(s.notes).length, "note", "notes")),
+    reminders ? el("span", { class: "pill today" }, plural(reminders, "reminder", "reminders"))
+              : null,
+    s.unsynced ? el("span", { class: "pill" }, `${s.unsynced} not synced`) : null,
   ];
 }
 
@@ -43,16 +69,27 @@ async function serverSummary() {
 }
 
 const APPS = [
+  { name: "Notes", href: "/notes/", summary: notesSummary },
   { name: "Plants", href: "/plants/", summary: plantsSummary },
   { name: "Music", href: "/music/", summary: musicSummary },
   { name: "Server", href: "/server/", summary: serverSummary },
 ];
 
+/* A tile's pills; "Offline" when the server is out of reach. */
+async function summaryOf(a) {
+  try {
+    return await a.summary();
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 0) return [el("span", { class: "pill" }, "Offline")];
+    throw err;
+  }
+}
+
 async function homePage() {
   const tiles = await Promise.all(APPS.map(async (a) =>
     el("a", { class: "tile", href: a.href },
       el("h2", {}, a.name),
-      el("div", { class: "pills" }, await a.summary()))));
+      el("div", { class: "pills" }, await summaryOf(a)))));
   return el("section", {},
     el("h1", {}, "Apps"),
     el("nav", { class: "tiles", "aria-label": "Apps" }, tiles));

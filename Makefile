@@ -4,8 +4,8 @@ LDFLAGS =
 # System libraries (Arch packages: sqlite, cjson, openssl, taglib, libjpeg-turbo,
 # libpng).
 LDLIBS  = -lsqlite3 -lcjson -lcrypto -ltag_c -ljpeg -lpng16
-# nylm-qobuz and nylm-musicbrainz (the services that talk to the internet)
-# also link libssl (approved for these two only); the server never does.
+# libssl: the server's HTTPS (approved 2026-10-19), and nylm-qobuz and
+# nylm-musicbrainz, the services that talk to the internet.
 SSLLIBS = -lssl
 
 # Their own files: only in their binary, never in the server.
@@ -30,10 +30,10 @@ release: nylm nylm-qobuz nylm-musicbrainz
 debug: nylm-debug nylm-qobuz-debug nylm-musicbrainz-debug
 
 nylm: $(REL_OBJ)
-	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS) $(SSLLIBS)
 
 nylm-debug: $(DBG_OBJ)
-	$(CC) $(LDFLAGS) $(SAN) -o $@ $^ $(LDLIBS)
+	$(CC) $(LDFLAGS) $(SAN) -o $@ $^ $(LDLIBS) $(SSLLIBS)
 
 nylm-qobuz: $(QREL_OBJ)
 	$(CC) $(LDFLAGS) -o $@ $^ $(LDLIBS) $(SSLLIBS)

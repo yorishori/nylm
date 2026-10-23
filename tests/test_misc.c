@@ -97,7 +97,11 @@ static void test_response_headers(void)
 static void test_conn(void)
 {
     struct conn c;
-    CHECK(conn_init(&c, -1) == -1); /* timeouts cannot be set: must fail */
+    CHECK(conn_init(&c, -1, NULL, "-") == -1); /* timeouts cannot be set: must fail */
+    CHECK(c.ssl == NULL);
+    /* TLS without usable files: no settings, so the server does not start */
+    CHECK(conn_tls_init("/nonexistent.crt", "/nonexistent.key") == NULL);
+    CHECK(conn_tls_init("tests/data/cover.jpg", "tests/data/cover.jpg") == NULL);
 }
 
 /* Runs json_body on a POST with the given content type and body. */

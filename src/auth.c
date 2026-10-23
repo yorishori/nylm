@@ -194,6 +194,14 @@ static int request_token_hash(const struct request *req, unsigned char hash[32])
     return sha256(token, sizeof token, hash);
 }
 
+/* "; Secure" once auth_secure_cookies() was called, else "". */
+static const char *cookie_secure = "";
+
+void auth_secure_cookies(void)
+{
+    cookie_secure = "; Secure";
+}
+
 int auth_start_session(struct response *res)
 {
     unsigned char token[TOKEN_LEN], hash[32];
@@ -224,9 +232,10 @@ int auth_start_session(struct response *res)
     char *cookie = arena_alloc(256);
     if (cookie == NULL)
         return -1;
-    /* No Secure attribute: nylm is plain HTTP, reachable only via LAN/WireGuard. */
-    snprintf(cookie, 256, "%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Strict",
-             AUTH_COOKIE, hex, SESSION_SECONDS);
+    /* Secure only over HTTPS: without a certificate nylm is plain HTTP,
+     * reachable only via LAN/WireGuard (and `make run`). */
+    snprintf(cookie, 256, "%s=%s; Path=/; Max-Age=%d; HttpOnly; SameSite=Strict%s",
+             AUTH_COOKIE, hex, SESSION_SECONDS, cookie_secure);
     return http_add_header(res, "Set-Cookie", cookie);
 }
 
@@ -246,8 +255,12 @@ int auth_end_session(const struct request *req, struct response *res)
             return -1;
         }
     }
-    return http_add_header(res, "Set-Cookie",
-                           AUTH_COOKIE "=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict");
+    char *cookie = arena_alloc(128);
+    if (cookie == NULL)
+        return -1;
+    snprintf(cookie, 128, "%s=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict%s", AUTH_COOKIE,
+             cookie_secure);
+    return http_add_header(res, "Set-Cookie", cookie);
 }
 
 int auth_session_valid(const struct request *req)

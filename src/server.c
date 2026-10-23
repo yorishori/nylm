@@ -14,6 +14,8 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <openssl/ssl.h>
+
 #include "arena.h"
 #include "conn.h"
 #include "http.h"
@@ -21,6 +23,7 @@
 #include "static.h"
 
 static const struct server_config *cfg;
+static struct ssl_ctx_st *tls; /* NULL: plain HTTP */
 static volatile sig_atomic_t stopping;
 
 int subnet_parse(const char *s, struct subnet *out)
@@ -96,7 +99,7 @@ static int listen_on(uint32_t addr, int port)
         close(fd);
         return -1;
     }
-    printf("nylm: listening on http://%s:%d\n", text, port);
+    printf("nylm: listening on %s://%s:%d\n", tls != NULL ? "https" : "http", text, port);
     return fd;
 }
 
@@ -117,7 +120,7 @@ static void serve(int client, const char *ip)
 {
     double start = now_seconds();
     struct conn c;
-    if (conn_init(&c, client) != 0) {
+    if (conn_init(&c, client, tls, ip) != 0) {
         conn_close(&c);
         return;
     }
@@ -201,6 +204,9 @@ int server_run(const struct server_config *config)
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGINT, &sa, NULL);
 
+    if (cfg->tls_cert != NULL && (tls = conn_tls_init(cfg->tls_cert, cfg->tls_key)) == NULL)
+        return -1;
+
     struct pollfd fds[SERVER_MAX_LISTEN];
     for (int i = 0; i < cfg->nlisten; i++) {
         fds[i].fd = listen_on(cfg->listen[i], cfg->port);
@@ -225,5 +231,6 @@ int server_run(const struct server_config *config)
     fflush(stdout);
     for (int i = 0; i < cfg->nlisten; i++)
         close(fds[i].fd);
+    SSL_CTX_free(tls);
     return 0;
 }

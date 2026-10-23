@@ -15,6 +15,10 @@ int auth_set_password(const char *password);
 /* 1 if password matches, 0 if not (or no password set), -1 on error. */
 int auth_check_password(const char *password);
 
+/* From now on the session cookie is Secure (sent only over HTTPS): for a
+ * server with a TLS certificate. */
+void auth_secure_cookies(void);
+
 /* Creates a session and adds its Set-Cookie header to res. 0 or -1. */
 int auth_start_session(struct response *res);
 
