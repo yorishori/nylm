@@ -667,7 +667,9 @@ function editCell({ field, value, mixed, marks, key, disabled, save, number, sum
     const input = el("input", {
       class: "cell-input", "data-key": key, disabled, value: mixed ? "" : value ?? "",
       placeholder: mixed ? "mixed" : value == null ? "missing" : "", "aria-label": label,
-      ...(whole ? { type: "number", min: "1", max: "9999", step: "1", inputmode: "numeric" } : {}),
+      /* Text, not type="number": that shows a value that is not a number
+       * (a date like 2023-10-27) as empty. */
+      ...(whole ? { inputmode: "numeric" } : {}),
     });
     const initial = input.value;
     let saving = false;
@@ -800,7 +802,8 @@ function albumRow(a, readOnly) {
       field: f,
       value: a[f],
       mixed: a.mixed.includes(f),
-      marks: a.changed.includes(f) ? ["edited"] : [],
+      marks: [a.changed.includes(f) ? "edited" : "",
+              a.missing.includes(f) || a.invalid.includes(f) ? "bad" : ""].filter(Boolean),
       key: `${a.track}:${f}`,
       disabled: readOnly,
       save: save(f),
