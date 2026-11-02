@@ -199,7 +199,12 @@ ENCODEDBY MOOD MEDIA LABEL CATALOGNUMBER BARCODE TITLESORT ALBUMSORT
 ARTISTSORT ALBUMARTISTSORT COMPOSERSORT MUSICBRAINZ_TRACKID
 MUSICBRAINZ_ALBUMID NAVIDROME_ID. Genre and composer keep several values,
 in order; another tag with several values shows them joined by `"; "` and
-is written back as one.
+is written back as one. Stray tags, the copies of the disc and track
+numbers and the date other taggers write (DISC DISCC DISCTOTAL TOTALDISCS,
+TRACK TRACKC TRACKTOTAL TOTALTRACKS, YEAR ORIGINALDATE), are only noted
+(`tracks.strays`) and removed, never written: Navidrome reads DISC before
+DISCNUMBER, TRACK before TRACKNUMBER and YEAR as the release date, so a
+stale one hides nylm's value.
 
 The server never opens a music file. It reads the cache, queues changes
 and scans, and starts the three services that do work on the files, each its
@@ -284,7 +289,14 @@ a genre holding the delimiter becomes several, each part trimmed, spaces
 made one, lowercase; other genres stay as they are. Composer from the
 album artist (`fix/composers`): each track without a composer gets its
 album artist; compilations are not changed, an album without an album
-artist is left alone. Album ids and genres from MusicBrainz (below). Files: the naming
+artist is left alone. Clean up stray tags, every album at once: Dry run
+(`GET /api/music/strays`) lists the albums whose files have stray tags,
+those it takes and those it leaves alone (why); Clean up (`POST
+/api/music/fix/strays {}`, or `{album}` from the album page, which
+shows an album's stray tags) queues, as one batch, a change (field
+`strays`) that removes all the stray tags of each such track, only for
+albums with no pending change and no missing or invalid tag. Album ids
+and genres from MusicBrainz (below). Files: the naming
 rule, the tracks
 that move (from, to) and those that can not (why), Move files, and what
 the moves did (`GET /api/music/moves`). Qobuz: connect, download albums,
@@ -306,10 +318,13 @@ The write service, per track, only through TagLib (`src/tags.c`): applies
 the track's pending changes to the cached tags; mirrors TITLESORT,
 ALBUMSORT, ARTISTSORT, ALBUMARTISTSORT and COMPOSERSORT (the composers
 joined by `"; "`) from the tags that change, cutting them to 500 bytes;
-sets a missing or invalid disc number to `1/1`; checks the tags it sets
+sets a missing or invalid disc number to `1/1`; removes the stray tags of
+the disc number, track number and date when it sets that tag (a warning
+names them); checks the tags it sets
 against the rules (those the changes set, and those it changes itself:
 the sort tags, the disc number), not the track's others, which stay as
-they are, valid or not; checks that the file still has the cached tags;
+they are, valid or not; checks that the file still has the cached tags
+(stray tags included: after upgrading, scan the library before writing);
 writes what differs and reads the file back. A track's changes are
 written together: when one fails, they all do. Each change ends `done`,
 `warning` (done, and what nylm also changed, e.g. the disc number) or

@@ -50,6 +50,8 @@ void music_rename(struct request *req, struct response *res);
 void music_remove(struct request *req, struct response *res);
 void music_fix_split(struct request *req, struct response *res);
 void music_fix_composers(struct request *req, struct response *res);
+void music_strays(struct request *req, struct response *res);
+void music_fix_strays(struct request *req, struct response *res);
 void music_musicbrainz(struct request *req, struct response *res);
 void music_musicbrainz_start(struct request *req, struct response *res);
 void music_cover(struct request *req, struct response *res);

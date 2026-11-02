@@ -234,7 +234,8 @@ int music_track_tags(sqlite3_stmt *st, int col, struct tags *out)
             return -1;
         }
     }
-    return 0;
+    return tags_strays_parse((const char *)sqlite3_column_text(st, col + 1 + TAG_FIELDS),
+                             &out->strays);
 }
 
 /* ---- scan --------------------------------------------------------------- */
@@ -273,9 +274,9 @@ static int scan_prepare(struct scan *s)
         "  albumartist, tracknumber, discnumber, date, compilation, isrc, asin, bpm,"
         "  copyright, encodedby, mood, media, label, catalognumber, barcode, titlesort,"
         "  albumsort, artistsort, albumartistsort, composersort, musicbrainz_trackid,"
-        "  musicbrainz_albumid, navidrome_id)"
+        "  musicbrainz_albumid, navidrome_id, strays)"
         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,"
-        "  ?, ?, ?, ?)"
+        "  ?, ?, ?, ?, ?)"
         " ON CONFLICT (path) DO UPDATE SET size = excluded.size, ext = excluded.ext,"
         "  scanned = excluded.scanned, title = excluded.title,"
         "  album = excluded.album, artist = excluded.artist,"
@@ -290,7 +291,7 @@ static int scan_prepare(struct scan *s)
         "  albumartistsort = excluded.albumartistsort, composersort = excluded.composersort,"
         "  musicbrainz_trackid = excluded.musicbrainz_trackid,"
         "  musicbrainz_albumid = excluded.musicbrainz_albumid,"
-        "  navidrome_id = excluded.navidrome_id"
+        "  navidrome_id = excluded.navidrome_id, strays = excluded.strays"
         " RETURNING id");
     s->clear_values = db_prepare(music_db, "DELETE FROM track_values WHERE track_id = ?");
     s->add_value = db_prepare(music_db,
@@ -437,6 +438,10 @@ static int store_track(struct scan *s, const char *path, const char *ext,
         rc = sqlite3_bind_int64(st, 4, now);
     for (int i = 0; i < TAG_SINGLE_FIELDS && rc == SQLITE_OK; i++)
         rc = bind_text(st, 5 + i, t->value[i].n > 0 ? t->value[i].v[0] : NULL);
+    int oom;
+    const char *strays = tags_strays_text(t->strays, &oom);
+    if (rc == SQLITE_OK)
+        rc = oom ? SQLITE_NOMEM : bind_text(st, 5 + TAG_SINGLE_FIELDS, strays);
     long long id = -1;
     if (rc == SQLITE_OK && sqlite3_step(st) == SQLITE_ROW)
         id = sqlite3_column_int64(st, 0);
@@ -1103,6 +1108,11 @@ static int apply_pending(long long track_id, struct tags *want, unsigned *change
             if (value == NULL || music_set_cover(want, value) != 0)
                 *bad = 1;
             *changed |= MUSIC_COVER_BIT;
+            continue;
+        }
+        if (strcmp(name, MUSIC_STRAYS_FIELD) == 0) {
+            want->strays = 0;
+            *changed |= MUSIC_STRAYS_BIT;
             continue;
         }
         if (f < 0 || value == NULL) {

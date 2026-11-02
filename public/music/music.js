@@ -75,6 +75,7 @@ const encoder = new TextEncoder();
 const COVER_SIDE = 1200;            /* pixels: the longer side of a new cover, at most */
 const COVER_BYTES = 700 * 1024;     /* a new cover's JPEG, at most (the server's limit) */
 const COVER_FIELD = "picture";      /* the change that sets the cover */
+const STRAYS_FIELD = "strays";      /* the change that removes the stray tags */
 
 /* ---- values -------------------------------------------------------------- */
 
@@ -146,9 +147,10 @@ function sameValue(a, b) {
   return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 }
 
-/* A tag's name, or "Cover" for a new cover. */
+/* A tag's name, "Cover" for a new cover, "Stray tags" for their removal. */
 function fieldLabel(field) {
   if (field === COVER_FIELD) return "Cover";
+  if (field === STRAYS_FIELD) return "Stray tags";
   return FIELDS[field] ? FIELDS[field].label : field;
 }
 
@@ -1240,6 +1242,7 @@ async function albumPage(id) {
     readOnly ? el("p", { class: "warn" }, "A scan or write is running: editing is possible " +
                                           "again when it is done.") : null,
     picturesSection(id, tracks, readOnly),
+    straysSection(id, tracks, readOnly),
     legend(),
     el("div", { class: "grid-wrap" },
       el("table", { class: "grid tracks" },
@@ -1251,6 +1254,46 @@ async function albumPage(id) {
           el("th", { scope: "col" }, "Pictures"),
           el("th", { scope: "col" }, "Scanned"))),
         el("tbody", {}, albumLine, rows))));
+}
+
+/* What stray tags are, for the album page and Fixes. */
+const STRAYS_ABOUT = "Stray tags are copies of the disc and track numbers and the date that " +
+  "other taggers write (DISC, DISCC, DISCTOTAL, TOTALDISCS, TRACK, TRACKC, TRACKTOTAL, " +
+  "TOTALTRACKS, YEAR, ORIGINALDATE). Navidrome reads some of them before the tags nylm " +
+  "writes, so a stale one hides nylm's value. Writing a disc number, track number or date " +
+  "removes that tag's stray copies.";
+
+/* The album's stray tags, if its files have any: which, and a button that
+ * queues their removal (the album must have no pending change and no
+ * missing or invalid tag). */
+function straysSection(id, tracks, readOnly) {
+  const withStrays = tracks.filter((t) => t.strays);
+  if (!withStrays.length) return null;
+  const keys = [...new Set(withStrays.flatMap((t) => t.strays.split(" ")))];
+  const queued = withStrays.every((t) => STRAYS_FIELD in t.pending);
+  const clean = el("button", {
+    class: "btn", type: "button", disabled: readOnly || queued,
+    onclick: async () => {
+      if (!sure("Remove the stray tags of this album's files? The change is queued; nothing " +
+                "is written until you write it.")) return;
+      clean.disabled = true;
+      try {
+        const r = await api("POST", "/api/music/fix/strays", { album: id });
+        setStatus(`Queued: ${plural(r.queued, "track", "tracks")}. Write it from Changes.`);
+        await refresh();
+      } catch (err) {
+        handleError(err);
+        clean.disabled = false;
+      }
+    },
+  }, "Remove stray tags");
+  return el("section", { class: "card stack" },
+    el("h2", {}, "Stray tags"),
+    el("p", {}, `${plural(withStrays.length, "track has", "tracks have")} stray tags: ` +
+                `${keys.join(", ")}.`),
+    el("p", { class: "muted small" }, STRAYS_ABOUT),
+    queued ? el("p", { class: "edited-text" }, "Their removal is queued: write it from Changes.")
+           : el("div", { class: "actions" }, clean));
 }
 
 /* Buttons that search other sites for the album, each in a new tab. */
@@ -2163,6 +2206,100 @@ function musicbrainzSection(mb, what, title, about, button, list, item, watch) {
       : el("p", { class: "muted" }, "Nothing looked up yet."));
 }
 
+/* The last dry run of the clean-up of stray tags, shown while the app is
+ * open. */
+let strayDryRun = null;
+
+/* One album of the clean-up of stray tags: names, stray tags, why it is
+ * left alone (if it is), and Open album. */
+function strayItem(a) {
+  return el("li", { class: "dupe" },
+    el("div", { class: "dupe-text" },
+      el("strong", {}, a.album ?? "No album name"),
+      el("p", { class: "muted" }, a.albumartist ?? "No album artist"),
+      el("p", { class: "small" }, `${plural(a.tracks, "track", "tracks")}: ${a.strays}`),
+      a.why ? el("p", { class: "differs-text small" }, a.why) : null),
+    el("div", { class: "actions" }, navButton("Open album", `#/album/${a.track}`)));
+}
+
+/* What the dry run found: the albums the clean-up takes, those it leaves
+ * alone. */
+function strayDryRunResult(r) {
+  const more = (n, list) => (n > list.length
+    ? el("p", { class: "muted small" }, `Only the first ${list.length} are listed.`) : null);
+  return el("div", { class: "stack" },
+    el("p", {}, r.count
+      ? `The clean-up would remove the stray tags of ${plural(r.tracks, "track", "tracks")} ` +
+        `in ${plural(r.count, "album", "albums")}.`
+      : "No album to clean up."),
+    r.count ? el("ul", { class: "list" }, r.albums.map(strayItem)) : null,
+    more(r.count, r.albums),
+    r.left_count ? el("p", { class: "differs-text small" },
+                      `${plural(r.left_count, "album with stray tags is", "albums with stray " +
+                                "tags are")} left alone:`) : null,
+    r.left_count ? el("ul", { class: "list" }, r.left_alone.map(strayItem)) : null,
+    more(r.left_count, r.left_alone));
+}
+
+/* The clean-up of stray tags: a dry run that lists the albums, and the
+ * run that queues the removal for all of them. */
+function straysFix(busy) {
+  const dry = el("button", {
+    class: "btn", type: "button",
+    onclick: async () => {
+      dry.disabled = true;
+      try {
+        strayDryRun = await api("GET", "/api/music/strays");
+        delete fixResults.strays;
+        refresh();
+      } catch (err) {
+        handleError(err);
+        dry.disabled = false;
+      }
+    },
+  }, "Dry run");
+  const run = el("button", {
+    class: "btn go", type: "button", disabled: busy,
+    onclick: async () => {
+      if (!sure("Remove the stray tags of every album whose tags are all valid and written? " +
+                "The changes are queued; nothing is written until you write them.")) return;
+      run.disabled = true;
+      try {
+        fixResults.strays = await api("POST", "/api/music/fix/strays", {});
+        strayDryRun = null;
+        valueCache.clear();
+        refresh();
+      } catch (err) {
+        handleError(err);
+        run.disabled = false;
+      }
+    },
+  }, "Clean up");
+  const r = fixResults.strays;
+  return el("section", { class: "card stack" },
+    el("h2", {}, "Clean up stray tags"),
+    el("p", {}, STRAYS_ABOUT),
+    el("p", {}, "The clean-up goes through every album whose files have stray tags and " +
+                "removes them, so the files hold only the tags nylm shows. It only takes an " +
+                "album whose tags are all valid (nothing missing or invalid) and written (no " +
+                "pending change); the others are left alone. Dry run lists the albums without " +
+                "changing anything; Clean up queues the removal for all of them, to write " +
+                "from Changes. The stray tags are found by the scan."),
+    el("div", { class: "actions" }, dry, run),
+    strayDryRun ? strayDryRunResult(strayDryRun) : null,
+    r ? el("div", { class: "stack" },
+          el("p", {}, r.albums
+            ? `Queued the removal for ${plural(r.queued, "track", "tracks")} in ` +
+              `${plural(r.albums, "album", "albums")}: write them from Changes.`
+            : "No album to clean up."),
+          r.left_alone ? el("p", { class: "differs-text small" },
+                            `${plural(r.left_alone, "album was", "albums were")} left alone: ` +
+                            "a track has a pending change or a missing or invalid tag. Dry " +
+                            "run says which.") : null,
+          r.albums ? el("div", { class: "actions" }, navButton("Changes", "#/changes")) : null)
+      : null);
+}
+
 async function fixesPage() {
   const [o, mb] = await Promise.all([api("GET", "/api/music"),
                                      api("GET", "/api/music/musicbrainz")]);
@@ -2178,7 +2315,8 @@ async function fixesPage() {
   return shell("fixes", o,
     el("section", { class: "card stack" },
       el("h2", {}, "Fixes"),
-      el("p", {}, `Each fix changes at most ${FIX_ALBUMS} albums at a time, in the order of the ` +
+      el("p", {}, `Each fix changes at most ${FIX_ALBUMS} albums at a time (the clean-up of ` +
+                  "stray tags: every album), in the order of the " +
                   "albums list, by the tags with the pending changes. The changes are queued " +
                   "like any edit: look at them in Changes, then write or discard them."),
       busy ? el("p", { class: "warn" }, `${busyText(o)} Fixes can run when it is done.`) : null),
@@ -2217,7 +2355,8 @@ async function fixesPage() {
       "next time.",
       `Look up genres for ${FIX_ALBUMS} albums`, mb.lookups,
       (l) => mbItem(l, LOOKUP_STATE, l.genres.length ? el("p", {}, l.genres.join("; ")) : null),
-      false));
+      false),
+    straysFix(busy));
 }
 
 /* ---- info ---------------------------------------------------------------- */

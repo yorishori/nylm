@@ -141,14 +141,17 @@ static int add_rows(cJSON *list, sqlite3_stmt *st, int ncols, int max)
 }
 
 /* Adds key: [names of the fields whose bit is set; "picture" for
- * MUSIC_COVER_BIT]. NULL when out of memory. */
+ * MUSIC_COVER_BIT, "strays" for MUSIC_STRAYS_BIT]. NULL when out of
+ * memory. */
 static cJSON *add_field_names(cJSON *obj, const char *key, unsigned bits)
 {
     cJSON *list = cJSON_AddArrayToObject(obj, key);
-    for (int i = 0; list != NULL && i <= TAG_FIELDS; i++) {
+    for (int i = 0; list != NULL && i <= TAG_FIELDS + 1; i++) {
         if ((bits & (1u << i)) == 0)
             continue;
-        cJSON *name = cJSON_CreateString(i < TAG_FIELDS ? tags_name[i] : MUSIC_COVER_FIELD);
+        cJSON *name = cJSON_CreateString(i < TAG_FIELDS    ? tags_name[i]
+                                         : i == TAG_FIELDS ? MUSIC_COVER_FIELD
+                                                           : MUSIC_STRAYS_FIELD);
         if (name == NULL || !cJSON_AddItemToArray(list, name))
             return NULL;
     }
@@ -234,7 +237,8 @@ static int track_exists(struct response *res, long long id)
  * pending changes applied (pending: "SELECT field, value FROM changes
  * WHERE state = 'pending' AND track_id = ?"; a new cover is its only
  * picture), into the arena. *changed: the bits of the fields with a
- * pending change (MUSIC_COVER_BIT for the cover). 0 or -1 (logged).
+ * pending change (MUSIC_COVER_BIT for the cover, MUSIC_STRAYS_BIT for
+ * removing the stray tags). 0 or -1 (logged).
  */
 static int planned_tags(sqlite3_stmt *st, int col, long long id, sqlite3_stmt *pending,
                         struct tags *out, unsigned *changed)
@@ -254,6 +258,11 @@ static int planned_tags(sqlite3_stmt *st, int col, long long id, sqlite3_stmt *p
         if (strcmp(name, MUSIC_COVER_FIELD) == 0) {
             bad = copy == NULL || music_set_cover(out, copy) != 0;
             *changed |= bad ? 0 : MUSIC_COVER_BIT;
+            continue;
+        }
+        if (strcmp(name, MUSIC_STRAYS_FIELD) == 0) {
+            out->strays = 0;
+            *changed |= MUSIC_STRAYS_BIT;
             continue;
         }
         bad = f < 0 || copy == NULL ||
@@ -610,8 +619,9 @@ void music_albums(struct request *req, struct response *res)
 
 /*
  * GET /api/music/album?track=N: the tracks of the album of track N: their
- * file (path, size, ext, scanned), tags as in the files, pending changes
- * ({field: new value}; picture: the hash of a new cover), pictures
+ * file (path, size, ext, scanned), tags as in the files, its stray tags
+ * (strays: "DISC TRACKC", or null), pending changes ({field: new value};
+ * picture: the hash of a new cover; strays: "" when they go), pictures
  * (PICTURES_SQL), and which planned tags are missing or invalid.
  */
 void music_album(struct request *req, struct response *res)
@@ -664,6 +674,14 @@ void music_album(struct request *req, struct response *res)
                   add_values(planned, tags_name[f], (enum tag_field)f, &t.value[f]) != NULL);
         if (ok && (changed & MUSIC_COVER_BIT))
             ok = cJSON_AddStringToObject(planned, MUSIC_COVER_FIELD, t.pictures[0].hash) != NULL;
+        if (ok && (changed & MUSIC_STRAYS_BIT))
+            ok = cJSON_AddStringToObject(planned, MUSIC_STRAYS_FIELD, "") != NULL;
+        if (ok) {
+            const char *strays =
+                (const char *)sqlite3_column_text(st, tags_col + MUSIC_TAG_NCOLS - 1);
+            ok = (strays != NULL ? cJSON_AddStringToObject(row, MUSIC_STRAYS_FIELD, strays)
+                                 : cJSON_AddNullToObject(row, MUSIC_STRAYS_FIELD)) != NULL;
+        }
         if (!ok) {
             rc = SQLITE_NOMEM;
             break;
@@ -777,7 +795,8 @@ void music_charts(struct request *req, struct response *res)
 }
 
 /* A change's tag as the file has it now (genre and composer: JSON; the
- * cover: the hashes of the track's pictures, JSON). */
+ * cover: the hashes of the track's pictures, JSON; strays: the stray tags,
+ * "DISC TRACKC", or NULL). */
 #define NOW_VALUE                                                                      \
     "CASE c.field WHEN 'title' THEN t.title WHEN 'album' THEN t.album"                 \
     " WHEN 'artist' THEN t.artist WHEN 'albumartist' THEN t.albumartist"               \
@@ -791,6 +810,7 @@ void music_charts(struct request *req, struct response *res)
     " WHEN 'musicbrainz_albumid' THEN t.musicbrainz_albumid"                           \
     " WHEN 'picture' THEN (SELECT json_group_array(hash ORDER BY position)"             \
     "  FROM track_pictures p WHERE p.track_id = t.id)"                                 \
+    " WHEN 'strays' THEN t.strays"                                                     \
     " ELSE (SELECT json_group_array(value ORDER BY position) FROM track_values v"       \
     "  WHERE v.track_id = t.id AND v.field = c.field) END"
 
@@ -2329,6 +2349,275 @@ void music_fix_composers(struct request *req, struct response *res)
             PLANNED_CTE " SELECT t.id, t.album, t.albumartist FROM tracks t WHERE NOT EXISTS"
             " (SELECT 1 FROM pv WHERE pv.track_id = t.id AND pv.field = 'composer')" FIX_ORDER,
             NULL, composer_fix, NULL);
+}
+
+/* ---- fixes: stray tags --------------------------------------------------- */
+
+#define MAX_STRAY_LIST 500 /* albums listed by the dry run, each list */
+
+/* One album as the clean-up of stray tags sees it. */
+struct stray_album {
+    long long track;                /* its first track */
+    const char *album, *albumartist; /* the files' (either may be NULL) */
+    int with_strays;                /* its tracks with stray tags in the file */
+    unsigned strays;                /* the stray tags they have */
+    int pending;                    /* a track has a pending change */
+    int broken;                     /* a track has a missing or invalid tag */
+};
+
+/* Why the clean-up leaves album a alone, or NULL if it does not. */
+static const char *stray_refusal(const struct stray_album *a)
+{
+    if (a->with_strays == 0)
+        return "this album has no stray tags";
+    if (a->pending)
+        return "a track has pending changes: write or discard them first";
+    if (a->broken)
+        return "a track has a missing or invalid tag: fix it first";
+    return NULL;
+}
+
+/* Called for each album with stray tags; 0, or -1 to stop (logged). */
+typedef int (*stray_fn)(const struct stray_album *a, void *ctx);
+
+/* Every track (or those of the album of track ?1, if ?2 is 1) by album:
+ * id, the album key, then MUSIC_TAG_COLUMNS. */
+#define STRAYS_SQL                                                                     \
+    "SELECT t.id, t.album, t.albumartist, " MUSIC_TAG_COLUMNS                          \
+    " FROM tracks t WHERE ?2 = 0 OR (" SAME_ALBUM ")"                                  \
+    " ORDER BY t.albumartist COLLATE NOCASE, t.album COLLATE NOCASE, t.albumartist,"   \
+    " t.album, t.id"
+#define STRAYS_TAGS_COL 3
+
+/*
+ * Goes through the albums (or the album of track one, if not 0) in the
+ * order of the albums list and calls fn for each one whose files have
+ * stray tags (the cache's), with whether its planned tags are all valid
+ * and whether it has pending changes. 0, or -1 (logged).
+ */
+static int stray_albums(long long one, stray_fn fn, void *ctx)
+{
+    sqlite3_stmt *st = db_prepare(music_db, STRAYS_SQL);
+    sqlite3_stmt *pending = st != NULL ? db_prepare(music_db, PENDING_SQL) : NULL;
+    int rc = pending != NULL && sqlite3_bind_int64(st, 1, one) == SQLITE_OK &&
+                     sqlite3_bind_int(st, 2, one != 0) == SQLITE_OK
+                 ? SQLITE_ROW
+                 : SQLITE_ERROR;
+    struct stray_album a;
+    memset(&a, 0, sizeof a);
+    int open = 0;
+    const char *key_album = NULL, *key_artist = NULL;
+    while (rc == SQLITE_ROW && (rc = sqlite3_step(st)) == SQLITE_ROW) {
+        long long id = sqlite3_column_int64(st, 0);
+        if (new_album(st, &key_album, &key_artist, !open)) {
+            if (open && a.with_strays > 0 && fn(&a, ctx) != 0) {
+                rc = SQLITE_ABORT;
+                break;
+            }
+            memset(&a, 0, sizeof a);
+            open = 1;
+            a.track = id;
+            const char *k1 = (const char *)sqlite3_column_text(st, 1);
+            const char *k2 = (const char *)sqlite3_column_text(st, 2);
+            a.album = key_album = k1 != NULL ? arena_strndup(k1, strlen(k1)) : NULL;
+            a.albumartist = key_artist = k2 != NULL ? arena_strndup(k2, strlen(k2)) : NULL;
+            if ((k1 != NULL && key_album == NULL) || (k2 != NULL && key_artist == NULL)) {
+                rc = SQLITE_NOMEM;
+                break;
+            }
+        }
+        /* The track itself is scratch: only what it adds to a stays. */
+        size_t mark = arena_mark();
+        struct tags t;
+        unsigned changed, missing, invalid, strays;
+        const char *s =
+            (const char *)sqlite3_column_text(st, STRAYS_TAGS_COL + MUSIC_TAG_NCOLS - 1);
+        if (tags_strays_parse(s, &strays) != 0 ||
+            planned_tags(st, STRAYS_TAGS_COL, id, pending, &t, &changed) != 0) {
+            fprintf(stderr, "music: track %lld: can not read its tags\n", id);
+            rc = SQLITE_ERROR;
+            break;
+        }
+        problems(&t, &missing, &invalid);
+        a.with_strays += strays != 0;
+        a.strays |= strays;
+        a.pending |= changed != 0;
+        a.broken |= (missing | invalid) != 0;
+        arena_rewind(mark);
+    }
+    if (rc == SQLITE_DONE && open && a.with_strays > 0 && fn(&a, ctx) != 0)
+        rc = SQLITE_ABORT;
+    if (rc != SQLITE_DONE && rc != SQLITE_ABORT)
+        fprintf(stderr, "music: stray tags: %s\n", sqlite3_errmsg(music_db));
+    sqlite3_finalize(st);
+    sqlite3_finalize(pending);
+    return rc == SQLITE_DONE ? 0 : -1;
+}
+
+/* Adds {track, album, albumartist, tracks, strays} for a to list, and
+ * why if not NULL. 0, or -1 when out of memory. */
+static int add_stray_album(cJSON *list, const struct stray_album *a, const char *why)
+{
+    int oom;
+    const char *strays = tags_strays_text(a->strays, &oom);
+    cJSON *o = cJSON_CreateObject();
+    int ok = !oom && o != NULL && cJSON_AddItemToArray(list, o) &&
+             cJSON_AddNumberToObject(o, "track", (double)a->track) != NULL &&
+             (a->album != NULL ? cJSON_AddStringToObject(o, "album", a->album)
+                               : cJSON_AddNullToObject(o, "album")) != NULL &&
+             (a->albumartist != NULL ? cJSON_AddStringToObject(o, "albumartist", a->albumartist)
+                                     : cJSON_AddNullToObject(o, "albumartist")) != NULL &&
+             cJSON_AddNumberToObject(o, "tracks", a->with_strays) != NULL &&
+             cJSON_AddStringToObject(o, "strays", strays != NULL ? strays : "") != NULL &&
+             (why == NULL || cJSON_AddStringToObject(o, "why", why) != NULL);
+    if (!ok)
+        fprintf(stderr, "music: out of memory listing stray tags\n");
+    return ok ? 0 : -1;
+}
+
+/* What the dry run gathers. */
+struct stray_list {
+    cJSON *albums, *left_alone;
+    long albums_count, tracks, left_count;
+};
+
+/* stray_albums()'s fn for the dry run: lists a as cleaned or left alone. */
+static int list_stray_album(const struct stray_album *a, void *ctx)
+{
+    struct stray_list *l = ctx;
+    const char *why = stray_refusal(a);
+    if (why != NULL)
+        return l->left_count++ < MAX_STRAY_LIST ? add_stray_album(l->left_alone, a, why) : 0;
+    l->tracks += a->with_strays;
+    return l->albums_count++ < MAX_STRAY_LIST ? add_stray_album(l->albums, a, NULL) : 0;
+}
+
+/*
+ * GET /api/music/strays: the dry run of the clean-up of stray tags. The
+ * albums whose files have stray tags (the first 500 of each list, in the
+ * order of the albums list): those it would clean (no pending change,
+ * every planned tag valid) and those it leaves alone (why), each
+ * {track, album, albumartist, tracks: those with stray tags, strays: the
+ * stray tags they have, "DISC TRACKC"}; and how many in all.
+ * -> 200 {albums, count, tracks, left_alone, left_count}
+ */
+void music_strays(struct request *req, struct response *res)
+{
+    (void)req;
+    struct stray_list l = { 0 };
+    cJSON *out = cJSON_CreateObject();
+    l.albums = out != NULL ? cJSON_AddArrayToObject(out, "albums") : NULL;
+    l.left_alone = l.albums != NULL ? cJSON_AddArrayToObject(out, "left_alone") : NULL;
+    if (l.left_alone == NULL || stray_albums(0, list_stray_album, &l) != 0 ||
+        cJSON_AddNumberToObject(out, "count", (double)l.albums_count) == NULL ||
+        cJSON_AddNumberToObject(out, "tracks", (double)l.tracks) == NULL ||
+        cJSON_AddNumberToObject(out, "left_count", (double)l.left_count) == NULL) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, out);
+}
+
+/* What the clean-up does. */
+struct stray_run {
+    sqlite3_stmt *queue;
+    long long batch;
+    long albums, queued, left;
+    const char *refused; /* one album was asked for and is left alone: why */
+};
+
+/* stray_albums()'s fn for the clean-up: queues the removal of the stray
+ * tags of a's tracks that have them, unless a is left alone. */
+static int queue_stray_album(const struct stray_album *a, void *ctx)
+{
+    struct stray_run *r = ctx;
+    const char *why = stray_refusal(a);
+    if (why != NULL) {
+        r->left++;
+        r->refused = why;
+        return 0;
+    }
+    if (sqlite3_bind_int64(r->queue, 1, a->track) != SQLITE_OK ||
+        sqlite3_bind_int64(r->queue, 2, r->batch) != SQLITE_OK ||
+        sqlite3_step(r->queue) != SQLITE_DONE) {
+        db_log_error(music_db, "queue stray tags");
+        return -1;
+    }
+    r->albums++;
+    r->queued += sqlite3_changes(music_db);
+    sqlite3_reset(r->queue);
+    sqlite3_clear_bindings(r->queue);
+    return 0;
+}
+
+/*
+ * POST /api/music/fix/strays {} | {"album": track id}: the clean-up of
+ * stray tags, for every album or one. For each album whose files have
+ * stray tags, no track a pending change and every planned tag valid,
+ * queues, as one batch, a change that removes all the stray tags of each
+ * of its tracks that has some; the others are left alone (counted). One
+ * album that is left alone is refused (409, why). Nothing is written to
+ * the files until the write service runs.
+ * -> 200 {batch, albums, queued, left_alone}
+ */
+void music_fix_strays(struct request *req, struct response *res)
+{
+    cJSON *body = json_body(req, res);
+    if (body == NULL)
+        return;
+    long long album = 0;
+    if (cJSON_GetObjectItemCaseSensitive(body, "album") != NULL) {
+        const char *err = get_id(body, "album", &album);
+        if (err != NULL) {
+            json_error(res, 400, err);
+            return;
+        }
+        if (track_exists(res, album) != 1)
+            return;
+    }
+    int lock = lock_for_write(res);
+    if (lock < 0)
+        return;
+    struct stray_run r = { 0 };
+    r.queue = db_prepare(music_db,
+        "INSERT INTO changes (batch, track_id, field, value)"
+        " SELECT ?2, t.id, '" MUSIC_STRAYS_FIELD "', '' FROM tracks t"
+        " WHERE" SAME_ALBUM " AND t.strays IS NOT NULL");
+    int rc = r.queue != NULL ? db_exec(music_db, "BEGIN IMMEDIATE") : -1;
+    if (rc == 0 &&
+        (r.batch = single_number("SELECT coalesce(max(batch), 0) + 1 FROM changes", 0)) < 0)
+        rc = -1;
+    if (rc == 0)
+        rc = stray_albums(album, queue_stray_album, &r);
+    sqlite3_finalize(r.queue);
+    /* One album asked for: it must be cleaned (it has no stray tags when
+     * stray_albums() did not call back). */
+    const char *refused = album == 0 ? NULL
+                          : r.albums == 0 && r.left == 0 ? "this album has no stray tags"
+                                                         : r.left > 0 ? r.refused : NULL;
+    if (rc == 0 && refused == NULL)
+        rc = db_exec(music_db, "COMMIT");
+    if ((rc != 0 || refused != NULL) && sqlite3_get_autocommit(music_db) == 0)
+        db_exec(music_db, "ROLLBACK");
+    music_unlock(lock);
+    if (rc != 0) {
+        fprintf(stderr, "music: clean-up of stray tags failed\n");
+        json_error(res, 500, "internal error");
+        return;
+    }
+    if (refused != NULL) {
+        json_error(res, 409, refused);
+        return;
+    }
+    cJSON *out = cJSON_CreateObject();
+    if (out == NULL || cJSON_AddNumberToObject(out, "batch", (double)r.batch) == NULL ||
+        cJSON_AddNumberToObject(out, "albums", (double)r.albums) == NULL ||
+        cJSON_AddNumberToObject(out, "queued", (double)r.queued) == NULL ||
+        cJSON_AddNumberToObject(out, "left_alone", (double)r.left) == NULL) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    json_reply(res, 200, out);
 }
 
 /* ---- starting the services ---------------------------------------------- */

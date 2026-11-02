@@ -1,7 +1,8 @@
 /* Music tags: the field table, the rules, preparing a write, reading and
  * writing through TagLib (pictures included) on copies of the files in
  * tests/data (MP3 with ID3v2.3; FLAC; FLAC with two genres and two titles;
- * MP3 with the track number "0/0", which TagLib drops on save). */
+ * MP3 with the track number "0/0", which TagLib drops on save); stray
+ * tags are added to copies through TagLib. */
 #define _POSIX_C_SOURCE 200809L
 
 #include <dirent.h>
@@ -300,6 +301,98 @@ static void test_prepare(void)
     CHECK(strlen(cs) == 499); /* 299 + 2 + 198: the 500th byte would split an "é" */
     CHECK(tags_check(TAG_COMPOSERSORT, &t.value[TAG_COMPOSERSORT]) == NULL);
     CHECK(strstr(note, "COMPOSERSORT cut to 500 bytes") != NULL);
+}
+
+/* Stray tags: their text and its parser, and which a field's write
+ * removes. */
+static void test_strays(void)
+{
+    int oom;
+    unsigned x;
+    CHECK(tags_strays_text(0, &oom) == NULL && !oom);
+    CHECK_STR(tags_strays_text(1u << 0, &oom), "DISC");
+    CHECK_STR(tags_strays_text((1u << 1) | (1u << 9) | (1u << 5), &oom),
+              "DISCC TRACKC ORIGINALDATE");
+    CHECK_STR(tags_strays_text(TAGS_ALL_STRAYS, &oom),
+              "DISC DISCC DISCTOTAL TOTALDISCS TRACK TRACKC TRACKTOTAL TOTALTRACKS YEAR "
+              "ORIGINALDATE");
+    CHECK(tags_strays_text(1u << TAGS_STRAYS, &oom) == NULL && !oom); /* not a stray tag */
+
+    /* each set of stray tags reads back as it was written */
+    for (unsigned b = 0; b <= TAGS_ALL_STRAYS; b++) {
+        const char *s = tags_strays_text(b, &oom);
+        CHECK(!oom && tags_strays_parse(s, &x) == 0 && x == b);
+    }
+    CHECK(tags_strays_parse(NULL, &x) == 0 && x == 0);
+    CHECK(tags_strays_parse("", &x) == 0 && x == 0);
+    CHECK(tags_strays_parse("YEAR", &x) == 0 && x == 1u << 8);
+    /* rejected: unknown, lower case, twice, out of order, spaces */
+    CHECK(tags_strays_parse("COMMENT", &x) == -1);
+    CHECK(tags_strays_parse("disc", &x) == -1);
+    CHECK(tags_strays_parse("DISCS", &x) == -1);
+    CHECK(tags_strays_parse("DIS", &x) == -1);
+    CHECK(tags_strays_parse("DISC DISC", &x) == -1);
+    CHECK(tags_strays_parse("TRACK DISC", &x) == -1);
+    CHECK(tags_strays_parse("DISC  TRACK", &x) == -1);
+    CHECK(tags_strays_parse(" DISC", &x) == -1);
+    CHECK(tags_strays_parse("DISC ", &x) == -1);
+    CHECK(tags_strays_parse(" ", &x) == -1);
+    /* all ten, and one more */
+    CHECK(tags_strays_parse("DISC DISCC DISCTOTAL TOTALDISCS TRACK TRACKC TRACKTOTAL "
+                            "TOTALTRACKS YEAR ORIGINALDATE", &x) == 0 && x == TAGS_ALL_STRAYS);
+    CHECK(tags_strays_parse("DISC DISCC DISCTOTAL TOTALDISCS TRACK TRACKC TRACKTOTAL "
+                            "TOTALTRACKS YEAR ORIGINALDATE DISC", &x) == -1);
+
+    CHECK(tags_strays_of(TAG_DISCNUMBER) == 0x00Fu);
+    CHECK(tags_strays_of(TAG_TRACKNUMBER) == 0x0F0u);
+    CHECK(tags_strays_of(TAG_DATE) == 0x300u);
+    CHECK((tags_strays_of(TAG_DISCNUMBER) | tags_strays_of(TAG_TRACKNUMBER) |
+           tags_strays_of(TAG_DATE)) == TAGS_ALL_STRAYS);
+    for (int i = 0; i < TAG_FIELDS; i++)
+        if (i != TAG_DISCNUMBER && i != TAG_TRACKNUMBER && i != TAG_DATE)
+            CHECK(tags_strays_of((enum tag_field)i) == 0);
+    CHECK_STR(tags_stray_key[0], "DISC");
+    CHECK_STR(tags_stray_key[4], "TRACK");
+    CHECK_STR(tags_stray_key[8], "YEAR");
+}
+
+/* tags_prepare() removes the stray tags of the fields a write sets. */
+static void test_prepare_strays(void)
+{
+    struct tags t;
+    char note[TAGS_MAX_NOTE];
+
+    memset(&t, 0, sizeof t);
+    t.value[TAG_DISCNUMBER] = one("1/2");
+    t.strays = TAGS_ALL_STRAYS;
+    note[0] = '\0';
+    CHECK(tags_prepare(&t, 1u << TAG_TITLE, note, sizeof note) == 0);
+    CHECK(t.strays == TAGS_ALL_STRAYS && note[0] == '\0'); /* not a field with strays */
+    CHECK(tags_prepare(&t, 1u << TAG_DISCNUMBER, note, sizeof note) == 0);
+    CHECK(t.strays == (TAGS_ALL_STRAYS & ~0x00Fu));
+    CHECK(strstr(note, "removed the stray tags DISC DISCC DISCTOTAL TOTALDISCS") != NULL);
+    note[0] = '\0';
+    CHECK(tags_prepare(&t, (1u << TAG_TRACKNUMBER) | (1u << TAG_DATE), note, sizeof note) == 0);
+    CHECK(t.strays == 0);
+    CHECK(strstr(note, "TRACK TRACKC TRACKTOTAL TOTALTRACKS YEAR ORIGINALDATE") != NULL);
+    note[0] = '\0';
+    CHECK(tags_prepare(&t, 1u << TAG_DATE, note, sizeof note) == 0);
+    CHECK(t.strays == 0 && note[0] == '\0'); /* none left: nothing said */
+
+    /* only those the track has are named */
+    t.strays = (1u << 0) | (1u << 8);
+    CHECK(tags_prepare(&t, (1u << TAG_DISCNUMBER) | (1u << TAG_TRACKNUMBER), note,
+                       sizeof note) == 0);
+    CHECK(t.strays == 1u << 8);
+    CHECK(strstr(note, "removed the stray tags DISC") != NULL && strstr(note, "TRACK") == NULL);
+
+    /* a disc number made 1/1 is written: its stray tags go too */
+    t.value[TAG_DISCNUMBER] = one(NULL);
+    t.strays = 1u << 2;
+    note[0] = '\0';
+    CHECK(tags_prepare(&t, 0, note, sizeof note) == 0);
+    CHECK_STR(t.value[TAG_DISCNUMBER].v[0], "1/1");
+    CHECK(t.strays == 0 && strstr(note, "DISCTOTAL") != NULL);
 }
 
 static void test_check_written(void)
@@ -666,6 +759,65 @@ static void test_empty_values(void)
     CHECK(t.value[TAG_TITLE].n == 0);
 }
 
+/* Stray tags in a FLAC and an MP3 (TXXX frames): read, kept by a write
+ * that does not remove them, removed one by one or all; a cache that does
+ * not know them, and a write that would add one, are refused. */
+static void test_write_strays(void)
+{
+    char path[512], err[256];
+    struct tags now, want, t;
+    const char *zero[] = { "0" }, *ten[] = { "10" }, *year[] = { "2023" };
+    const char *files[][2] = { { "tagged.flac", "strays.flac" }, { "tagged.mp3", "strays.mp3" } };
+
+    for (size_t i = 0; i < 2; i++) {
+        copy_fixture(files[i][0], files[i][1], path, sizeof path);
+        CHECK(tags_read(path, &t, NULL, NULL, err, sizeof err) == 0 && t.strays == 0);
+        set_raw(path, "DISC", zero, 1);
+        set_raw(path, "TRACKC", ten, 1);
+        set_raw(path, "YEAR", year, 1);
+        unsigned all = (1u << 0) | (1u << 5) | (1u << 8);
+        CHECK(tags_read(path, &now, NULL, NULL, err, sizeof err) == 0 && now.strays == all);
+
+        /* the cache does not know them: refused */
+        want = now;
+        want.value[TAG_MOOD] = one("calm");
+        now.strays = 0;
+        want.strays = 0;
+        CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_NOT_WRITTEN);
+        CHECK(strstr(err, "changed since it was scanned (the stray tags)") != NULL);
+        now.strays = all;
+
+        /* kept by a write that does not remove them */
+        want.strays = all;
+        CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_WRITTEN);
+        CHECK(tags_read(path, &t, NULL, NULL, err, sizeof err) == 0 && t.strays == all);
+        CHECK_STR(t.value[TAG_MOOD].v[0], "calm");
+
+        /* DISC goes, the others stay */
+        now = t;
+        want = now;
+        want.strays = all & ~1u;
+        CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_WRITTEN);
+        CHECK(tags_read(path, &t, NULL, NULL, err, sizeof err) == 0 && t.strays == (all & ~1u));
+        CHECK_STR(t.value[TAG_MOOD].v[0], "calm");
+        CHECK(tags_equal(&t.value[TAG_DISCNUMBER], &now.value[TAG_DISCNUMBER]));
+
+        /* one can not be added */
+        now = t;
+        want = now;
+        want.strays = TAGS_ALL_STRAYS;
+        CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_NOT_WRITTEN);
+        CHECK(strstr(err, "only be removed") != NULL);
+
+        /* all go, with a tag change */
+        want.strays = 0;
+        want.value[TAG_DATE] = one("2020");
+        CHECK(tags_write(path, &now, &want, err, sizeof err) == TAGS_WRITTEN);
+        CHECK(tags_read(path, &t, NULL, NULL, err, sizeof err) == 0 && t.strays == 0);
+        CHECK_STR(t.value[TAG_DATE].v[0], "2020");
+    }
+}
+
 /* A new cover (want's one picture, with its bytes): fills cover. */
 static void make_cover(struct tag_picture *cover)
 {
@@ -803,12 +955,15 @@ int main(void)
     test_check();
     test_split();
     test_prepare();
+    test_strays();
+    test_prepare_strays();
     test_check_written();
     test_read();
     test_pictures();
     test_write();
     test_write_cover();
     test_empty_values();
+    test_write_strays();
     test_refusals();
     test_read_back();
 
