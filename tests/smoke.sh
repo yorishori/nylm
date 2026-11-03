@@ -791,7 +791,7 @@ T2=$(id_of Album/02.FLAC)
 T3=$(id_of Multi/01.flac)
 expect_body "\"path\":\"$M/Artist/Album/01.mp3\",\"size\":1523,\"ext\":\"mp3\",\"scanned\":" "track file"
 expect_body '"tags":{"title":"Song One","album":"Some Album","artist":"Some Artist","albumartist":"Some Artist","tracknumber":"1/2","discnumber":null,"date":"2001","compilation":"0"' "track tags"
-expect_body '"genre":["Rock"],"composer":[]},"pending":{},"pictures":[],"missing":["discnumber","composer"],"invalid":["genre"]}' "track problems"
+expect_body '"genre":["Rock"],"composer":[]},"pending":{},"pictures":[],"missing":["discnumber","composer"],"invalid":["genre"],"strays":null}' "track problems"
 expect_body '"title":"Song Two; Other Title"' "several titles shown joined"
 expect_body '"genre":["Rock","Pop"]' "several genres in order"
 expect_body '"invalid":["tracknumber","genre"]' "track number without a total is invalid"
@@ -1483,7 +1483,7 @@ expect_body "\"from_path\":\"$M/Artist/Album/01.mp3\",\"to_path\":\"$M/Some Arti
 post "move with nothing to move" 409 $MV "{$PW}"
 expect_body "there is nothing to move" "nothing to move message"
 # Never over an existing file: one is in the way, the track stays.
-sqlite3 "$MDB" "DELETE FROM tracks WHERE path LIKE '%Loose/x.mp3' OR path LIKE '%elsewhere/y.mp3';
+sqlite3 "$MDB" "PRAGMA foreign_keys = ON; DELETE FROM tracks WHERE path LIKE '%Loose/x.mp3' OR path LIKE '%elsewhere/y.mp3';
                 UPDATE tracks SET title = 'Other' WHERE path LIKE '%03 - Song Three.flac'"
 echo "in the way" > "$M/AC_DC_ Live/Some Album/03 - Other.flac"
 service 0 "music-move, target taken" music-move
@@ -1674,7 +1674,10 @@ query '["AAA Fixer"]' "the next album" "$(FCQ 12)"
 query "1" "a planned composer is not changed again" \
     "SELECT count(*) FROM changes WHERE track_id = $(FIXID 02) AND field = 'composer'"
 post "discard the fixes"       200 /api/music/discard '{"all":true}'
-sqlite3 "$MDB" "DELETE FROM tracks WHERE album GLOB 'Fix [0-9][0-9]'"
+# The sqlite3 shell leaves foreign keys off: on, so the tracks' values go too.
+sqlite3 "$MDB" "PRAGMA foreign_keys = ON; DELETE FROM tracks WHERE album GLOB 'Fix [0-9][0-9]'"
+query "0" "no values of removed tracks are left" \
+    "SELECT count(*) FROM track_values WHERE track_id NOT IN (SELECT id FROM tracks)"
 
 # The clean-up of stray tags. Albums of the cache only, by Strayer, every
 # tag valid: A (two tracks, one with stray tags), B (stray tags, a pending
@@ -1728,7 +1731,7 @@ expect_body '"albums":1,"queued":1,"left_alone":2}' "every album that can be cle
 query "2" "B keeps its change, A gets its clean-up" \
     "SELECT count(*) FROM changes WHERE state = 'pending'"
 post "discard the clean-up"    200 /api/music/discard '{"all":true}'
-sqlite3 "$MDB" "DELETE FROM tracks WHERE album GLOB 'Stray ?'"
+sqlite3 "$MDB" "PRAGMA foreign_keys = ON; DELETE FROM tracks WHERE album GLOB 'Stray ?'"
 
 # ---- server ------------------------------------------------------------------
 
