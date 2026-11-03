@@ -185,6 +185,7 @@ query "Rock|Pop" "genres in order" \
      WHERE track_id = (SELECT id FROM tracks WHERE path LIKE '%Multi/01.flac')
      AND field = 'genre' ORDER BY position)"
 query "0|0|0" "compilation defaults to 0" "SELECT group_concat(compilation, '|') FROM tracks"
+query "0" "the test files have no stray tags" "SELECT count(*) FROM tracks WHERE strays IS NOT NULL"
 service 0 "music-scan again"              music-scan
 logged "4 files, 0 read" "rescan reads only changed files"
 scan_path 0 "scan a folder"               "$M/Artist/Album"
@@ -756,7 +757,8 @@ for route in "GET /api/music" "GET /api/music/albums" "GET /api/music/album?trac
              "GET /api/music/qobuz" "POST /api/music/qobuz/start" "GET /api/music/duplicates" \
              "POST /api/music/merge" "GET /api/music/names?field=genre" "POST /api/music/rename" \
              "POST /api/music/remove" "POST /api/music/fix/split-genres" \
-             "POST /api/music/fix/composers" "GET /api/music/musicbrainz" \
+             "POST /api/music/fix/composers" "GET /api/music/strays" \
+             "POST /api/music/fix/strays" "GET /api/music/musicbrainz" \
              "POST /api/music/musicbrainz/start"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
@@ -1116,6 +1118,7 @@ post "discard while busy"      409 $D "{\"track\":$T1}"
 post "merge while busy"        409 /api/music/merge '{"field":"artist","from":["some artist"],"to":"Some Artist"}'
 post "split while busy"        409 /api/music/fix/split-genres '{"delimiter":","}'
 post "composers while busy"    409 /api/music/fix/composers '{}'
+post "strays while busy"       409 /api/music/fix/strays '{}'
 post "scan while busy"         409 $S "{$PW}"
 post "write while busy"        409 $W "{$PW}"
 post "move while busy"         409 /api/music/move "{$PW}"
@@ -1672,6 +1675,60 @@ query "1" "a planned composer is not changed again" \
     "SELECT count(*) FROM changes WHERE track_id = $(FIXID 02) AND field = 'composer'"
 post "discard the fixes"       200 /api/music/discard '{"all":true}'
 sqlite3 "$MDB" "DELETE FROM tracks WHERE album GLOB 'Fix [0-9][0-9]'"
+
+# The clean-up of stray tags. Albums of the cache only, by Strayer, every
+# tag valid: A (two tracks, one with stray tags), B (stray tags, a pending
+# change), C (stray tags, no date), D (no stray tags).
+for a in A A B C D; do
+    sqlite3 "$MDB" "INSERT INTO tracks (path, size, ext, scanned, title, album, albumartist,
+                    artist, tracknumber, discnumber, date, compilation)
+                    VALUES ('$M/stray/$a-' || random() || '.flac', 1, 'flac', 1, 'T',
+                    'Stray $a', 'Strayer', 'Strayer', '1/1', '1/1', '2020', '0')"
+done
+sqlite3 "$MDB" "INSERT INTO track_values SELECT id, 'composer', 0, 'Strayer' FROM tracks
+                WHERE album GLOB 'Stray ?'"
+SID() { sqlite3 "$MDB" "SELECT min(id) FROM tracks WHERE album = 'Stray $1'"; }
+sqlite3 "$MDB" "UPDATE tracks SET strays = 'DISC TRACKC' WHERE id = $(SID A);
+                UPDATE tracks SET strays = 'YEAR' WHERE album IN ('Stray B', 'Stray C');
+                UPDATE tracks SET date = NULL WHERE album = 'Stray C';
+                INSERT INTO changes (batch, track_id, field, value)
+                VALUES (1, $(SID B), 'title', 'U')"
+expect 200 "strays dry run"    -b "$JAR" "$B/api/music/strays"
+expect_body '"albums":[{"track":'"$(SID A)"',"album":"Stray A","albumartist":"Strayer","tracks":1,"strays":"DISC TRACKC"}],' "dry run: the album it cleans"
+expect_body '"left_alone":[{"track":'"$(SID B)"',"album":"Stray B","albumartist":"Strayer","tracks":1,"strays":"YEAR","why":"a track has pending changes: write or discard them first"},{"track":'"$(SID C)"',"album":"Stray C","albumartist":"Strayer","tracks":1,"strays":"YEAR","why":"a track has a missing or invalid tag: fix it first"}],' "dry run: the albums it leaves alone, why"
+expect_body '"count":1,"tracks":1,"left_count":2}' "dry run counts"
+query "1" "the dry run queues nothing" "SELECT count(*) FROM changes WHERE state = 'pending'"
+FS=/api/music/fix/strays
+expect 415 "strays need json"  -b "$JAR" -d '{}' "$B$FS"
+post "strays not an object"    400 $FS '[]'
+post "strays album text"       400 $FS '{"album":"x"}'
+post "strays album 0"          400 $FS '{"album":0}'
+post "strays album missing"    404 $FS '{"album":999999}'
+post "strays album pending"    409 $FS "{\"album\":$(SID B)}"
+expect_body "a track has pending changes" "pending album refused"
+post "strays album invalid"    409 $FS "{\"album\":$(SID C)}"
+expect_body "a track has a missing or invalid tag" "invalid album refused"
+post "strays album none"       409 $FS "{\"album\":$(SID D)}"
+expect_body "this album has no stray tags" "album without stray tags refused"
+query "1" "refused clean-ups queue nothing" "SELECT count(*) FROM changes WHERE state = 'pending'"
+post "strays one album"        200 $FS "{\"album\":$(SID A)}"
+expect_body '"albums":1,"queued":1,"left_alone":0}' "one album cleaned"
+query "$(SID A)|" "the track with stray tags gets the change" \
+    "SELECT track_id, value FROM changes WHERE field = 'strays' AND state = 'pending'"
+expect 200 "album with stray tags" -b "$JAR" "$B/api/music/album?track=$(SID A)"
+expect_body '"strays":"DISC TRACKC"' "the album page shows the stray tags"
+expect_body '"pending":{"strays":""}' "and that they go"
+expect 200 "changes with strays" -b "$JAR" "$B/api/music/changes"
+expect_body '"field":"strays","value":"","now":"DISC TRACKC"' "the change shows the stray tags now"
+post "strays all, A pending"   200 $FS '{}'
+expect_body '"albums":0,"queued":0,"left_alone":3}' "an album with its clean-up queued is left alone"
+post "discard A's clean-up"    200 /api/music/discard "{\"album\":$(SID A)}"
+post "strays all"              200 $FS '{}'
+expect_body '"albums":1,"queued":1,"left_alone":2}' "every album that can be cleaned"
+query "2" "B keeps its change, A gets its clean-up" \
+    "SELECT count(*) FROM changes WHERE state = 'pending'"
+post "discard the clean-up"    200 /api/music/discard '{"all":true}'
+sqlite3 "$MDB" "DELETE FROM tracks WHERE album GLOB 'Stray ?'"
 
 # ---- server ------------------------------------------------------------------
 

@@ -148,9 +148,47 @@ static void test_upgrade_empty(void)
     remove_db();
 }
 
+/* Migration 9: every track is read again (scanned 0) to find its stray
+ * tags (none until then), and the pending changes stay. */
+static void test_upgrade_strays(void)
+{
+    sqlite3 *db = db_open(db_path, music_migrations, 8);
+    CHECK(db != NULL);
+    if (db == NULL)
+        return;
+    CHECK(db_exec(db, "INSERT INTO tracks (path, size, ext, scanned, title)"
+                      " VALUES ('/m/a.flac', 1, 'flac', 1700000000, 'A');"
+                      "INSERT INTO changes (batch, track_id, field, value)"
+                      " VALUES (3, 1, 'discnumber', '1/2')") == 0);
+    sqlite3_close(db);
+    db = db_open(db_path, music_migrations, music_migration_count);
+    CHECK(db != NULL);
+    if (db == NULL)
+        return;
+    sqlite3_stmt *st = db_prepare(db, "SELECT scanned, strays IS NULL, title FROM tracks");
+    CHECK(st != NULL && sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int64(st, 0) == 0 &&
+          sqlite3_column_int(st, 1) == 1);
+    CHECK_STR((const char *)sqlite3_column_text(st, 2), "A");
+    sqlite3_finalize(st);
+    st = db_prepare(db, "SELECT batch, track_id, field, value, state FROM changes");
+    CHECK(st != NULL && sqlite3_step(st) == SQLITE_ROW && sqlite3_column_int(st, 0) == 3 &&
+          sqlite3_column_int(st, 1) == 1);
+    CHECK_STR((const char *)sqlite3_column_text(st, 2), "discnumber");
+    CHECK_STR((const char *)sqlite3_column_text(st, 3), "1/2");
+    CHECK_STR((const char *)sqlite3_column_text(st, 4), "pending");
+    CHECK(sqlite3_step(st) == SQLITE_DONE);
+    sqlite3_finalize(st);
+    /* still one pending change per tag of a track */
+    CHECK(db_exec(db, "INSERT INTO changes (batch, track_id, field, value)"
+                      " VALUES (4, 1, 'discnumber', '2/2')") != 0);
+    sqlite3_close(db);
+    remove_db();
+}
+
 /* The tracks columns after scanned are the single-valued tags in tags.h
- * order, changes accepts exactly the editable fields, and art and
- * track_pictures keep to their rules. */
+ * order, then strays; changes accepts exactly the editable fields, the
+ * cover and the stray tags; and art and track_pictures keep to their
+ * rules. */
 static void test_schema(void)
 {
     sqlite3 *db = db_open(db_path, music_migrations, music_migration_count);
@@ -164,10 +202,12 @@ static void test_schema(void)
         const char *name = (const char *)sqlite3_column_text(st, 0);
         if (col >= 5 && col - 5 < TAG_SINGLE_FIELDS)
             CHECK_STR(name, tags_name[col - 5]);
+        if (col == 5 + TAG_SINGLE_FIELDS)
+            CHECK_STR(name, "strays");
         col++;
     }
     sqlite3_finalize(st);
-    CHECK(col == 5 + TAG_SINGLE_FIELDS);
+    CHECK(col == 6 + TAG_SINGLE_FIELDS);
 
     st = db_prepare(db, "INSERT INTO changes (batch, field, value) VALUES (1, ?, '')");
     for (int i = 0; st != NULL && i < TAG_FIELDS; i++) {
@@ -178,6 +218,9 @@ static void test_schema(void)
     }
     CHECK(st != NULL && sqlite3_bind_text(st, 1, MUSIC_COVER_FIELD, -1, SQLITE_STATIC) ==
                             SQLITE_OK && sqlite3_step(st) == SQLITE_DONE);
+    sqlite3_reset(st);
+    CHECK(sqlite3_bind_text(st, 1, MUSIC_STRAYS_FIELD, -1, SQLITE_STATIC) == SQLITE_OK &&
+          sqlite3_step(st) == SQLITE_DONE);
     sqlite3_reset(st);
     CHECK(sqlite3_bind_text(st, 1, "pictures", -1, SQLITE_STATIC) == SQLITE_OK &&
           sqlite3_step(st) != SQLITE_DONE);
@@ -217,15 +260,15 @@ static void test_schema(void)
     remove_db();
 }
 
-/* Reads the pictures column (pictures, then every tag NULL but genre and
- * composer []) with music_track_tags(): its return value. */
-static int track_pictures(const char *json, struct tags *t)
+/* Reads MUSIC_TAG_COLUMNS (pictures, every tag NULL but genre and
+ * composer [], then strays) with music_track_tags(): its return value. */
+static int track_columns(const char *json, const char *strays, struct tags *t)
 {
     char sql[1024];
-    size_t at = (size_t)snprintf(sql, sizeof sql, "SELECT ?");
+    size_t at = (size_t)snprintf(sql, sizeof sql, "SELECT ?1");
     for (int i = 0; i < TAG_SINGLE_FIELDS; i++)
         at += (size_t)snprintf(sql + at, sizeof sql - at, ", NULL");
-    snprintf(sql + at, sizeof sql - at, ", '[]', '[]'");
+    snprintf(sql + at, sizeof sql - at, ", '[]', '[]', ?2");
     sqlite3 *db;
     CHECK(sqlite3_open(":memory:", &db) == SQLITE_OK);
     sqlite3_stmt *st = db_prepare(db, sql);
@@ -233,11 +276,21 @@ static int track_pictures(const char *json, struct tags *t)
     if (st != NULL && (json == NULL ? sqlite3_bind_null(st, 1)
                                     : sqlite3_bind_text(st, 1, json, -1, SQLITE_STATIC)) ==
                           SQLITE_OK &&
-        sqlite3_step(st) == SQLITE_ROW)
+        (strays == NULL ? sqlite3_bind_null(st, 2)
+                        : sqlite3_bind_text(st, 2, strays, -1, SQLITE_STATIC)) == SQLITE_OK &&
+        sqlite3_step(st) == SQLITE_ROW) {
+        CHECK(sqlite3_column_count(st) == MUSIC_TAG_NCOLS);
         rc = music_track_tags(st, 0, t);
+    }
     sqlite3_finalize(st);
     sqlite3_close(db);
     return rc;
+}
+
+/* The pictures column alone, without stray tags. */
+static int track_pictures(const char *json, struct tags *t)
+{
+    return track_columns(json, NULL, t);
 }
 
 #define PIC(hash, type, desc) "{\"hash\":\"" hash "\",\"type\":\"" type "\",\"description\":\"" desc "\"}"
@@ -285,6 +338,19 @@ static void test_track_pictures(void)
     CHECK(music_set_cover(&t, HASH "0") == -1);
 }
 
+/* The strays column: none, some, all; one that is not a list of keys. */
+static void test_track_strays(void)
+{
+    struct tags t;
+    CHECK(track_columns("[]", NULL, &t) == 0 && t.strays == 0);
+    CHECK(track_columns("[]", "DISC YEAR", &t) == 0 && t.strays == ((1u << 0) | (1u << 8)));
+    CHECK(track_columns("[]", "DISC DISCC DISCTOTAL TOTALDISCS TRACK TRACKC TRACKTOTAL"
+                              " TOTALTRACKS YEAR ORIGINALDATE", &t) == 0 &&
+          t.strays == TAGS_ALL_STRAYS);
+    CHECK(track_columns("[]", "COMMENT", &t) == -1);
+    CHECK(track_columns("[]", "YEAR DISC", &t) == -1);
+}
+
 int main(void)
 {
     if (arena_init(1024 * 1024) != 0)
@@ -296,8 +362,10 @@ int main(void)
     snprintf(db_path, sizeof db_path, "%s/music.db", dir);
     test_upgrade();
     test_upgrade_empty();
+    test_upgrade_strays();
     test_schema();
     CHECK(rmdir(dir) == 0);
     test_track_pictures();
+    test_track_strays();
     TEST_DONE();
 }

@@ -98,8 +98,8 @@ int music_musicbrainz_lock(int service);
 /*
  * The columns of a track's tags in a query on "tracks t": its pictures (a
  * JSON array of {hash, type, description}), the single-valued tags in
- * tags.h order, then genre and composer as JSON arrays.
- * music_track_tags() reads them.
+ * tags.h order, genre and composer as JSON arrays, then the stray tags
+ * (tags_strays_text()). music_track_tags() reads them.
  */
 #define MUSIC_TAG_COLUMNS                                                               \
     "(SELECT json_group_array(json_object('hash', p.hash, 'type', p.type,"              \
@@ -113,8 +113,8 @@ int music_musicbrainz_lock(int service);
     " (SELECT json_group_array(value ORDER BY position) FROM track_values v"            \
     "  WHERE v.track_id = t.id AND v.field = 'genre'),"                                 \
     " (SELECT json_group_array(value ORDER BY position) FROM track_values v"            \
-    "  WHERE v.track_id = t.id AND v.field = 'composer')"
-#define MUSIC_TAG_NCOLS (1 + TAG_FIELDS)
+    "  WHERE v.track_id = t.id AND v.field = 'composer'), t.strays"
+#define MUSIC_TAG_NCOLS (2 + TAG_FIELDS)
 
 /*
  * The field of a change that sets the album cover (value: the hash of an
@@ -124,12 +124,18 @@ int music_musicbrainz_lock(int service);
 #define MUSIC_COVER_FIELD "picture"
 #define MUSIC_COVER_BIT   (1u << TAG_FIELDS)
 
+/* The field of a change that removes all the track's stray tags (value
+ * ""), and its bit next to the cover's. */
+#define MUSIC_STRAYS_FIELD "strays"
+#define MUSIC_STRAYS_BIT   (1u << (TAG_FIELDS + 1))
+
 /* Sets t's pictures to one front cover, the picture hash (in the arena).
  * 0, or -1 if hash is not one or out of memory. */
 int music_set_cover(struct tags *t, const char *hash);
 
 /* Reads MUSIC_TAG_COLUMNS from column col of st's row into out (strings in
- * the arena). 0, or -1 when out of memory or a JSON array is invalid. */
+ * the arena). 0, or -1 when out of memory, or a JSON array or the stray
+ * tags are invalid. */
 int music_track_tags(sqlite3_stmt *st, int col, struct tags *out);
 
 /* A JSON array of strings (as stored for genre and composer) into out, in

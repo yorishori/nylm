@@ -8,7 +8,8 @@
 /*
  * Music file tags through TagLib's C API. TagLib is the only thing that
  * opens music files (nylm itself only lstat()s them), and only the tags
- * below are read or written.
+ * below are read or written (and the stray tags further down noted and
+ * removed).
  */
 
 /* The tags, by index: the single-valued ones first (in the column order of
@@ -91,8 +92,35 @@ struct tag_picture {
     const char *mime;
 };
 
+/*
+ * Stray tags: copies of the disc and track numbers and the dates that
+ * other taggers write next to DISCNUMBER, TRACKNUMBER and DATE. Players
+ * such as Navidrome read some of them first (DISC before DISCNUMBER), so
+ * a stale one hides the value nylm writes. nylm only notes which a file
+ * has (bit 1u << index in tags_stray_key) and removes them; it never
+ * writes one.
+ */
+#define TAGS_STRAYS     10
+#define TAGS_ALL_STRAYS ((1u << TAGS_STRAYS) - 1)
+extern const char *const tags_stray_key[TAGS_STRAYS]; /* "DISC", ... */
+
+/* The stray tags that go when a write sets field f (disc number: DISC,
+ * DISCC, DISCTOTAL, TOTALDISCS; track number: TRACK, TRACKC, TRACKTOTAL,
+ * TOTALTRACKS; date: YEAR, ORIGINALDATE), as bits; 0 for other fields. */
+unsigned tags_strays_of(enum tag_field f);
+
+/* Stray tags as text, as the cache keeps them: their keys in
+ * tags_stray_key order, separated by one space ("DISC TRACKC"); NULL for
+ * none. In the arena; NULL also when out of memory (*oom set). */
+const char *tags_strays_text(unsigned strays, int *oom);
+
+/* Parses tags_strays_text()'s text (NULL or "": none) into *out. 0, or -1
+ * if it is not a list of known keys, each once, in order. */
+int tags_strays_parse(const char *s, unsigned *out);
+
 struct tags {
     struct tag_values value[TAG_FIELDS];
+    unsigned strays; /* the stray tags the file has (bits) */
     size_t npictures;
     const struct tag_picture *pictures; /* in the file's order */
 };
@@ -158,7 +186,8 @@ int tags_split_genres(const struct tag_values *v, char delim, struct tag_values 
  *  - the sort tags of the fields in changed (bit 1u << field) mirror them
  *    (TITLESORT = TITLE, ..., COMPOSERSORT = the composers joined by "; ");
  *  - a sort tag over 500 bytes is cut at a character boundary;
- *  - an invalid or missing disc number becomes "1/1".
+ *  - an invalid or missing disc number becomes "1/1";
+ *  - the stray tags of the fields it sets go (tags_strays_of()).
  * What it did, if anything, is appended to note (a warning for the user).
  * 0, or -1 when out of memory.
  */
@@ -172,12 +201,14 @@ enum tags_result {
 
 /*
  * Writes want into the file in place, through TagLib. First the file must
- * still hold now (what the cache has, pictures included); then every tag
- * that differs is set (a genre or composer value by value, in order); if
+ * still hold now (what the cache has, pictures and stray tags included);
+ * then every tag that differs is set (a genre or composer value by value,
+ * in order); the stray tags now has and want has not are removed (want
+ * can not add one); if
  * want's pictures differ from the file's, they replace all of them (want
  * then has exactly one, with its data and mime); the file is saved once;
- * then it is read back: every tag and the pictures (by their bytes) must
- * read as want. err says why when not TAGS_WRITTEN.
+ * then it is read back: every tag, the stray tags and the pictures (by
+ * their bytes) must read as want. err says why when not TAGS_WRITTEN.
  */
 enum tags_result tags_write(const char *path, const struct tags *now, const struct tags *want,
                             char *err, size_t errlen);

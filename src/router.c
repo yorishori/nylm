@@ -59,6 +59,8 @@ static const struct route routes[] = {
     { "POST",   "/api/music/remove",          music_remove,        0 },
     { "POST",   "/api/music/fix/split-genres", music_fix_split,    0 },
     { "POST",   "/api/music/fix/composers",   music_fix_composers, 0 },
+    { "GET",    "/api/music/strays",          music_strays,        0 },
+    { "POST",   "/api/music/fix/strays",      music_fix_strays,    0 },
     { "GET",    "/api/music/musicbrainz",     music_musicbrainz,   0 },
     { "POST",   "/api/music/musicbrainz/start", music_musicbrainz_start, 0 },
     { "POST",   "/api/music/cover",           music_cover,         0 },

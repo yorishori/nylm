@@ -374,6 +374,42 @@ const char *const music_migrations[] = {
     "    musicbrainz_albumid = NULLIF(musicbrainz_albumid, ''),"
     "    navidrome_id = NULLIF(navidrome_id, '');"
     "DELETE FROM track_values WHERE value = '';",
+
+    /* 9: stray tags (src/tags.h): the copies of the disc and track numbers
+     * and the dates that other taggers write (DISC, TRACKC, YEAR, ...).
+     * tracks.strays lists those a file has, their keys separated by one
+     * space in tags_stray_key order (NULL: none); every track is read
+     * again by the next scan (scanned 0) to find them. A change may remove
+     * them all: field 'strays', value ''. SQLite can not change a CHECK:
+     * changes is made again with the same rows. */
+    "ALTER TABLE tracks ADD COLUMN strays TEXT;"
+    "UPDATE tracks SET scanned = 0;"
+    "CREATE TABLE changes_new ("
+    "    id       INTEGER PRIMARY KEY,"
+    "    batch    INTEGER NOT NULL,"
+    "    track_id INTEGER REFERENCES tracks(id) ON DELETE SET NULL,"
+    "    field    TEXT    NOT NULL CHECK (field IN ('title', 'album', 'artist', 'albumartist',"
+    "                     'tracknumber', 'discnumber', 'date', 'compilation', 'isrc', 'asin',"
+    "                     'bpm', 'copyright', 'encodedby', 'mood', 'media', 'label',"
+    "                     'catalognumber', 'barcode', 'musicbrainz_trackid',"
+    "                     'musicbrainz_albumid', 'genre', 'composer', 'picture', 'strays')),"
+    "    value    TEXT    NOT NULL,"
+    "    started  INTEGER,"
+    "    finished INTEGER,"
+    "    state    TEXT    NOT NULL DEFAULT 'pending' CHECK (state IN"
+    "                     ('pending', 'running', 'done', 'warning', 'failed')),"
+    "    done     INTEGER NOT NULL DEFAULT 0 CHECK (done IN (0, 1)),"
+    "    note     TEXT    NOT NULL DEFAULT ''"
+    ") STRICT;"
+    "INSERT INTO changes_new (id, batch, track_id, field, value, started, finished, state,"
+    "    done, note)"
+    "  SELECT id, batch, track_id, field, value, started, finished, state, done, note"
+    "  FROM changes;"
+    "DROP TABLE changes;"
+    "ALTER TABLE changes_new RENAME TO changes;"
+    "CREATE UNIQUE INDEX changes_one_pending ON changes (track_id, field)"
+    "    WHERE state = 'pending';"
+    "CREATE INDEX changes_by_state ON changes (state, batch);",
 };
 
 const int music_migration_count = sizeof music_migrations / sizeof music_migrations[0];

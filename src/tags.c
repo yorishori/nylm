@@ -1,7 +1,8 @@
 /*
  * Music file tags through TagLib's C API (see tags.h). TagLib reads and
  * writes the files; nylm never touches their bytes itself, and only the
- * tags in tags_key[] are read or set.
+ * tags in tags_key[] are read or set (those in tags_stray_key[] only
+ * noted and removed).
  *
  * TagLib's C API saves MP3 tags as ID3v2.4 (upgrading ID3v2.3) and adds an
  * ID3v1 tag at the end. Both are kept as TagLib writes them.
@@ -37,6 +38,15 @@ const char *const tags_name[TAG_FIELDS] = {
     "composersort", "musicbrainz_trackid", "musicbrainz_albumid", "navidrome_id", "genre",
     "composer",
 };
+
+/* In bit order: the disc's (0-3), the track's (4-7), the date's (8-9). */
+const char *const tags_stray_key[TAGS_STRAYS] = {
+    "DISC", "DISCC", "DISCTOTAL", "TOTALDISCS", "TRACK", "TRACKC", "TRACKTOTAL",
+    "TOTALTRACKS", "YEAR", "ORIGINALDATE",
+};
+#define STRAYS_DISC  0x00Fu
+#define STRAYS_TRACK 0x0F0u
+#define STRAYS_DATE  0x300u
 
 /* The extensions TagLib opens as music, lower case. */
 static const char *const music_ext[] = {
@@ -93,6 +103,73 @@ int tags_is_required(enum tag_field f)
         return 1;
     default:
         return 0;
+    }
+}
+
+unsigned tags_strays_of(enum tag_field f)
+{
+    switch (f) {
+    case TAG_DISCNUMBER:
+        return STRAYS_DISC;
+    case TAG_TRACKNUMBER:
+        return STRAYS_TRACK;
+    case TAG_DATE:
+        return STRAYS_DATE;
+    default:
+        return 0;
+    }
+}
+
+const char *tags_strays_text(unsigned strays, int *oom)
+{
+    *oom = 0;
+    if ((strays & TAGS_ALL_STRAYS) == 0)
+        return NULL;
+    size_t len = 0;
+    for (int i = 0; i < TAGS_STRAYS; i++)
+        if (strays & (1u << i))
+            len += strlen(tags_stray_key[i]) + 1;
+    char *s = arena_alloc(len);
+    if (s == NULL) {
+        *oom = 1;
+        return NULL;
+    }
+    size_t at = 0;
+    for (int i = 0; i < TAGS_STRAYS; i++) {
+        if (!(strays & (1u << i)))
+            continue;
+        size_t n = strlen(tags_stray_key[i]);
+        if (at > 0)
+            s[at++] = ' ';
+        memcpy(s + at, tags_stray_key[i], n);
+        at += n;
+    }
+    s[at] = '\0';
+    return s;
+}
+
+int tags_strays_parse(const char *s, unsigned *out)
+{
+    *out = 0;
+    if (s == NULL || *s == '\0')
+        return 0;
+    int next = 0; /* keys come in order, each once */
+    for (;;) {
+        size_t n = strcspn(s, " ");
+        int found = -1;
+        for (int i = next; i < TAGS_STRAYS && found < 0; i++)
+            if (strlen(tags_stray_key[i]) == n && strncmp(s, tags_stray_key[i], n) == 0)
+                found = i;
+        if (found < 0)
+            return -1;
+        *out |= 1u << found;
+        next = found + 1;
+        s += n;
+        if (*s == '\0')
+            return 0;
+        s++; /* the space */
+        if (*s == '\0')
+            return -1; /* a space at the end */
     }
 }
 
@@ -378,6 +455,22 @@ int tags_prepare(struct tags *t, unsigned changed, char *note, size_t notelen)
         if (tags_set_one(t, TAG_DISCNUMBER, "1/1") != 0)
             return -1;
         note_add(note, notelen, "disc number set to 1/1");
+        changed |= 1u << TAG_DISCNUMBER;
+    }
+    unsigned drop = 0;
+    for (int i = 0; i < TAG_FIELDS; i++)
+        if (changed & (1u << i))
+            drop |= tags_strays_of((enum tag_field)i);
+    drop &= t->strays;
+    if (drop != 0) {
+        int oom;
+        const char *keys = tags_strays_text(drop, &oom);
+        if (keys == NULL)
+            return -1;
+        char what[160];
+        snprintf(what, sizeof what, "removed the stray tags %s", keys);
+        note_add(note, notelen, what);
+        t->strays &= ~drop;
     }
     return 0;
 }
@@ -507,6 +600,13 @@ static int read_open(const TagLib_File *f, struct tags *out, tags_picture_fn on_
             v->v[0] = joined;
         }
     }
+    for (int i = 0; i < TAGS_STRAYS && rc == 0; i++) {
+        char **values = taglib_property_get(f, tags_stray_key[i]);
+        if (values != NULL) {
+            out->strays |= 1u << i;
+            taglib_property_free(values);
+        }
+    }
     if (rc == 0 && out->value[TAG_COMPILATION].n == 0)
         rc = tags_set_one(out, TAG_COMPILATION, "0");
     return rc == 0 ? read_pictures(f, out, on_picture, ctx) : rc;
@@ -540,19 +640,26 @@ int tags_same_pictures(const struct tags *a, const struct tags *b)
 
 /* ---- writing ------------------------------------------------------------ */
 
-/* The first field where a and b differ (the pictures: TAG_FIELDS), or -1. */
+#define DIFF_PICTURES TAG_FIELDS
+#define DIFF_STRAYS   (TAG_FIELDS + 1)
+
+/* The first field where a and b differ (then the pictures: DIFF_PICTURES,
+ * the stray tags: DIFF_STRAYS), or -1. */
 static int first_difference(const struct tags *a, const struct tags *b)
 {
     for (int i = 0; i < TAG_FIELDS; i++)
         if (!tags_equal(&a->value[i], &b->value[i]))
             return i;
-    return tags_same_pictures(a, b) ? -1 : TAG_FIELDS;
+    if (!tags_same_pictures(a, b))
+        return DIFF_PICTURES;
+    return a->strays != b->strays ? DIFF_STRAYS : -1;
 }
 
-/* A field's name for messages; TAG_FIELDS is the pictures. */
+/* A field's name for messages, or what DIFF_PICTURES and DIFF_STRAYS are. */
 static const char *field_key(int field)
 {
-    return field < TAG_FIELDS ? tags_key[field] : "the pictures";
+    return field < TAG_FIELDS ? tags_key[field]
+           : field == DIFF_PICTURES ? "the pictures" : "the stray tags";
 }
 
 enum tags_result tags_write(const char *path, const struct tags *now, const struct tags *want,
@@ -585,6 +692,11 @@ enum tags_result tags_write(const char *path, const struct tags *now, const stru
                 field_key(diff));
         return TAGS_NOT_WRITTEN;
     }
+    if (want->strays & ~before.strays) {
+        taglib_file_free(f);
+        set_err(err, errlen, "a stray tag can only be removed, not added");
+        return TAGS_NOT_WRITTEN;
+    }
 
     if (!tags_same_pictures(&before, want)) {
         const struct tag_picture *p = want->npictures == 1 ? &want->pictures[0] : NULL;
@@ -609,6 +721,9 @@ enum tags_result tags_write(const char *path, const struct tags *now, const stru
         for (size_t k = 1; k < v->n; k++)
             taglib_property_set_append(f, tags_key[i], v->v[k]);
     }
+    for (int i = 0; i < TAGS_STRAYS; i++)
+        if ((before.strays & ~want->strays) & (1u << i))
+            taglib_property_set(f, tags_stray_key[i], NULL);
     int saved = taglib_file_save(f);
     taglib_file_free(f);
     if (!saved) {
@@ -626,8 +741,8 @@ enum tags_result tags_write(const char *path, const struct tags *now, const stru
         return TAGS_WRITTEN_BAD;
     }
     diff = first_difference(&after, want);
-    if (diff == TAG_FIELDS) {
-        set_err(err, errlen, "after saving, the pictures differ");
+    if (diff == DIFF_PICTURES || diff == DIFF_STRAYS) {
+        set_err(err, errlen, "after saving, %s differ", field_key(diff));
         return TAGS_WRITTEN_BAD;
     }
     if (diff >= 0) {
