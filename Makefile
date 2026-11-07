@@ -68,7 +68,7 @@ test: nylm-debug nylm-qobuz-debug nylm-musicbrainz-debug $(TEST_BIN)
 	@for t in $(TEST_BIN); do $$t || exit 1; done
 	tests/smoke.sh ./nylm-debug
 
-# Development server on http://127.0.0.1:8080, data in ./dev-data.
+# Development server on http://127.0.0.1:9004, data in ./dev-data.
 # First time: NYLM_DATA=dev-data ./nylm-debug set-password
 run: nylm-debug
 	mkdir -p dev-data

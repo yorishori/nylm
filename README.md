@@ -630,7 +630,7 @@ In a checkout (a debug build with sanitizers, data in `./dev-data`):
 ```sh
 make test                              # unit + end-to-end tests
 NYLM_DATA=dev-data ./nylm-debug set-password   # once, before make run
-make run                               # server on http://127.0.0.1:8080 (no TLS)
+make run                               # server on http://127.0.0.1:9004 (no TLS)
 # The services by hand (the web app's buttons need the deployed root
 # actions); NYLM_MUSIC is the music folder to use:
 NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-debug music-scan

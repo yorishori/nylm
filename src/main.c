@@ -136,7 +136,7 @@ static int cmd_serve(void)
 {
     struct server_config cfg = {
         .public_dir = env_or("NYLM_PUBLIC", "public"),
-        .port = parse_port(getenv("NYLM_PORT"), 8080),
+        .port = parse_port(getenv("NYLM_PORT"), 9004),
     };
     if (cfg.port < 0) {
         fprintf(stderr, "invalid NYLM_PORT\n");
@@ -199,7 +199,7 @@ static void usage(void)
             "  NYLM_BACKUP  (none)         backup entries: \"name=/path[,/path] ...\"\n"
             "  NYLM_BACKUP_DIR (none)      where backups are written\n"
             "  NYLM_PUBLIC  [public]       static files directory\n"
-            "  NYLM_PORT    [8080]         port to listen on\n"
+            "  NYLM_PORT    [9004]         port to listen on\n"
             "  NYLM_LISTEN  [127.0.0.1]    addresses to listen on, e.g. \"10.0.0.1 192.168.1.5\"\n"
             "  NYLM_ALLOW   [127.0.0.0/8]  client subnets accepted, e.g. \"10.0.0.0/24 192.168.1.0/24\"\n"
             "  NYLM_TLS_CERT, NYLM_TLS_KEY (none)\n"

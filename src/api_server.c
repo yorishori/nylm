@@ -843,9 +843,9 @@ void server_ports(struct request *req, struct response *res)
             return;
         }
     }
-    /* main() refused to start with an invalid NYLM_PORT; 8080 when unset. */
+    /* main() refused to start with an invalid NYLM_PORT; 9004 when unset. */
     const char *port = getenv("NYLM_PORT");
-    long nylm_port = 8080;
+    long nylm_port = 9004;
     if (port != NULL && *port != '\0') {
         char *end;
         errno = 0;
