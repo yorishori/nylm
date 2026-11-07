@@ -17,7 +17,7 @@
 # WG_CIDR=10.0.0.1/24 LAN_CIDR=192.168.1.20/24 sudo -E deploy/install.sh
 set -eu
 
-PORT=${NYLM_PORT:-8080}
+PORT=${NYLM_PORT:-9004}
 WG_IF=${WG_IF:-wg0}
 CONF=/etc/nylm.conf
 HOME_DIR=/var/lib/nylm # nylm's home and working directory; holds no data
