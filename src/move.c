@@ -37,11 +37,7 @@ static int unsafe(unsigned char c)
     return c < 0x20 || c == 0x7f || (c != '\0' && strchr("/\\:*?\"<>|", c) != NULL);
 }
 
-/*
- * s made safe as one name of at most max bytes (see move_target), into out
- * (room for max + 1). Its length.
- */
-static size_t safe_name(const char *s, char *out, size_t max)
+size_t move_safe_name(const char *s, char *out, size_t max)
 {
     while (*s == ' ')
         s++;
@@ -106,9 +102,9 @@ const char *move_target(const char *albumartist, const char *album, const char *
 
     char artist_part[MOVE_MAX_NAME + 1], album_part[MOVE_MAX_NAME + 1];
     char title_part[MOVE_MAX_NAME + 1];
-    safe_name(albumartist, artist_part, MOVE_MAX_NAME);
-    safe_name(album, album_part, MOVE_MAX_NAME);
-    safe_name(title, title_part, MOVE_MAX_NAME - fixed);
+    move_safe_name(albumartist, artist_part, MOVE_MAX_NAME);
+    move_safe_name(album, album_part, MOVE_MAX_NAME);
+    move_safe_name(title, title_part, MOVE_MAX_NAME - fixed);
     int len = snprintf(out, outlen, "%s/%s/%s%s.%s", artist_part, album_part, number,
                        title_part, ext);
     if (len < 0 || (size_t)len >= outlen)

@@ -763,7 +763,9 @@ for route in "GET /api/music" "GET /api/music/albums" "GET /api/music/album?trac
              "POST /api/music/navidrome/login" "GET /api/music/navidrome/starred" \
              "GET /api/music/navidrome/playlists" "GET /api/music/navidrome/playlist?id=x" \
              "GET /api/music/dap" "POST /api/music/dap/mount" "POST /api/music/dap/unmount" \
-             "POST /api/music/dap/name"; do
+             "POST /api/music/dap/name" "GET /api/music/dap/items?uuid=0A1B-C2D3" \
+             "POST /api/music/dap/items/add" "POST /api/music/dap/items/remove" \
+             "POST /api/music/dap/sync"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
@@ -2019,7 +2021,7 @@ start "http://127.0.0.1:$PORT/"
 # refusals are checked.
 DM=/api/music/dap/mount
 expect 200 "dap"               -b "$JAR" "$B/api/music/dap"
-expect_body '{"drives":[],"mount":"/mnt/nylm-dap","other":false,"mounted":null}' "no DAP"
+expect_body '{"drives":[],"mount":"/mnt/nylm-dap","other":false,"mounted":null,"syncing":false,"syncs":[]}' "no DAP"
 expect 415 "mount needs json"  -b "$JAR" -d '{"uuid":"0A1B-C2D3"}' "$B$DM"
 post "mount no uuid"           400 $DM '{}'
 expect_body "'uuid' must be a FAT or exFAT file system's UUID, like ABCD-1234" "uuid message"
@@ -2048,6 +2050,99 @@ post "name 64 bytes"           200 $DN "{\"uuid\":\"0A1B-C2D3\",\"name\":\"$(pri
 post "name"                    200 $DN '{"uuid":"0A1B-C2D3","name":"FiiO M11 Plus"}'
 post "name again"              200 $DN '{"uuid":"0A1B-C2D3","name":"Car player"}'
 query "0A1B-C2D3|Car player" "the latest name is kept" "SELECT uuid, name FROM daps"
+
+# What goes on a DAP: albums (by one of their tracks), tracks, playlists.
+DI=/api/music/dap/items
+DA=/api/music/dap/items/add
+DU=0A1B-C2D3
+DT=$(sqlite3 "$MDB" "SELECT min(id) FROM tracks")
+DALBUM=$(sqlite3 "$MDB" "SELECT count(*) || '|' || sum(size) FROM tracks
+                         WHERE album IS (SELECT album FROM tracks WHERE id = $DT)
+                         AND albumartist IS (SELECT albumartist FROM tracks WHERE id = $DT)")
+expect 200 "items, none"       -b "$JAR" "$B$DI?uuid=$DU"
+expect_body '{"items":[],"tracks":0,"size":0}' "nothing on the DAP yet"
+expect 400 "items no uuid"     -b "$JAR" "$B$DI"
+expect_body "query parameter 'uuid' must be a FAT or exFAT file system's UUID" "uuid message"
+expect 400 "items bad uuid"    -b "$JAR" "$B$DI?uuid=0a1b-c2d3"
+expect 415 "add needs json"    -b "$JAR" -d "{\"uuid\":\"$DU\",\"track\":$DT}" "$B$DA"
+post "add no uuid"             400 $DA "{\"track\":$DT}"
+post "add nothing"             400 $DA "{\"uuid\":\"$DU\"}"
+expect_body "give one of 'album' (a track of it), 'track' or 'playlist'" "add message"
+post "add two things"          400 $DA "{\"uuid\":\"$DU\",\"track\":$DT,\"album\":$DT}"
+post "add album text"          400 $DA "{\"uuid\":\"$DU\",\"album\":\"Some Album\"}"
+expect_body "'album' must be the id of one of its tracks" "album message"
+post "add track 0"             400 $DA "{\"uuid\":\"$DU\",\"track\":0}"
+post "add track missing"       404 $DA "{\"uuid\":\"$DU\",\"track\":999999}"
+post "add album missing"       404 $DA "{\"uuid\":\"$DU\",\"album\":999999}"
+post "add playlist bad id"     400 $DA "{\"uuid\":\"$DU\",\"playlist\":\"a/b\",\"name\":\"x\"}"
+post "add playlist no name"    400 $DA "{\"uuid\":\"$DU\",\"playlist\":\"pl-1\"}"
+expect_body "'name' must be the playlist's name" "playlist name message"
+post "add playlist, no navidrome" 503 $DA "{\"uuid\":\"$DU\",\"playlist\":\"pl-1\",\"name\":\"Road\"}"
+post "add album"               200 $DA "{\"uuid\":\"$DU\",\"album\":$DT}"
+expect_body '{"added":true}' "album added"
+post "add album again"         200 $DA "{\"uuid\":\"$DU\",\"album\":$DT}"
+expect_body '{"added":false}' "an album once"
+post "add a track of it"       200 $DA "{\"uuid\":\"$DU\",\"track\":$DT}"
+post "add to another DAP"      200 $DA "{\"uuid\":\"1234-ABCD\",\"track\":$DT}"
+query "album|track" "what goes on the DAP" \
+    "SELECT group_concat(kind, '|') FROM dap_items WHERE uuid = '$DU' ORDER BY id"
+expect 200 "items"             -b "$JAR" "$B$DI?uuid=$DU"
+expect_body "\"kind\":\"album\"," "the album is listed"
+expect_body "\"kind\":\"track\"," "the track is listed"
+expect_body "\"track\":$DT,\"tracks\":${DALBUM%|*},\"size\":${DALBUM#*|}}" "the album's tracks and size"
+expect_body "\"tracks\":${DALBUM%|*},\"size\":${DALBUM#*|}}" "a track in a selected album counts once"
+DR=/api/music/dap/items/remove
+DID=$(sqlite3 "$MDB" "SELECT id FROM dap_items WHERE uuid = '$DU' AND kind = 'track'")
+post "remove no id"            400 $DR '{}'
+post "remove bad id"           400 $DR '{"id":"x"}'
+post "remove missing"          404 $DR '{"id":999999}'
+post "remove"                  200 $DR "{\"id\":$DID}"
+query "1" "removed" "SELECT count(*) FROM dap_items WHERE uuid = '$DU'"
+
+# A sync: the password again, a DAP mounted, nothing else running.
+DS=/api/music/dap/sync
+post "sync no password"        400 $DS '{}'
+post "sync wrong password"     403 $DS '{"password":"nope"}'
+expect 415 "sync needs json"   -b "$JAR" -d "{$PW}" "$B$DS"
+post "sync, nothing mounted"   409 $DS "{$PW}"
+expect_body "mount the DAP first" "sync message"
+query "0" "a refused sync queues nothing" "SELECT count(*) FROM dap_syncs"
+# The service: nothing queued; a queued sync with no DAP mounted fails, says why.
+service 0 "dap-sync, nothing queued" dap-sync
+logged "no sync is queued" "nothing to do"
+sqlite3 "$MDB" "INSERT INTO dap_syncs (uuid) VALUES ('$DU')"
+service 1 "dap-sync, no DAP mounted" dap-sync
+logged "no DAP is mounted at /mnt/nylm-dap" "why it failed"
+query "failed|no DAP is mounted at /mnt/nylm-dap" "the sync recorded" \
+    "SELECT state, note FROM dap_syncs ORDER BY id DESC LIMIT 1"
+expect 200 "dap, its syncs"    -b "$JAR" "$B/api/music/dap"
+expect_body "\"syncing\":false,\"syncs\":[{\"id\":1,\"uuid\":\"$DU\"," "the sync is listed"
+# While a sync runs: no library service, no unmount, no second sync.
+flock "$TMP/data/music/dap.lock" sleep 8 &
+LOCKER=$!
+sleep 0.3
+expect 200 "dap while syncing" -b "$JAR" "$B/api/music/dap"
+expect_body '"syncing":true,' "a sync runs"
+post "write while syncing"     409 /api/music/write "{$PW}"
+expect_body "a DAP sync is copying the library" "write refused"
+post "move while syncing"      409 /api/music/move "{$PW}"
+post "scan while syncing"      409 /api/music/scan "{$PW}"
+post "qobuz while syncing"     409 /api/music/qobuz/start "{$PW,\"login\":\"http://localhost/?code=abc\"}"
+post "unmount while syncing"   409 /api/music/dap/unmount '{}'
+expect_body "a DAP sync is running" "unmount refused"
+service 1 "dap-sync while one runs" dap-sync
+logged "the DAP sync: the service already runs" "a second sync refuses"
+wait "$LOCKER"
+# And none while a library service runs.
+flock "$LOCK" sleep 2 &
+LOCKER=$!
+sleep 0.3
+sqlite3 "$MDB" "INSERT INTO dap_syncs (uuid) VALUES ('$DU')"
+service 1 "dap-sync while the library is busy" dap-sync
+logged "the library is busy" "sync refuses"
+query "queued" "the sync still waits" "SELECT state FROM dap_syncs ORDER BY id DESC LIMIT 1"
+wait "$LOCKER"
+sqlite3 "$MDB" "DELETE FROM dap_syncs WHERE state = 'queued'"
 
 # ---- server ------------------------------------------------------------------
 
@@ -2361,6 +2456,7 @@ refused "dap-mount, no drive"  "no drive has a file system with the UUID 0000-00
     "$TMP/dap-mount" 0000-0000
 refused "dap-umount, argument" "takes no arguments" "$TMP/dap-umount" x
 refused "dap-umount, nothing"  "no drive is mounted at $TMP/dap" "$TMP/dap-umount"
+refused "dap-sync, argument"   "takes no arguments" deploy/actions/dap-sync x
 for bad in 'davis' 'davis=' 'davis=/srv/a,' 'davis=,/srv/a' 'davis=/srv/a,,/srv/b' \
            'davis=/srv/../etc' 'davis=srv' 'Davis=/srv/a'; do
     name=${bad%%=*}

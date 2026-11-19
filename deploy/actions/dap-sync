@@ -1,0 +1,10 @@
+#!/bin/sh
+# Starts the DAP sync (nylm-dap-sync.service, which runs `nylm dap-sync` as
+# user nylm, able to write only to the DAP and nylm's music data) and
+# returns at once. Takes no arguments.
+set -eu
+if [ "$#" -ne 0 ]; then
+    echo "dap-sync: takes no arguments" >&2
+    exit 2
+fi
+exec /usr/bin/systemctl start --no-block nylm-dap-sync.service

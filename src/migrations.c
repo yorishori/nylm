@@ -441,6 +441,46 @@ const char *const music_migrations[] = {
     "    name  TEXT    NOT NULL,"
     "    added INTEGER NOT NULL DEFAULT (unixepoch())"
     ") STRICT;",
+
+    /* 13: what goes on each DAP (src/dapsync.h), by its UUID: an album (by
+     * album and album artist), a track, or a Navidrome playlist (its id,
+     * and its name when it was added). Then each sync: the files planned,
+     * the selected ones the library does not have (missing), and what was
+     * copied, already there (kept), deleted and failed. */
+    "CREATE TABLE dap_items ("
+    "    id          INTEGER PRIMARY KEY,"
+    "    uuid        TEXT    NOT NULL CHECK (length(uuid) = 9),"
+    "    kind        TEXT    NOT NULL CHECK (kind IN ('album', 'track', 'playlist')),"
+    "    album       TEXT,"
+    "    albumartist TEXT,"
+    "    track_id    INTEGER,"
+    "    playlist    TEXT,"
+    "    name        TEXT,"
+    "    added       INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "    CHECK ((kind = 'track') = (track_id IS NOT NULL)),"
+    "    CHECK ((kind = 'playlist') = (playlist IS NOT NULL AND name IS NOT NULL)),"
+    "    CHECK (kind = 'album' OR (album IS NULL AND albumartist IS NULL))"
+    ") STRICT;"
+    "CREATE UNIQUE INDEX dap_items_once ON dap_items (uuid, kind, coalesce(album, ''),"
+    "    coalesce(albumartist, ''), coalesce(track_id, 0), coalesce(playlist, ''));"
+    "CREATE TABLE dap_syncs ("
+    "    id        INTEGER PRIMARY KEY,"
+    "    uuid      TEXT    NOT NULL CHECK (length(uuid) = 9),"
+    "    requested INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "    started   INTEGER,"
+    "    finished  INTEGER,"
+    "    state     TEXT    NOT NULL DEFAULT 'queued' CHECK (state IN"
+    "                      ('queued', 'running', 'done', 'warning', 'failed')),"
+    "    files     INTEGER NOT NULL DEFAULT 0,"
+    "    missing   INTEGER NOT NULL DEFAULT 0,"
+    "    copied    INTEGER NOT NULL DEFAULT 0,"
+    "    kept      INTEGER NOT NULL DEFAULT 0,"
+    "    deleted   INTEGER NOT NULL DEFAULT 0,"
+    "    failed    INTEGER NOT NULL DEFAULT 0,"
+    "    bytes     INTEGER NOT NULL DEFAULT 0,"
+    "    total     INTEGER NOT NULL DEFAULT 0,"
+    "    note      TEXT    NOT NULL DEFAULT ''"
+    ") STRICT;",
 };
 
 const int music_migration_count = sizeof music_migrations / sizeof music_migrations[0];

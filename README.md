@@ -43,6 +43,7 @@ browser ── HTTPS ─> nylm ──> /api/*  router ──> handler ──> SQ
 | `src/https.c`     | HTTP client: HTTPS (libssl) for the two services above, plain HTTP to Navidrome |
 | `src/navidrome.c` | Navidrome's Subsonic API: login, calls, song paths       |
 | `src/dap.c`       | DAPs: the USB drives with FAT or exFAT, from /sys and udev |
+| `src/dapsync.c`   | `nylm dap-sync`: the selection copied to the DAP         |
 | `src/tags.c`      | music file tags through TagLib: read, write, verify      |
 | `src/art.c`       | album art files, named by SHA-256; base64                |
 | `src/image.c`     | thumbnails (libjpeg-turbo, libpng), only in the services |
@@ -74,7 +75,7 @@ $NYLM_DATA/plants/plants.db   plant care
 $NYLM_DATA/plants/photos/     journal photos: each once, and its thumbnail
 $NYLM_DATA/music/music.db     music tags cache, changes, scans, audit log
 $NYLM_DATA/music/art/         album art: each picture once, and its thumbnail
-$NYLM_DATA/music/*.lock       the library's lock, the Qobuz and MusicBrainz services
+$NYLM_DATA/music/*.lock       the library's lock, the Qobuz, MusicBrainz and DAP services
 $NYLM_DATA/server/server.db   server app: audit log, WireGuard peer names
 $NYLM_DATA/notes/notes.db     reminders, notes and their tags
 ```
@@ -490,6 +491,40 @@ and unmounts it, so it can be unplugged. Both are recorded in the audit
 table. A DAP can be given a name (`daps`, by its UUID). The actions use
 `blkid`, `findmnt`, `mountpoint`, `mount` and `umount` (util-linux).
 
+What goes on a DAP (`dap_items`, by its UUID): albums (by album and album
+artist), tracks and Navidrome playlists, added on the DAP tab from the
+library's albums or Navidrome's starred albums and songs and playlists
+(`GET /api/music/dap/items?uuid=`, `POST .../items/add`,
+`.../items/remove`). Sync (`POST /api/music/dap/sync`, the password
+again, audited; root action `dap-sync`) starts `nylm dap-sync`
+(`nylm-dap-sync.service`), which brings the folder `Music` on the DAP
+to the selection (`dap_syncs` records each, with its progress):
+
+- the files of the selected albums and tracks, each playlist's songs
+  that the library has, and the JPEG and PNG pictures of their folders,
+  at their paths in the library with each name made safe for FAT (as
+  the naming rule does); each playlist as `Music/NAME.m3u8`, paths
+  relative to `Music`;
+- a file already there with the same size and time (2 s) stays; one
+  that is not is copied to `.nylm-part` in its folder, given the
+  source's time, and renamed; what is in `Music` but not selected is
+  deleted, and the folders left empty;
+- it stops before changing anything when a playlist can not be read
+  (Navidrome), when the DAP has no room for the copies (after the
+  deletions), or when the drive mounted is not the DAP the sync is for;
+  a file that fails (4 GiB or more on FAT, two names FAT can not tell
+  apart, a source it can not read) is listed and the rest goes on.
+
+Nothing outside `Music` is touched, and the sync can write nowhere else:
+its unit lets it write only to `/mnt/nylm-dap` and nylm's music data
+(`install.sh` writes that path in `nylm-dap-sync.service.d/data.conf`;
+the music folder is read-only for it); it checks that `/mnt/nylm-dap`
+is a FAT or exFAT mount of that DAP and not the music folder's file
+system; and it copies and deletes only through folder handles opened
+below `Music` without following links. While it runs it holds
+`$NYLM_DATA/music/dap.lock` and the library lock shared: tags can be
+edited, but scans, writes, moves, Qobuz and unmounting wait (409).
+
 ## Server
 
 Maintenance of the machine nylm runs on (`src/api_server.c`, API under
@@ -659,12 +694,13 @@ sudo systemctl start nylm-music-scan   # scan the music folder (or what is queue
 sudo systemctl start nylm-music-write  # write the pending tag changes
 sudo systemctl start nylm-music-move   # move the files where their tags put them
 sudo systemctl start nylm-qobuz        # Qobuz: what the web app queued
+sudo systemctl start nylm-dap-sync     # copy the queued selection to the mounted DAP
 sudo systemctl start nylm-musicbrainz@ids     # MusicBrainz album ids, 10 albums
 sudo systemctl start nylm-musicbrainz@genres  # genres from MusicBrainz, 10 albums
 sudo -u nylm env NYLM_DATA=/mnt/data/nylm NYLM_MUSIC=/mnt/data/music \
     nylm music-scan /mnt/data/music/Some/Album   # scan one folder or file
 journalctl -u nylm-music-scan -u nylm-music-write -u nylm-music-move -u nylm-qobuz \
-    -u 'nylm-musicbrainz@*'
+    -u nylm-dap-sync -u 'nylm-musicbrainz@*'
 sudo systemctl start nylm-disk-usage    # measure the folders (see the System tab)
 journalctl -u nylm-disk-usage
 sudo systemctl start nylm-updates-check # list the package updates
@@ -686,6 +722,7 @@ NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-debug music-scan
 NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-debug music-write
 NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-debug music-move
 NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-qobuz-debug
+NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-debug dap-sync  # a DAP at /mnt/nylm-dap
 NYLM_DATA=dev-data ./nylm-musicbrainz-debug ids      # or genres
 ```
 

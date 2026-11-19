@@ -75,6 +75,10 @@ void music_dap(struct request *req, struct response *res);
 void music_dap_mount(struct request *req, struct response *res);
 void music_dap_unmount(struct request *req, struct response *res);
 void music_dap_name(struct request *req, struct response *res);
+void music_dap_items(struct request *req, struct response *res);
+void music_dap_item_add(struct request *req, struct response *res);
+void music_dap_item_remove(struct request *req, struct response *res);
+void music_dap_sync_start(struct request *req, struct response *res);
 
 /* api_server.c */
 void server_overview(struct request *req, struct response *res);

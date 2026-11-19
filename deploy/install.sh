@@ -161,6 +161,16 @@ EOF
     sed 's/^/    /' "$CONF"
 fi
 
+step "DAP sync"
+# nylm-dap-sync.service writes only to the DAP and to nylm's music data,
+# whose path is in the configuration.
+data=$(. "$CONF" && printf '%s' "${NYLM_DATA:-}")
+case $data in /?* ) ;; *) die "NYLM_DATA in $CONF must be an absolute path" ;; esac
+case $data in *[!A-Za-z0-9/._-]*) die "NYLM_DATA must be A-Z a-z 0-9 / . _ - only" ;; esac
+install -d -m 755 /etc/systemd/system/nylm-dap-sync.service.d
+printf '%s\n' "[Service]" "# Written by install.sh: nylm's music data (its database)." \
+    "ReadWritePaths=$data/music" > /etc/systemd/system/nylm-dap-sync.service.d/data.conf
+
 step "HTTPS certificate"
 if ! grep -q '^NYLM_TLS_CERT=' "$CONF"; then
     printf '%s\n' "# HTTPS: the certificate install.sh makes for the NYLM_LISTEN addresses." \

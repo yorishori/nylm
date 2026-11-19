@@ -11,6 +11,7 @@
 #include "api.h"
 #include "arena.h"
 #include "auth.h"
+#include "dapsync.h"
 #include "db.h"
 #include "json.h"
 #include "move.h"
@@ -18,7 +19,8 @@
 #include "navidrome.h"
 #include "server.h"
 
-#define ARENA_SIZE (16 * 1024 * 1024)
+#define ARENA_SIZE     (16 * 1024 * 1024)
+#define DAP_ARENA_SIZE (64 * 1024 * 1024) /* a DAP's whole selection, planned at once */
 
 /* Port from an env var value; fallback if unset, -1 if invalid. */
 static int parse_port(const char *s, int fallback)
@@ -190,6 +192,8 @@ static void usage(void)
             "       nylm music-scan PATH scan a folder or file in the music library\n"
             "       nylm music-write     write the pending music tag changes\n"
             "       nylm music-move      move the music files to where their tags put them\n"
+            "       nylm dap-sync        copy the queued selection to the DAP mounted at\n"
+            "                            /mnt/nylm-dap, and delete what is not in it\n"
             "\n"
             "environment (defaults in brackets):\n"
             "  NYLM_DATA    (required)     data folder; must exist. Each app gets its own\n"
@@ -222,7 +226,8 @@ int main(int argc, char **argv)
     int scan_path = argc == 3 && strcmp(cmd, "music-scan") == 0;
     if ((argc > 2 && !scan_path) ||
         (argc == 2 && strcmp(cmd, "set-password") != 0 && strcmp(cmd, "music-scan") != 0 &&
-         strcmp(cmd, "music-write") != 0 && strcmp(cmd, "music-move") != 0)) {
+         strcmp(cmd, "music-write") != 0 && strcmp(cmd, "music-move") != 0 &&
+         strcmp(cmd, "dap-sync") != 0)) {
         usage();
         return 2;
     }
@@ -238,6 +243,14 @@ int main(int argc, char **argv)
     int rc;
     if (strcmp(cmd, "set-password") == 0) {
         rc = cmd_set_password();
+    } else if (strcmp(cmd, "dap-sync") == 0) {
+        if (arena_init(DAP_ARENA_SIZE) != 0) {
+            fprintf(stderr, "out of memory\n");
+            rc = 1;
+        } else {
+            json_init();
+            rc = dap_sync();
+        }
     } else if (strncmp(cmd, "music-", 6) == 0) {
         if (arena_init(ARENA_SIZE) != 0) {
             fprintf(stderr, "out of memory\n");

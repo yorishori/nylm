@@ -2649,6 +2649,22 @@ static cJSON *password_checked(struct request *req, struct response *res)
     return audit_password_ok(body, res) ? body : NULL;
 }
 
+/* 1 if no DAP sync runs (it copies the library's files: nothing may change
+ * them meanwhile); else replies 409 (500) and returns 0. */
+static int dap_idle(struct response *res)
+{
+    int lock = music_dap_lock(0);
+    if (lock >= 0) {
+        music_unlock(lock);
+        return 1;
+    }
+    json_error(res, lock == MUSIC_BUSY ? 409 : 500,
+               lock == MUSIC_BUSY ? "a DAP sync is copying the library: try again when it is "
+                                    "done"
+                                  : "internal error");
+    return 0;
+}
+
 /*
  * With Navidrome set up, a write or a move starts only when it answers with
  * the kept login (src/navidrome.h; the service checks again). 1 if it may
@@ -2721,7 +2737,7 @@ static void start_action(struct request *req, struct response *res, int lock, in
 void music_scan_start(struct request *req, struct response *res)
 {
     cJSON *body = password_checked(req, res);
-    if (body == NULL)
+    if (body == NULL || !dap_idle(res))
         return;
     long long track = 0;
     if (cJSON_GetObjectItemCaseSensitive(body, "track") != NULL) {
@@ -2812,7 +2828,7 @@ void music_moves(struct request *req, struct response *res)
  * has to move. -> 202 */
 void music_move_start(struct request *req, struct response *res)
 {
-    if (password_checked(req, res) == NULL)
+    if (password_checked(req, res) == NULL || !dap_idle(res))
         return;
     int lock = lock_for_write(res);
     if (lock < 0)
@@ -2908,7 +2924,7 @@ void music_qobuz(struct request *req, struct response *res)
 void music_qobuz_start(struct request *req, struct response *res)
 {
     cJSON *body = password_checked(req, res);
-    if (body == NULL)
+    if (body == NULL || !dap_idle(res))
         return;
     const cJSON *login = cJSON_GetObjectItemCaseSensitive(body, "login");
     const cJSON *urls = cJSON_GetObjectItemCaseSensitive(body, "urls");
@@ -3064,7 +3080,7 @@ void music_musicbrainz_start(struct request *req, struct response *res)
 /* POST /api/music/write {password}: starts nylm-music-write.service. -> 202 */
 void music_write_start(struct request *req, struct response *res)
 {
-    if (password_checked(req, res) == NULL)
+    if (password_checked(req, res) == NULL || !dap_idle(res))
         return;
     int lock = lock_for_write(res);
     if (lock < 0)
