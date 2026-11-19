@@ -9,6 +9,9 @@
  * tracks' pictures differ, "none" in rose where there is no picture.
  * Rose and peach keep their meaning in the history: failed and warning. */
 
+/* Ten tabs: they wrap onto more rows rather than widen the page. */
+.tabs { flex-wrap: wrap; border-radius: 18px; }
+
 .album-head { gap: 0.3rem; }
 .album-head > h2 { font-size: 1.5rem; }
 

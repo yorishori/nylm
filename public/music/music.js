@@ -18,6 +18,8 @@
  *   #/files        where the move service puts each file (its plan, its
  *                  problems, what it did), and starting it
  *   #/qobuz        connect to Qobuz, download albums into the library
+ *   #/navidrome    the Navidrome login; its starred albums and songs and
+ *                  its playlists, each matched to nylm's tracks
  *   #/info         library counts, genres and years charts, the rules,
  *                  the written changes
  *
@@ -220,7 +222,8 @@ function shell(active, overview, ...content) {
   musicRoot = overview.root || "";
   const tabs = [["albums", "Albums"], ["changes", changesLabel(overview.pending)],
                 ["names", "Names"], ["duplicates", "Duplicates"], ["fixes", "Fixes"],
-                ["files", "Files"], ["qobuz", "Qobuz"], ["info", "Info"]];
+                ["files", "Files"], ["qobuz", "Qobuz"], ["navidrome", "Navidrome"],
+                ["info", "Info"]];
   return el("section", { class: "page" },
     el("header", { class: "app-head" },
       el("h1", {}, "Music"),
@@ -1707,6 +1710,137 @@ async function qobuzPage() {
         : el("p", { class: "empty" }, "Nothing downloaded yet.")));
 }
 
+/* ---- navidrome ----------------------------------------------------------- */
+
+const REAL_PATH_HINT = "nylm finds Navidrome's songs in the library by their paths: turn on " +
+  "Report Real Path for the player nylm in Navidrome (Settings → Players).";
+
+/* A song Navidrome has: title, artist · album, and Open album when nylm
+ * has it. */
+function navidromeSong(s) {
+  const facts = [s.artist, s.album].filter(Boolean).join(" · ");
+  return el("li", { class: "card stack" },
+    el("strong", {}, s.title || "No title"),
+    facts ? el("p", { class: "muted" }, facts) : null,
+    s.track != null ? el("div", { class: "actions" }, navButton("Open album", `#/album/${s.track}`))
+                    : el("p", { class: "differs-text" }, "Not found in nylm's library"));
+}
+
+/* How many of songs nylm has, when it does not have them all. */
+function missingSongs(songs) {
+  const missing = songs.filter((s) => s.track == null).length;
+  if (!missing) return null;
+  return el("p", { class: missing === songs.length ? "warn" : "muted" },
+            `${plural(missing, "song is", "songs are")} not in nylm's library. ` +
+            (missing === songs.length ? REAL_PATH_HINT : ""));
+}
+
+/* One playlist that shows its songs when opened. */
+function playlistGroup(p) {
+  const label = [el("strong", {}, p.name || "No name"),
+                 el("span", { class: "muted" },
+                    ` ${plural(p.songs ?? 0, "song", "songs")}` +
+                    (p.duration ? ` · ${showDuration(p.duration)}` : ""))];
+  return foldGroup(label, () => {
+    const body = el("div", { class: "stack" }, el("p", { class: "muted" }, "Loading…"));
+    api("GET", `/api/music/navidrome/playlist?id=${encodeURIComponent(p.id)}`)
+      .then((pl) => body.replaceChildren(
+        missingSongs(pl.songs),
+        pl.songs.length ? el("ul", { class: "list cols" }, pl.songs.map(navidromeSong))
+                        : el("p", { class: "empty" }, "This playlist is empty.")))
+      .catch((err) => body.replaceChildren(el("p", { class: "differs-text" }, err.message)));
+    return body;
+  });
+}
+
+/* Starred albums and songs, and playlists; an error shows in their place. */
+async function navidromeLists() {
+  let starred, playlists;
+  try {
+    [starred, playlists] = await Promise.all([api("GET", "/api/music/navidrome/starred"),
+                                              api("GET", "/api/music/navidrome/playlists")]);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) throw err;
+    return [el("p", { class: "differs-text" }, err.message)];
+  }
+  const count = (n) => el("span", { class: "count" }, n);
+  return [
+    el("section", { class: "section" },
+      el("header", {}, el("h2", {}, "Starred albums ", count(starred.albums.length))),
+      starred.albums.length
+        ? el("ul", { class: "list cols" }, starred.albums.map((a) => el("li", { class: "card stack" },
+            el("strong", {}, a.name || "No name"),
+            el("p", { class: "muted" }, [a.artist, a.year, a.songs != null ? plural(a.songs, "song", "songs") : null]
+                                          .filter((x) => x != null && x !== "").join(" · ")),
+            a.track != null ? el("div", { class: "actions" }, navButton("Open album", `#/album/${a.track}`))
+                            : el("p", { class: "differs-text" },
+                                 "No album in nylm's library has this name and album artist"))))
+        : el("p", { class: "empty" }, "No starred albums.")),
+    el("section", { class: "section" },
+      el("header", {}, el("h2", {}, "Starred songs ", count(starred.songs.length))),
+      missingSongs(starred.songs),
+      starred.songs.length ? el("ul", { class: "list cols" }, starred.songs.map(navidromeSong))
+                           : el("p", { class: "empty" }, "No starred songs.")),
+    el("section", { class: "section" },
+      el("header", {}, el("h2", {}, "Playlists ", count(playlists.playlists.length))),
+      playlists.playlists.length ? el("ul", { class: "fold-list" }, playlists.playlists.map(playlistGroup))
+                                 : el("p", { class: "empty" }, "No playlists.")),
+  ];
+}
+
+async function navidromePage() {
+  const [o, nd] = await Promise.all([api("GET", "/api/music"), api("GET", "/api/music/navidrome")]);
+  musicRoot = o.root || "";
+  if (!nd.configured) {
+    return shell("navidrome", o, el("section", { class: "card stack" },
+      el("h2", {}, "Navidrome"),
+      el("p", {}, "Navidrome is not set up. To use it, set its address on this machine in " +
+                  "/etc/nylm.conf, like NYLM_NAVIDROME=http://127.0.0.1:4533, and, when its " +
+                  "container sees the music folder at another path, that path, like " +
+                  "NYLM_NAVIDROME_MUSIC=/music. Then restart nylm."),
+      el("p", { class: "muted" }, "With Navidrome set up, nylm has it scan the library after " +
+                                  "a write and before and after a move, so that it keeps its " +
+                                  "plays, stars and playlists when files move.")));
+  }
+  const user = el("input", { type: "text", name: "user", required: true, autocomplete: "off",
+                             maxlength: 64, value: nd.user || "" });
+  const ndPassword = el("input", { type: "password", name: "navidrome_password", required: true,
+                                   autocomplete: "off", maxlength: 256 });
+  const password = el("input", { type: "password", name: "password", required: true,
+                                 autocomplete: "current-password" });
+  const login = form({ class: "raised" }, async () => {
+    try {
+      const r = await api("POST", "/api/music/navidrome/login",
+                          { user: user.value, navidrome_password: ndPassword.value,
+                            password: password.value });
+      setStatus(`Navidrome login kept: ${r.user}`);
+    } finally {
+      ndPassword.value = "";
+      password.value = "";
+    }
+    refresh();
+  },
+    el("p", {}, "An admin of Navidrome: starting its scans needs one. nylm checks the login " +
+                "with Navidrome before it keeps it; the password stays on the server."),
+    field("Navidrome user", user),
+    field("Navidrome password", ndPassword),
+    field("Password", password, "Changing the login needs your nylm password again."),
+    el("div", { class: "actions" }, el("button", { class: "btn go", type: "submit" }, "Keep login")));
+  const state = el("section", { class: "card stack" },
+    el("h2", {}, "Navidrome"),
+    el("p", {}, `At ${nd.url}, its music folder ${nd.music}.`),
+    el("p", {}, !nd.user ? "No login yet: add one below."
+                : nd.connected ? `Connected as ${nd.user}` +
+                                 (nd.version ? ` (Navidrome ${nd.version}).` : ".")
+                : `Not connected as ${nd.user}.`),
+    nd.error ? el("p", { class: "differs-text" }, nd.error) : null,
+    el("p", { class: "muted" }, REAL_PATH_HINT));
+  return shell("navidrome", o, state,
+    nd.connected ? await navidromeLists() : null,
+    el("section", { class: "section" },
+      el("header", {}, el("h2", {}, nd.user ? "Change the login" : "Login")), login));
+}
+
 /* ---- names --------------------------------------------------------------- */
 
 /* The fields with a list of names. */
@@ -2595,6 +2729,7 @@ function route(parts) {
   if (section === "fixes" && rawId === undefined) return fixesPage();
   if (section === "files" && rawId === undefined) return filesPage();
   if (section === "qobuz" && rawId === undefined) return qobuzPage();
+  if (section === "navidrome" && rawId === undefined) return navidromePage();
   if (section === "info" && rawId === undefined) return infoPage();
   go("#/albums");
   return null;

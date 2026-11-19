@@ -135,6 +135,10 @@ NYLM_PORT=$PORT
 # Music library folder for the music app; user nylm must be able to read
 # and write it. Leave it commented out to not use the music app.
 #NYLM_MUSIC=/mnt/data/music
+# Navidrome on this machine (127.x.x.x), optional; and its music folder
+# inside its container when that is not the same path as NYLM_MUSIC.
+#NYLM_NAVIDROME=http://127.0.0.1:4533
+#NYLM_NAVIDROME_MUSIC=/music
 # Addresses to listen on: WireGuard and LAN only, never 0.0.0.0.
 NYLM_LISTEN="${wg%/*} ${lan%/*}"
 # HTTPS: the certificate install.sh makes for the NYLM_LISTEN addresses.

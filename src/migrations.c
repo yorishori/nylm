@@ -410,6 +410,16 @@ const char *const music_migrations[] = {
     "CREATE UNIQUE INDEX changes_one_pending ON changes (track_id, field)"
     "    WHERE state = 'pending';"
     "CREATE INDEX changes_by_state ON changes (state, batch);",
+
+    /* 10: the Navidrome login (src/navidrome.h): the user name and its
+     * password, which the Subsonic API's token login needs as it is (a
+     * secret: never sent to the browser or logged). No row: no login. */
+    "CREATE TABLE navidrome_account ("
+    "    id       INTEGER PRIMARY KEY CHECK (id = 1),"
+    "    user     TEXT    NOT NULL,"
+    "    password TEXT    NOT NULL,"
+    "    saved    INTEGER NOT NULL DEFAULT (unixepoch())"
+    ") STRICT;",
 };
 
 const int music_migration_count = sizeof music_migrations / sizeof music_migrations[0];

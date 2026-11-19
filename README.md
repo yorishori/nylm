@@ -40,7 +40,8 @@ browser ── HTTPS ─> nylm ──> /api/*  router ──> handler ──> SQ
 | `src/qobuz.c`     | Qobuz without the network: links, login, bundle, tags    |
 | `src/qobuz_*.c`   | `nylm-qobuz`, the Qobuz service (its own binary)         |
 | `src/musicbrainz*.c` | `nylm-musicbrainz`, album ids and genres from MusicBrainz |
-| `src/https.c`     | HTTPS client (libssl), only in the two services above    |
+| `src/https.c`     | HTTP client: HTTPS (libssl) for the two services above, plain HTTP to Navidrome |
+| `src/navidrome.c` | Navidrome's Subsonic API: login, calls, song paths       |
 | `src/tags.c`      | music file tags through TagLib: read, write, verify      |
 | `src/art.c`       | album art files, named by SHA-256; base64                |
 | `src/image.c`     | thumbnails (libjpeg-turbo, libpng), only in the services |
@@ -440,6 +441,24 @@ skipped are.
 The service holds `$NYLM_DATA/music/musicbrainz.lock` while it runs (one
 job at a time), so the library can be edited meanwhile; it does not need
 `NYLM_MUSIC`.
+
+Navidrome (`src/navidrome.c`, `src/api_navidrome.c`, API under
+`/api/music/navidrome`), optional: the music server on this machine that
+reads the same music folder. Set `NYLM_NAVIDROME` to its address, an
+address in 127.0.0.0/8 (`http://127.0.0.1:4533`, a path after it if it
+has one), and `NYLM_NAVIDROME_MUSIC` to the music folder as its container
+sees it when that is not the path of `NYLM_MUSIC` (`/music`). nylm uses its
+Subsonic API over plain HTTP, never off the machine (10 s timeouts), as
+the player `nylm`, with a login of a Navidrome admin: the Navidrome tab
+keeps it (`POST /api/music/navidrome/login`, nylm's password again,
+audited) once Navidrome accepts it, in `music.db` (`navidrome_account`),
+as the token login needs the password itself; it never goes to the
+browser, the log or Navidrome (each call sends MD5(password + a new
+salt)). The tab lists Navidrome's starred albums and songs and its
+playlists (`GET /api/music/navidrome/starred`, `.../playlists`,
+`.../playlist?id=`), each matched to nylm's library: a song by its path
+(turn on Report Real Path for the player `nylm` in Navidrome: Settings,
+Players), an album by its name and album artist.
 
 ## Server
 

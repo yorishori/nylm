@@ -15,6 +15,7 @@
 #include "json.h"
 #include "move.h"
 #include "music.h"
+#include "navidrome.h"
 #include "server.h"
 
 #define ARENA_SIZE (16 * 1024 * 1024)
@@ -194,6 +195,10 @@ static void usage(void)
             "  NYLM_DATA    (required)     data folder; must exist. Each app gets its own\n"
             "                              subfolder and database in it\n"
             "  NYLM_MUSIC   (none)         music library folder; unset: no music app\n"
+            "  NYLM_NAVIDROME (none)       Navidrome on this machine, e.g.\n"
+            "                              \"http://127.0.0.1:4533\"; unset: not used\n"
+            "  NYLM_NAVIDROME_MUSIC (NYLM_MUSIC)\n"
+            "                              the music folder as Navidrome sees it, e.g. /music\n"
             "  NYLM_UNITS   (none)         more systemd units the server app shows, e.g.\n"
             "                              \"wg-quick@wg0 docker sshd\"\n"
             "  NYLM_BACKUP  (none)         backup entries: \"name=/path[,/path] ...\"\n"
@@ -224,7 +229,8 @@ int main(int argc, char **argv)
 
     if (db_open_all(getenv("NYLM_DATA")) != 0)
         return 1;
-    if (music_configure(getenv("NYLM_MUSIC"), getenv("NYLM_DATA")) != 0) {
+    if (music_configure(getenv("NYLM_MUSIC"), getenv("NYLM_DATA")) != 0 ||
+        navidrome_configure(getenv("NYLM_NAVIDROME"), getenv("NYLM_NAVIDROME_MUSIC")) != 0) {
         db_close_all();
         return 1;
     }

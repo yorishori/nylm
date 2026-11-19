@@ -759,7 +759,9 @@ for route in "GET /api/music" "GET /api/music/albums" "GET /api/music/album?trac
              "POST /api/music/remove" "POST /api/music/fix/split-genres" \
              "POST /api/music/fix/composers" "GET /api/music/strays" \
              "POST /api/music/fix/strays" "GET /api/music/musicbrainz" \
-             "POST /api/music/musicbrainz/start"; do
+             "POST /api/music/musicbrainz/start" "GET /api/music/navidrome" \
+             "POST /api/music/navidrome/login" "GET /api/music/navidrome/starred" \
+             "GET /api/music/navidrome/playlists" "GET /api/music/navidrome/playlist?id=x"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
@@ -1732,6 +1734,163 @@ query "2" "B keeps its change, A gets its clean-up" \
     "SELECT count(*) FROM changes WHERE state = 'pending'"
 post "discard the clean-up"    200 /api/music/discard '{"all":true}'
 sqlite3 "$MDB" "PRAGMA foreign_keys = ON; DELETE FROM tracks WHERE album GLOB 'Stray ?'"
+
+# ---- navidrome ---------------------------------------------------------------
+
+# Not set up: the page says so, the rest answers 503.
+NL=/api/music/navidrome/login
+expect 200 "navidrome, not set up" -b "$JAR" "$B/api/music/navidrome"
+expect_body '{"configured":false,"url":null,"music":null,"user":null,"connected":false,"version":null,"error":""}' "navidrome off"
+post "navidrome login, not set up" 503 $NL "{$PW,\"user\":\"admin\",\"navidrome_password\":\"x\"}"
+expect_body "set NYLM_NAVIDROME in /etc/nylm.conf" "not set up message"
+for route in starred playlists "playlist?id=x"; do
+    expect 503 "navidrome $route, not set up" -b "$JAR" "$B/api/music/navidrome/$route"
+done
+# Its settings are checked at start, by every command.
+for bad in http://10.0.0.1:4533 https://127.0.0.1:4533 http://localhost:4533 \
+           "http://127.0.0.1:4533/a/../b" "http://127.0.0.1:4533/?x=1"; do
+    service 1 "NYLM_NAVIDROME=$bad" music-scan NYLM_NAVIDROME="$bad"
+    logged "NYLM_NAVIDROME must be Navidrome's address on this machine" "$bad: why"
+done
+service 1 "NYLM_NAVIDROME without NYLM_MUSIC" music-scan NYLM_MUSIC= \
+    NYLM_NAVIDROME=http://127.0.0.1:4533
+logged "NYLM_NAVIDROME needs NYLM_MUSIC" "without NYLM_MUSIC: why"
+service 1 "NYLM_NAVIDROME_MUSIC relative" music-scan NYLM_NAVIDROME=http://127.0.0.1:4533 \
+    NYLM_NAVIDROME_MUSIC=music
+logged "NYLM_NAVIDROME_MUSIC must be the absolute path" "relative music folder: why"
+
+# A stand-in Navidrome (tests/fake_navidrome.c) on another port: its
+# password, and its answers. Its music folder is /music.
+ND="$TMP/navidrome"
+NDPORT=18090
+mkdir "$ND"
+printf 'nd secret\n' > "$ND/password"
+NDOK='"status":"ok","version":"1.16.1","type":"navidrome","serverVersion":"0.64.2","openSubsonic":true'
+printf '{"subsonic-response":{%s}}' "$NDOK" > "$ND/ping.json"
+printf '{"subsonic-response":{%s,"user":{"username":"admin","adminRole":false}}}' "$NDOK" \
+    > "$ND/getUser.1.json"
+printf '{"subsonic-response":{%s,"user":{"username":"admin","adminRole":true}}}' "$NDOK" \
+    > "$ND/getUser.json"
+NT1=$(sqlite3 "$MDB" "SELECT id FROM tracks WHERE path LIKE '%/01 - Song One.mp3'")
+NT2=$(sqlite3 "$MDB" "SELECT id FROM tracks WHERE path LIKE '%/02 - Song Two.flac'")
+NALBUM=$(sqlite3 "$MDB" "SELECT album FROM tracks WHERE id = $NT1")
+NARTIST=$(sqlite3 "$MDB" "SELECT albumartist FROM tracks WHERE id = $NT1")
+NREL=$(sqlite3 "$MDB" "SELECT substr(path, length('$M') + 2) FROM tracks WHERE id = $NT1")
+NALBUMT=$(sqlite3 "$MDB" "SELECT id FROM tracks WHERE album = '$NALBUM'
+                          AND albumartist = '$NARTIST' ORDER BY path LIMIT 1")
+NREL2=$(sqlite3 "$MDB" "SELECT substr(path, length('$M') + 2) FROM tracks WHERE id = $NT2")
+cat > "$ND/getStarred2.json" <<EOF
+{"subsonic-response":{$NDOK,"starred2":{
+ "album":[{"id":"al-1","name":"$NALBUM","artist":"$NARTIST","year":2001,"songCount":3,"starred":"2026-01-01T00:00:00Z"},
+          {"id":"al-2","name":"Gone","artist":"Nobody","songCount":1}],
+ "song":[{"id":"so-1","title":"Song One","artist":"Some Artist","album":"$NALBUM","duration":180,"path":"/music/$NREL"},
+         {"id":"so-2","title":"Two","album":"$NALBUM","path":"$NREL2"},
+         {"id":"so-3","title":"Gone","path":"/music/Nobody/x.mp3"},
+         {"id":"so-4","title":"Fake","path":"Some Artist/Some Album/01 - Song One.mp3/../../../x"},
+         {"id":"so-5","title":"Elsewhere","path":"/other/$NREL"}]}}}
+EOF
+printf '{"subsonic-response":{%s,"playlists":{"playlist":[{"id":"pl-1","name":"Road","songCount":2,"duration":400,"owner":"admin","public":false},{"id":"pl-2","name":"Empty","songCount":0,"duration":0,"owner":"admin"}]}}}' "$NDOK" > "$ND/getPlaylists.json"
+printf '{"subsonic-response":{%s,"playlist":{"id":"pl-1","name":"Road","entry":[{"id":"so-2","title":"Two","path":"/music/%s"},{"id":"so-9","title":"Nine","path":"/music/x/9.mp3"}]}}}' "$NDOK" "$NREL2" > "$ND/getPlaylist.json"
+NDBIN=build/tests/fake_navidrome
+"$NDBIN" $NDPORT "$ND" 2>"$TMP/navidrome.log" &
+NDPID=$!
+stop
+export NYLM_NAVIDROME="http://127.0.0.1:$NDPORT/" NYLM_NAVIDROME_MUSIC=/music
+start "http://127.0.0.1:$PORT/"
+expect 200 "navidrome, no login" -b "$JAR" "$B/api/music/navidrome"
+expect_body "{\"configured\":true,\"url\":\"http://127.0.0.1:$NDPORT\",\"music\":\"/music\",\"user\":null,\"connected\":false,\"version\":null,\"error\":\"\"}" "navidrome set up, no login"
+for route in starred playlists "playlist?id=x"; do
+    expect 409 "navidrome $route, no login" -b "$JAR" "$B/api/music/navidrome/$route"
+    expect_body "nylm has no Navidrome login yet" "$route: no login message"
+done
+
+# The login: the password again, then Navidrome must accept it, as an admin.
+NLB='"user":"admin","navidrome_password":"nd secret"'
+post "login no password"       400 $NL "{$NLB}"
+post "login wrong password"    403 $NL "{\"password\":\"nope\",$NLB}"
+expect 415 "login needs json"  -b "$JAR" -d "{$PW,$NLB}" "$B$NL"
+post "login no user"           400 $NL "{$PW,\"navidrome_password\":\"x\"}"
+expect_body "'user' must be Navidrome's user name" "user message"
+post "login user not text"     400 $NL "{$PW,\"user\":1,\"navidrome_password\":\"x\"}"
+post "login user empty"        400 $NL "{$PW,\"user\":\"\",\"navidrome_password\":\"x\"}"
+post "login user 65 bytes"     400 $NL "{$PW,\"user\":\"$(printf '%065d' 0)\",\"navidrome_password\":\"x\"}"
+post "login user newline"      400 $NL "{$PW,\"user\":\"a\\nb\",\"navidrome_password\":\"x\"}"
+post "login no nd password"    400 $NL "{$PW,\"user\":\"admin\"}"
+expect_body "'navidrome_password' must be the user's password in Navidrome" "nd password message"
+post "login nd password empty" 400 $NL "{$PW,\"user\":\"admin\",\"navidrome_password\":\"\"}"
+post "login nd password 257"   400 $NL "{$PW,\"user\":\"admin\",\"navidrome_password\":\"$(printf '%0257d' 0)\"}"
+post "login wrong nd password" 400 $NL "{$PW,\"user\":\"admin\",\"navidrome_password\":\"wrong\"}"
+expect_body "Navidrome says: Wrong username or password (code 40)" "Navidrome's refusal"
+post "login not an admin"      400 $NL "{$PW,$NLB}"
+expect_body "admin is not an admin in Navidrome" "admin needed"
+query "0" "refused logins keep nothing" "SELECT count(*) FROM navidrome_account"
+kill "$NDPID"; wait "$NDPID" 2>/dev/null
+post "login, navidrome down"   502 $NL "{$PW,$NLB}"
+expect_body "Navidrome does not answer at http://127.0.0.1:$NDPORT: " "down message"
+rm "$ND/getUser.1.json"
+"$NDBIN" $NDPORT "$ND" 2>>"$TMP/navidrome.log" &
+NDPID=$!
+sleep 0.2
+flock "$LOCK" sleep 2 &
+LOCKER=$!
+sleep 0.3
+post "login while busy"        409 $NL "{$PW,$NLB}"
+wait "$LOCKER"
+post "login"                   200 $NL "{$PW,$NLB}"
+expect_body '{"user":"admin"}' "login kept"
+query "admin|nd secret" "the login is kept" "SELECT user, password FROM navidrome_account"
+query "navidrome-login|{\"user\":\"admin\"}|ok" "the login is audited, without the password" \
+    "SELECT action, detail, result FROM audit ORDER BY id DESC LIMIT 1"
+expect 200 "navidrome, connected" -b "$JAR" "$B/api/music/navidrome"
+expect_body '"user":"admin","connected":true,"version":"0.64.2","error":""}' "connected"
+# Never the password: not to the browser, not to Navidrome (a token), not in the log.
+if grep -q "nd secret" "$TMP/body" "$ND/requests.log" "$TMP/log"; then
+    FAILED=$((FAILED + 1)); echo "FAIL: the Navidrome password was sent or logged"
+else PASSED=$((PASSED + 1)); fi
+if grep -q '^ping u=admin&t=[0-9a-f]\{32\}&s=[0-9a-f]\{16\}&v=1.16.1&c=nylm&f=json$' "$ND/requests.log"
+then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: the call's address: $(tail -1 "$ND/requests.log")"; fi
+grep -o 's=[0-9a-f]*' "$ND/requests.log" | sort | uniq -d > "$TMP/salts"
+if [ -s "$TMP/salts" ]; then FAILED=$((FAILED + 1)); echo "FAIL: a salt was used twice"
+else PASSED=$((PASSED + 1)); fi
+
+# Starred albums and songs, each matched to nylm's tracks: by name and album
+# artist, by path below Navidrome's folder (or relative to it).
+expect 200 "starred"           -b "$JAR" "$B/api/music/navidrome/starred"
+expect_body "{\"albums\":[{\"id\":\"al-1\",\"name\":\"$NALBUM\",\"artist\":\"$NARTIST\",\"year\":2001,\"songs\":3,\"track\":$NALBUMT},{\"id\":\"al-2\",\"name\":\"Gone\",\"artist\":\"Nobody\",\"year\":null,\"songs\":1,\"track\":null}]" "starred albums"
+expect_body "\"songs\":[{\"id\":\"so-1\",\"title\":\"Song One\",\"artist\":\"Some Artist\",\"album\":\"$NALBUM\",\"duration\":180,\"track\":$NT1},{\"id\":\"so-2\",\"title\":\"Two\",\"artist\":null,\"album\":\"$NALBUM\",\"duration\":null,\"track\":$NT2}," "starred songs found"
+expect_body '{"id":"so-3","title":"Gone","artist":null,"album":null,"duration":null,"track":null},{"id":"so-4","title":"Fake","artist":null,"album":null,"duration":null,"track":null},{"id":"so-5","title":"Elsewhere","artist":null,"album":null,"duration":null,"track":null}]}' "songs nylm does not have, or outside the folder"
+expect 200 "playlists"         -b "$JAR" "$B/api/music/navidrome/playlists"
+expect_body '{"playlists":[{"id":"pl-1","name":"Road","songs":2,"duration":400,"owner":"admin"},{"id":"pl-2","name":"Empty","songs":0,"duration":0,"owner":"admin"}]}' "playlists"
+expect 200 "playlist"          -b "$JAR" "$B/api/music/navidrome/playlist?id=pl-1"
+expect_body "{\"id\":\"pl-1\",\"name\":\"Road\",\"songs\":[{\"id\":\"so-2\",\"title\":\"Two\",\"artist\":null,\"album\":null,\"duration\":null,\"track\":$NT2},{\"id\":\"so-9\",\"title\":\"Nine\",\"artist\":null,\"album\":null,\"duration\":null,\"track\":null}]}" "a playlist's songs"
+if grep -q '^getPlaylist .*&f=json&id=pl-1$' "$ND/requests.log"; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: the playlist's id was not sent"; fi
+expect 400 "playlist no id"    -b "$JAR" "$B/api/music/navidrome/playlist"
+expect_body "query parameter 'id' must be a Navidrome playlist id" "id message"
+expect 400 "playlist id empty" -b "$JAR" "$B/api/music/navidrome/playlist?id="
+expect 400 "playlist id &"     -b "$JAR" "$B/api/music/navidrome/playlist?id=a%26u%3Dx"
+expect 400 "playlist id /"     -b "$JAR" "$B/api/music/navidrome/playlist?id=a/b"
+expect 400 "playlist id 65"    -b "$JAR" "$B/api/music/navidrome/playlist?id=$(printf '%065d' 0)"
+expect 200 "playlist id 64"    -b "$JAR" "$B/api/music/navidrome/playlist?id=$(printf '%064d' 0)"
+# Navidrome refuses (a playlist it does not have), or does not answer.
+printf '{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":70,"message":"playlist not found"}}}' > "$ND/getPlaylist.json"
+expect 502 "playlist navidrome refuses" -b "$JAR" "$B/api/music/navidrome/playlist?id=pl-3"
+expect_body "Navidrome says: playlist not found (code 70)" "refusal passed on"
+printf 'not json' > "$ND/getPlaylists.json"
+expect 502 "playlists not json" -b "$JAR" "$B/api/music/navidrome/playlists"
+expect_body "Navidrome's answer is not one nylm can read" "garbage answer"
+rm "$ND/getPlaylists.json"
+expect 502 "playlists 404"     -b "$JAR" "$B/api/music/navidrome/playlists"
+expect_body "Navidrome answered HTTP 404" "wrong address"
+kill "$NDPID"; wait "$NDPID" 2>/dev/null
+expect 502 "starred, navidrome down" -b "$JAR" "$B/api/music/navidrome/starred"
+expect_body "Navidrome does not answer at" "down message"
+expect 200 "navidrome, down"   -b "$JAR" "$B/api/music/navidrome"
+expect_body '"user":"admin","connected":false,"version":null,"error":"Navidrome does not answer at' "down shown"
+stop
+unset NYLM_NAVIDROME NYLM_NAVIDROME_MUSIC
+start "http://127.0.0.1:$PORT/"
 
 # ---- server ------------------------------------------------------------------
 

@@ -63,6 +63,13 @@ void music_move_start(struct request *req, struct response *res);
 void music_qobuz(struct request *req, struct response *res);
 void music_qobuz_start(struct request *req, struct response *res);
 
+/* api_navidrome.c */
+void music_navidrome(struct request *req, struct response *res);
+void music_navidrome_login(struct request *req, struct response *res);
+void music_navidrome_starred(struct request *req, struct response *res);
+void music_navidrome_playlists(struct request *req, struct response *res);
+void music_navidrome_playlist(struct request *req, struct response *res);
+
 /* api_server.c */
 void server_overview(struct request *req, struct response *res);
 void server_audit(struct request *req, struct response *res);
