@@ -23,6 +23,7 @@
 #include "arena.h"
 #include "db.h"
 #include "music.h"
+#include "navidrome.h"
 #include "tags.h"
 
 #define MOVE_MAX_OTHERS 10000 /* entries of one folder that go along with its tracks */
@@ -478,6 +479,13 @@ int music_move(void)
     struct move_plan plan;
     struct move_counts n = { 0 };
     int rc = move_plan(&plan);
+    /* Navidrome has read every file's tags as they are before any moves:
+     * it matches a moved file by them (navidrome.h). */
+    if (rc == 0 && plan.moves > 0 && navidrome_scan("before-move") != 0) {
+        fprintf(stderr, "music: nothing moved: Navidrome's scan before the move failed\n");
+        close(lock);
+        return 1;
+    }
     struct source *sources = rc == 0 ? arena_alloc((plan.moves + 1) * sizeof *sources) : NULL;
     if (rc == 0 && sources == NULL) {
         fprintf(stderr, "move: out of memory\n");
@@ -532,6 +540,7 @@ int music_move(void)
                n.moved, n.failed, plan.problems, n.others, n.kept, n.folders);
     else
         fprintf(stderr, "music: move stopped (database error)\n");
+    int scanned = n.moved + n.others == 0 || navidrome_scan("after-move") == 0;
     close(lock);
-    return rc == 0 ? 0 : 1;
+    return rc == 0 && scanned ? 0 : 1;
 }

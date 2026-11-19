@@ -8,12 +8,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include <arpa/inet.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 
 #include "arena.h"
+#include "conn.h"
 #include "db.h"
 #include "https.h"
 #include "json.h"
@@ -21,6 +23,7 @@
 
 #define API_VERSION "1.16.1"
 #define MAX_CALL_URL 2048
+#define SCAN_POLL_MS 1000 /* between two looks at a running scan */
 
 static char base_url[NAVIDROME_MAX_URL + 1];
 static char nav_music[MUSIC_MAX_ROOT + 1];
@@ -342,4 +345,136 @@ int navidrome_local_path(const char *nav_root, const char *music_root, const cha
     }
     int w = snprintf(out, outlen, "%s/%s", music_root, rel);
     return w >= 0 && (size_t)w < outlen ? 0 : -1;
+}
+
+/* ---- scans --------------------------------------------------------------- */
+
+/* Records a scan (or check) for reason that starts now; a row a cut-off
+ * run left running fails first (the caller holds the library lock). Its
+ * id, or -1 (logged). */
+static long long scan_begin(const char *reason)
+{
+    if (db_exec(music_db, "UPDATE navidrome_scans SET state = 'failed', finished = unixepoch(),"
+                          " note = 'cut off: nylm stopped while it waited'"
+                          " WHERE state = 'running'") != 0)
+        return -1;
+    sqlite3_stmt *st = db_prepare(music_db, "INSERT INTO navidrome_scans (reason) VALUES (?)");
+    int ok = st != NULL && sqlite3_bind_text(st, 1, reason, -1, SQLITE_STATIC) == SQLITE_OK &&
+             sqlite3_step(st) == SQLITE_DONE;
+    if (!ok)
+        db_log_error(music_db, "navidrome: record a scan");
+    sqlite3_finalize(st);
+    return ok ? sqlite3_last_insert_rowid(music_db) : -1;
+}
+
+/* Records how scan id ended: state "done" or "failed" (why in note, also
+ * logged). Returns 0 if done, else -1. */
+static int scan_end(long long id, const char *reason, const char *state, const char *note)
+{
+    if (strcmp(state, "done") != 0)
+        fprintf(stderr, "navidrome: %s: %s\n", reason, note);
+    sqlite3_stmt *st = db_prepare(music_db,
+        "UPDATE navidrome_scans SET state = ?, note = ?, finished = unixepoch() WHERE id = ?");
+    int ok = st != NULL && sqlite3_bind_text(st, 1, state, -1, SQLITE_STATIC) == SQLITE_OK &&
+             sqlite3_bind_text(st, 2, note, -1, SQLITE_STATIC) == SQLITE_OK &&
+             sqlite3_bind_int64(st, 3, id) == SQLITE_OK && sqlite3_step(st) == SQLITE_DONE;
+    if (!ok)
+        db_log_error(music_db, "navidrome: record a scan's end");
+    sqlite3_finalize(st);
+    return strcmp(state, "done") == 0 ? 0 : -1;
+}
+
+/* Reads the scanStatus of an answer: *scanning, and its lastScan into last
+ * ("" if it has none). 0, or -1 if it has no scanStatus. */
+static int scan_state(const cJSON *r, int *scanning, char *last, size_t lastlen)
+{
+    const cJSON *status = cJSON_GetObjectItemCaseSensitive(r, "scanStatus");
+    const cJSON *on = cJSON_GetObjectItemCaseSensitive(status, "scanning");
+    const cJSON *when = cJSON_GetObjectItemCaseSensitive(status, "lastScan");
+    if (!cJSON_IsBool(on))
+        return -1;
+    *scanning = cJSON_IsTrue(on);
+    snprintf(last, lastlen, "%s", cJSON_IsString(when) ? when->valuestring : "");
+    return 0;
+}
+
+/* getScanStatus. 0, or -1 with why in err. */
+static int look(int *scanning, char *last, size_t lastlen, char *err, size_t errlen)
+{
+    cJSON *r = navidrome_call("getScanStatus", "", NULL, NULL, NULL, err, errlen);
+    if (r == NULL)
+        return -1;
+    if (scan_state(r, scanning, last, lastlen) != 0) {
+        snprintf(err, errlen, "Navidrome's scan status is not one nylm can read");
+        return -1;
+    }
+    return 0;
+}
+
+static void pause_ms(long ms)
+{
+    const struct timespec t = { ms / 1000, (ms % 1000) * 1000000L };
+    nanosleep(&t, NULL);
+}
+
+int navidrome_ready(const char *reason)
+{
+    if (navidrome_url() == NULL)
+        return 0;
+    char err[512], note[600];
+    if (navidrome_call("ping", "", NULL, NULL, NULL, err, sizeof err) != NULL)
+        return 0;
+    /* Only a refusal is recorded: it says why nothing happened. */
+    long long id = scan_begin(reason);
+    snprintf(note, sizeof note, "%s: nothing was %s", err,
+             strcmp(reason, "before-move") == 0 ? "moved" : "written");
+    if (id < 0)
+        fprintf(stderr, "navidrome: %s: %s\n", reason, note);
+    else
+        scan_end(id, reason, "failed", note);
+    return -1;
+}
+
+int navidrome_scan(const char *reason)
+{
+    if (navidrome_url() == NULL)
+        return 0;
+    long long id = scan_begin(reason);
+    if (id < 0)
+        return -1;
+    printf("navidrome: %s: scanning\n", reason);
+    fflush(stdout);
+    char err[512], before[64], last[64];
+    int scanning;
+    double start = now_seconds();
+    /* A scan that runs already ends first: it may have read the files
+     * before the change. */
+    if (look(&scanning, before, sizeof before, err, sizeof err) != 0)
+        return scan_end(id, reason, "failed", err);
+    while (scanning) {
+        if (now_seconds() - start > NAVIDROME_SCAN_LIMIT)
+            return scan_end(id, reason, "failed", "Navidrome's own scan did not end within an hour");
+        pause_ms(SCAN_POLL_MS);
+        if (look(&scanning, before, sizeof before, err, sizeof err) != 0)
+            return scan_end(id, reason, "failed", err);
+    }
+    cJSON *r = navidrome_call("startScan", "", NULL, NULL, NULL, err, sizeof err);
+    if (r == NULL)
+        return scan_end(id, reason, "failed", err);
+    int seen = scan_state(r, &scanning, last, sizeof last) == 0 && scanning;
+    double asked = now_seconds();
+    for (;;) {
+        pause_ms(SCAN_POLL_MS);
+        if (look(&scanning, last, sizeof last, err, sizeof err) != 0)
+            return scan_end(id, reason, "failed", err);
+        seen |= scanning;
+        if (!scanning && (seen || strcmp(last, before) != 0))
+            break;
+        if (!seen && now_seconds() - asked > NAVIDROME_SCAN_START)
+            return scan_end(id, reason, "failed", "Navidrome did not start the scan nylm asked for");
+        if (now_seconds() - start > NAVIDROME_SCAN_LIMIT)
+            return scan_end(id, reason, "failed", "Navidrome's scan did not end within an hour");
+    }
+    printf("navidrome: %s: scanned in %.0f s\n", reason, now_seconds() - start);
+    return scan_end(id, reason, "done", "");
 }

@@ -420,6 +420,19 @@ const char *const music_migrations[] = {
     "    password TEXT    NOT NULL,"
     "    saved    INTEGER NOT NULL DEFAULT (unixepoch())"
     ") STRICT;",
+
+    /* 11: Navidrome's scans around nylm's writes and moves, and the checks
+     * that it answers before them (src/navidrome.h): why, how each went. */
+    "CREATE TABLE navidrome_scans ("
+    "    id       INTEGER PRIMARY KEY,"
+    "    reason   TEXT    NOT NULL CHECK (reason IN ('before-write', 'after-write',"
+    "                     'before-move', 'after-move', 'after-qobuz')),"
+    "    started  INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "    finished INTEGER,"
+    "    state    TEXT    NOT NULL DEFAULT 'running'"
+    "                     CHECK (state IN ('running', 'done', 'failed')),"
+    "    note     TEXT    NOT NULL DEFAULT ''"
+    ") STRICT;",
 };
 
 const int music_migration_count = sizeof music_migrations / sizeof music_migrations[0];

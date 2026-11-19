@@ -94,6 +94,33 @@ int navidrome_check_login(const char *user, const char *password, int *refused, 
 int navidrome_login(const char **user);
 
 /*
+ * Scans around the services that change files, so that Navidrome keeps
+ * a file's plays, stars and playlists when it moves: it matches a moved
+ * file to the one it knew by its tags, which it must have read before.
+ * Each call records itself in music_db (navidrome_scans: reason, state,
+ * note) and must run under the library lock, so that one runs at a time.
+ * reason: "before-write", "after-write", "before-move", "after-move",
+ * "after-qobuz". Without NYLM_NAVIDROME each does nothing and returns 0.
+ */
+
+/* Checks that Navidrome answers with the kept login (a ping). 0, or -1
+ * (recorded as failed, with why; logged): then the caller must not go on. */
+int navidrome_ready(const char *reason);
+
+/*
+ * Has Navidrome scan the library and waits until it is done: first for a
+ * scan it runs already, then for its own (startScan), which counts as
+ * done when getScanStatus says it is no longer scanning after it was, or
+ * its lastScan time changed. At most NAVIDROME_SCAN_LIMIT seconds; one
+ * that does not start within NAVIDROME_SCAN_START seconds fails. 0, or -1
+ * (recorded with why, logged).
+ */
+int navidrome_scan(const char *reason);
+
+#define NAVIDROME_SCAN_LIMIT 3600
+#define NAVIDROME_SCAN_START 60
+
+/*
  * The path in the music folder of a song Navidrome lists at path (as it
  * reports it with Report Real Path: below navidrome_music(), or relative
  * to it) into out. 0, or -1 if it is not in the music folder (a path

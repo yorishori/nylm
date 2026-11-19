@@ -1740,7 +1740,9 @@ sqlite3 "$MDB" "PRAGMA foreign_keys = ON; DELETE FROM tracks WHERE album GLOB 'S
 # Not set up: the page says so, the rest answers 503.
 NL=/api/music/navidrome/login
 expect 200 "navidrome, not set up" -b "$JAR" "$B/api/music/navidrome"
-expect_body '{"configured":false,"url":null,"music":null,"user":null,"connected":false,"version":null,"error":""}' "navidrome off"
+expect_body '{"configured":false,"url":null,"music":null,"user":null,"connected":false,"version":null,"error":"","scans":[]}' "navidrome off"
+expect 200 "overview, navidrome not set up" -b "$JAR" "$B/api/music"
+expect_body '"navidrome":false,"navidrome_scan":null}' "overview: no Navidrome"
 post "navidrome login, not set up" 503 $NL "{$PW,\"user\":\"admin\",\"navidrome_password\":\"x\"}"
 expect_body "set NYLM_NAVIDROME in /etc/nylm.conf" "not set up message"
 for route in starred playlists "playlist?id=x"; do
@@ -1798,11 +1800,21 @@ stop
 export NYLM_NAVIDROME="http://127.0.0.1:$NDPORT/" NYLM_NAVIDROME_MUSIC=/music
 start "http://127.0.0.1:$PORT/"
 expect 200 "navidrome, no login" -b "$JAR" "$B/api/music/navidrome"
-expect_body "{\"configured\":true,\"url\":\"http://127.0.0.1:$NDPORT\",\"music\":\"/music\",\"user\":null,\"connected\":false,\"version\":null,\"error\":\"\"}" "navidrome set up, no login"
+expect_body "{\"configured\":true,\"url\":\"http://127.0.0.1:$NDPORT\",\"music\":\"/music\",\"user\":null,\"connected\":false,\"version\":null,\"error\":\"\",\"scans\":[]}" "navidrome set up, no login"
 for route in starred playlists "playlist?id=x"; do
     expect 409 "navidrome $route, no login" -b "$JAR" "$B/api/music/navidrome/$route"
     expect_body "nylm has no Navidrome login yet" "$route: no login message"
 done
+# Writes and moves need Navidrome to answer: without a login they do not start.
+Q=/api/music/queue
+post "queue a change"          200 $Q "{\"album\":$NT1,\"set\":{\"mood\":\"calm\"}}"
+post "write, navidrome no login" 409 /api/music/write "{$PW}"
+expect_body "Navidrome is set up but nylm has no login for it: add it in the Navidrome tab (nothing was written)" "write refused"
+post "discard it"              200 /api/music/discard '{"all":true}'
+sqlite3 "$MDB" "UPDATE tracks SET title = 'Song Uno' WHERE id = $NT1"
+post "move, navidrome no login" 409 /api/music/move "{$PW}"
+expect_body "(nothing was moved)" "move refused"
+sqlite3 "$MDB" "UPDATE tracks SET title = 'Song One' WHERE id = $NT1"
 
 # The login: the password again, then Navidrome must accept it, as an admin.
 NLB='"user":"admin","navidrome_password":"nd secret"'
@@ -1842,7 +1854,7 @@ query "admin|nd secret" "the login is kept" "SELECT user, password FROM navidrom
 query "navidrome-login|{\"user\":\"admin\"}|ok" "the login is audited, without the password" \
     "SELECT action, detail, result FROM audit ORDER BY id DESC LIMIT 1"
 expect 200 "navidrome, connected" -b "$JAR" "$B/api/music/navidrome"
-expect_body '"user":"admin","connected":true,"version":"0.64.2","error":""}' "connected"
+expect_body '"user":"admin","connected":true,"version":"0.64.2","error":"",' "connected"
 # Never the password: not to the browser, not to Navidrome (a token), not in the log.
 if grep -q "nd secret" "$TMP/body" "$ND/requests.log" "$TMP/log"; then
     FAILED=$((FAILED + 1)); echo "FAIL: the Navidrome password was sent or logged"
@@ -1883,6 +1895,112 @@ expect_body "Navidrome's answer is not one nylm can read" "garbage answer"
 rm "$ND/getPlaylists.json"
 expect 502 "playlists 404"     -b "$JAR" "$B/api/music/navidrome/playlists"
 expect_body "Navidrome answered HTTP 404" "wrong address"
+# Scans around writes and moves (src/navidrome.h). nd_answers starts the
+# stand-in again (its counts of calls start again) with the scan statuses
+# it gives, one per getScanStatus call, then the last one for every
+# later call; nd_calls lists the methods it was called with.
+nd_scan_status() { printf '{"subsonic-response":{%s,"scanStatus":{"scanning":%s,"count":3%s}}}' "$NDOK" "$1" "${2:+,\"lastScan\":\"$2\"}"; }
+nd_answers() {
+    kill "$NDPID" 2>/dev/null; wait "$NDPID" 2>/dev/null
+    rm -f "$ND"/getScanStatus*.json "$ND"/startScan*.json "$ND/requests.log"
+    nd_scan_status true > "$ND/startScan.json"
+    i=0
+    for st in "$@"; do
+        i=$((i + 1))
+        nd_scan_status ${st%%@*} "$(echo "$st" | sed -n 's/^[^@]*@//p')" > "$ND/getScanStatus.$i.json"
+    done
+    cp "$ND/getScanStatus.$i.json" "$ND/getScanStatus.json"
+    "$NDBIN" $NDPORT "$ND" 2>>"$TMP/navidrome.log" &
+    NDPID=$!
+    sleep 0.2
+}
+nd_calls() { sed 's/ .*//' "$ND/requests.log" | tr '\n' ' '; }
+# expect_calls WANT DESCRIPTION: the stand-in was called with these methods.
+expect_calls() {
+    if [ "$(nd_calls)" = "$1" ]; then PASSED=$((PASSED + 1)); else
+        FAILED=$((FAILED + 1)); echo "FAIL: $2: calls '$(nd_calls)', want '$1'"; fi
+}
+NS() { sqlite3 "$MDB" "SELECT reason, state, note FROM navidrome_scans ORDER BY id DESC LIMIT 1"; }
+
+# The server checks that Navidrome answers before it starts a write.
+post "queue for a write"       200 $Q "{\"album\":$NT1,\"set\":{\"mood\":\"calm\"}}"
+kill "$NDPID"; wait "$NDPID" 2>/dev/null
+post "write, navidrome down"   502 /api/music/write "{$PW}"
+expect_body "Navidrome does not answer at http://127.0.0.1:$NDPORT: " "write refused, why"
+expect_body ": nothing was written" "write refused, what"
+# The write service checks too: nothing is written, the changes wait.
+service 1 "music-write, navidrome down" music-write
+logged "nothing written: Navidrome does not answer" "write service refuses"
+query "1" "the changes still wait" "SELECT count(*) > 0 FROM changes WHERE state = 'pending'"
+if [ "$(NS | cut -d'|' -f1,2)" = "before-write|failed" ] &&
+   NS | grep -q "Navidrome does not answer at .*: nothing was written$"; then
+    PASSED=$((PASSED + 1)); else FAILED=$((FAILED + 1)); echo "FAIL: refusal recorded: $(NS)"; fi
+# Navidrome up: the write, then a scan that it is seen running.
+nd_answers false@T0 true false@T1
+service 0 "music-write, then a scan" music-write
+logged "navidrome: after-write: scanned in" "scanned after the write"
+expect_calls "ping getScanStatus startScan getScanStatus getScanStatus " "write: check, then scan"
+query "after-write|done|" "the scan after the write" \
+    "SELECT reason, state, note FROM navidrome_scans ORDER BY id DESC LIMIT 1"
+query "0" "the change is written" "SELECT count(*) FROM changes WHERE state = 'pending'"
+expect 200 "overview, the latest scan" -b "$JAR" "$B/api/music"
+expect_body '"navidrome":true,"navidrome_scan":{"id":' "overview shows Navidrome's scan"
+expect_body '"reason":"after-write",' "overview: which scan"
+expect_body '"state":"done","note":""}' "overview: how it went"
+
+# A move: Navidrome scans before (after the scan it runs already ends,
+# then until its lastScan changes) and after. The write read the files
+# again: first the cache has their tags, then one track gets a new title.
+service 0 "scan before the moves" music-scan
+sqlite3 "$MDB" "UPDATE tracks SET title = 'Song Uno' WHERE id = $NT1"
+NPATH() { sqlite3 "$MDB" "SELECT path FROM tracks WHERE id = $NT1"; }
+NFROM=$(NPATH)
+nd_answers true false@T2 false@T3 false@T3 true false@T4
+sed 's/"scanning":true/"scanning":false/' "$ND/startScan.json" > "$ND/startScan.1.json"
+service 0 "music-move, scans around" music-move
+logged "tracks moved, 0 failed" "moved"
+logged "navidrome: after-move: scanned in" "scanned after the move"
+expect_calls "getScanStatus getScanStatus startScan getScanStatus getScanStatus startScan getScanStatus getScanStatus " "move: scans before and after"
+NTO=$(NPATH)
+case "$NTO" in */"01 - Song Uno.mp3") PASSED=$((PASSED + 1)) ;;
+    *) FAILED=$((FAILED + 1)); echo "FAIL: the track's new path: $NTO" ;; esac
+if [ -f "$NTO" ] && [ ! -e "$NFROM" ]; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: the file was not moved to $NTO"; fi
+query "after-move|done" "the scan after" \
+    "SELECT reason, state FROM navidrome_scans ORDER BY id DESC LIMIT 1"
+query "before-move|done" "the scan before" \
+    "SELECT reason, state FROM navidrome_scans ORDER BY id DESC LIMIT 1 OFFSET 1"
+# The scan after fails: the file moved all the same (back to its tag's
+# title); it says so.
+service 0 "scan the moved file" music-scan
+nd_answers false@T5
+printf '{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":0,"message":"scan already queued"}}}' > "$ND/startScan.2.json"
+service 1 "music-move, scan after fails" music-move
+logged "tracks moved, 0 failed" "moved back"
+logged "navidrome: after-move: Navidrome says: scan already queued (code 0)" "why the scan failed"
+query "after-move|failed|Navidrome says: scan already queued (code 0)" "the failed scan recorded" \
+    "SELECT reason, state, note FROM navidrome_scans ORDER BY id DESC LIMIT 1"
+NBACK=$(NPATH)
+if [ -f "$NBACK" ] && [ "$NBACK" != "$NTO" ] && [ ! -e "$NTO" ]; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: the file did not move back ($NBACK)"; fi
+# Navidrome down: the move does not start, nothing moves.
+sqlite3 "$MDB" "UPDATE tracks SET title = 'Song Dos' WHERE id = $NT1"
+kill "$NDPID"; wait "$NDPID" 2>/dev/null
+post "move, navidrome down"    502 /api/music/move "{$PW}"
+expect_body ": nothing was moved" "move refused"
+service 1 "music-move, navidrome down" music-move
+logged "nothing moved: Navidrome's scan before the move failed" "move service refuses"
+if [ -f "$NBACK" ] && [ "$(NPATH)" = "$NBACK" ]; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: a file moved while Navidrome was down"; fi
+query "before-move|failed" "the refusal recorded" \
+    "SELECT reason, state FROM navidrome_scans ORDER BY id DESC LIMIT 1"
+service 0 "scan back to the file's tags" music-scan
+query "0" "the cache has the file's title again" \
+    "SELECT count(*) FROM tracks WHERE title = 'Song Dos'"
+nd_answers false@T6
+expect 200 "navidrome, its scans" -b "$JAR" "$B/api/music/navidrome"
+expect_body '"scans":[{"id":' "the scans are listed"
+expect_body '"reason":"before-move","started":' "newest first"
 kill "$NDPID"; wait "$NDPID" 2>/dev/null
 expect 502 "starred, navidrome down" -b "$JAR" "$B/api/music/navidrome/starred"
 expect_body "Navidrome does not answer at" "down message"

@@ -342,7 +342,9 @@ A track without album artist, album, title or an `X/Y` track number (or
 with a disc number that is not `X/Y`) stays, and so do two tracks that
 would get the same name. When all the tracks of a folder went to one
 folder, the folder's other files go there too; emptied folders are
-removed. Navidrome sees a moved file as a new one.
+removed. Navidrome keeps a moved file's plays, stars and playlists when it
+has read the file's tags before the move and they did not change in the
+same scan (see Navidrome below).
 
 TagLib writes in place. It saves MP3 tags as ID3v2.4 (upgrading ID3v2.3)
 and adds an ID3v1 tag; both stay as TagLib writes them.
@@ -459,6 +461,20 @@ playlists (`GET /api/music/navidrome/starred`, `.../playlists`,
 `.../playlist?id=`), each matched to nylm's library: a song by its path
 (turn on Report Real Path for the player `nylm` in Navidrome: Settings,
 Players), an album by its name and album artist.
+
+Navidrome's scans (`navidrome_scans`): Navidrome matches a moved file to
+the one it knew by its tags (its persistent id: the MusicBrainz track id,
+else album, disc, track number and title), so it must read new tags
+before the files move, and a move needs a scan of its own. With
+Navidrome set up, the write service first checks that it answers, and
+has it scan after writing; the move service has it scan before and after
+moving; nylm-qobuz after saving downloads. Each scan waits for one
+Navidrome runs already, then asks for its own (`startScan`) and waits
+until `getScanStatus` says it ended (at most an hour). When Navidrome
+does not answer, the server refuses Write and Move (502; 409 without a
+login) and the services change nothing; a scan after the files changed
+that fails is recorded, and the Files and Changes tabs say to start one
+in Navidrome by hand. The Navidrome tab lists the last 20.
 
 ## Server
 

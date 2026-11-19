@@ -1,7 +1,7 @@
 /*
  * nylm-qobuz: the Qobuz service (nylm-qobuz.service), a binary of its own
  * so that only it links libssl. Configured like nylm (NYLM_DATA,
- * NYLM_MUSIC); takes no arguments.
+ * NYLM_MUSIC, NYLM_NAVIDROME...); takes no arguments.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,6 +10,7 @@
 #include "db.h"
 #include "json.h"
 #include "music.h"
+#include "navidrome.h"
 #include "qobuz.h"
 
 #define ARENA_SIZE (16 * 1024 * 1024)
@@ -24,7 +25,8 @@ int main(int argc, char **argv)
     if (db_open_all(getenv("NYLM_DATA")) != 0)
         return 1;
     int rc = 1;
-    if (music_configure(getenv("NYLM_MUSIC"), getenv("NYLM_DATA")) == 0) {
+    if (music_configure(getenv("NYLM_MUSIC"), getenv("NYLM_DATA")) == 0 &&
+        navidrome_configure(getenv("NYLM_NAVIDROME"), getenv("NYLM_NAVIDROME_MUSIC")) == 0) {
         if (arena_init(ARENA_SIZE) != 0) {
             fprintf(stderr, "out of memory\n");
         } else {

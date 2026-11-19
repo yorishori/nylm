@@ -27,6 +27,7 @@
 #include "db.h"
 #include "image.h"
 #include "json.h"
+#include "navidrome.h"
 
 static char root[MUSIC_MAX_ROOT + 1];
 static size_t root_len;
@@ -1274,6 +1275,12 @@ int music_write(void)
     int lock = music_start_service("write");
     if (lock < 0)
         return 1; /* the changes stay pending */
+    /* Navidrome must be there to read what changes (navidrome.h). */
+    if (navidrome_ready("before-write") != 0) {
+        fprintf(stderr, "music: nothing written: Navidrome does not answer\n");
+        close(lock);
+        return 1;
+    }
 
     struct write_counts n = { 0 };
     /* Changes still "running" were cut off (the lock says none runs now):
@@ -1313,6 +1320,8 @@ int music_write(void)
                n.tracks, n.done, n.warnings, n.failed);
     else
         fprintf(stderr, "music: write stopped (database error)\n");
+    /* Navidrome reads the new tags before anything moves. */
+    int scanned = n.tracks == 0 || navidrome_scan("after-write") == 0;
     close(lock);
-    return rc == 0 ? 0 : 1;
+    return rc == 0 && scanned ? 0 : 1;
 }

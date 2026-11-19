@@ -257,7 +257,16 @@ async function queue(body) {
 
 /* ---- services ------------------------------------------------------------ */
 
+/* What each of Navidrome's scans (or checks) is for. */
+const NAVIDROME_REASON = { "before-write": "before the write", "after-write": "after the write",
+                           "before-move": "before the move", "after-move": "after the move",
+                           "after-qobuz": "after the Qobuz downloads" };
+
 function busyText(o) {
+  const nd = o.navidrome_scan;
+  if (o.busy && nd && nd.state === "running") {
+    return `Waiting for Navidrome's scan ${NAVIDROME_REASON[nd.reason] || ""}…`;
+  }
   if (o.busy === "scan") {
     const r = o.running;
     return r ? `Scanning ${r.path ? relative(r.path) : "the library"}… ` +
@@ -1463,12 +1472,14 @@ async function changesPage() {
     `Writes ${plural(ch.count, "change", "changes")} into the files, track by track. Each ` +
     "file is checked first (it must still be as scanned, and every tag the write sets valid; " +
     "the others are left as they are), then written and read back; each result is listed in " +
-    "Info.",
+    "Info." + (o.navidrome ? " Navidrome must answer first; it scans the library after the " +
+                             "write, so that it knows the new tags before a move." : ""),
     "Write changes", "Writing started");
   const text = el("p", {}, busyText(o));
   const panel = el("section", { class: "card stack" },
     el("h2", {}, "Pending ", el("span", { class: "count" }, ch.count)),
     o.busy ? text : null,
+    navidromeWarning(o),
     !o.available ? el("p", { class: "warn" },
                       "The music folder is not available (is the drive mounted?): nothing can " +
                       "be written now.") : null,
@@ -1520,6 +1531,19 @@ async function changesPage() {
                el("section", { class: "card" }, list, empty));
 }
 
+/* The latest of Navidrome's scans when it failed: what it means. */
+function navidromeWarning(o) {
+  const nd = o.navidrome_scan;
+  if (!nd || nd.state !== "failed") return null;
+  const before = nd.reason.startsWith("before-");
+  return el("p", { class: "warn" },
+    before ? `Navidrome did not answer ${NAVIDROME_REASON[nd.reason]}, so nothing happened ` +
+             `(${showTime(nd.started)}): ${nd.note}`
+           : `Navidrome's scan ${NAVIDROME_REASON[nd.reason]} failed (${showTime(nd.started)}): ` +
+             `${nd.note}. Start a scan in Navidrome by hand before anything else changes, so ` +
+             "that it sees the files as they are now.");
+}
+
 /* ---- files --------------------------------------------------------------- */
 
 const MOVE_STATE = { done: "Moved", failed: "Not moved", kept: "Stayed" };
@@ -1562,7 +1586,9 @@ async function filesPage() {
   musicRoot = o.root || "";
   const start = passwordForm("/api/music/move", {},
     `Moves ${plural(mv.count, "file", "files")} to where their tags put them. A file is ` +
-    "never moved over another; each move is listed below.",
+    "never moved over another; each move is listed below." +
+    (o.navidrome ? " Navidrome scans the library before and after, so that it keeps the " +
+                   "plays, stars and playlists of the files that move." : ""),
     "Move files", "Moving started");
   const text = el("p", {}, busyText(o));
   const canStart = mv.count > 0 && !mv.pending && !o.busy && o.available;
@@ -1576,6 +1602,7 @@ async function filesPage() {
                                 "files (covers, logs, ...) go with them; emptied folders are " +
                                 "removed."),
     o.busy ? text : null,
+    navidromeWarning(o),
     !o.available ? el("p", { class: "warn" }, "The music folder is not available (is the " +
                                               "drive mounted?): nothing can be moved now.") : null,
     mv.pending ? el("p", { class: "warn" },
@@ -1715,6 +1742,23 @@ async function qobuzPage() {
 const REAL_PATH_HINT = "nylm finds Navidrome's songs in the library by their paths: turn on " +
   "Report Real Path for the player nylm in Navidrome (Settings → Players).";
 
+const SCAN_STATE_TEXT = { running: "Scanning", done: "Done", failed: "Failed" };
+
+/* One of Navidrome's scans (or a refused check). Rose: failed. */
+function navidromeScan(sc) {
+  const check = sc.reason.startsWith("before-") && sc.state === "failed" &&
+                sc.note.includes("nothing was");
+  return el("li", { class: "card stack history" },
+    el("header", {},
+      el("span", { class: sc.state === "failed" ? "due late" : "muted" },
+         SCAN_STATE_TEXT[sc.state] || sc.state),
+      el("span", { class: "muted" }, showTime(sc.finished || sc.started))),
+    el("strong", {}, `${check ? "Check" : "Scan"} ${NAVIDROME_REASON[sc.reason] || sc.reason}`),
+    sc.finished && sc.state === "done"
+      ? el("p", { class: "muted" }, `Took ${Math.max(0, sc.finished - sc.started)} s`) : null,
+    sc.note ? el("p", { class: "note" }, sc.note) : null);
+}
+
 /* A song Navidrome has: title, artist · album, and Open album when nylm
  * has it. */
 function navidromeSong(s) {
@@ -1835,8 +1879,17 @@ async function navidromePage() {
                 : `Not connected as ${nd.user}.`),
     nd.error ? el("p", { class: "differs-text" }, nd.error) : null,
     el("p", { class: "muted" }, REAL_PATH_HINT));
+  const scans = el("section", { class: "section" },
+    el("header", {}, el("h2", {}, "Scans ", el("span", { class: "count" }, nd.scans.length))),
+    el("p", { class: "muted" }, "Navidrome scans the library after a write and before and " +
+                                "after a move: it matches a moved file to the one it knew by " +
+                                "its tags, and keeps its plays, stars and playlists. With " +
+                                "Navidrome not answering, nothing is written or moved."),
+    nd.scans.length ? el("ul", { class: "list cols" }, nd.scans.map(navidromeScan))
+                    : el("p", { class: "empty" }, "No scans yet."));
   return shell("navidrome", o, state,
     nd.connected ? await navidromeLists() : null,
+    scans,
     el("section", { class: "section" },
       el("header", {}, el("h2", {}, nd.user ? "Change the login" : "Login")), login));
 }

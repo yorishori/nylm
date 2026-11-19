@@ -128,8 +128,10 @@ static int add_songs(cJSON *list, const cJSON *songs)
 
 /*
  * GET /api/music/navidrome: whether Navidrome is set up (its address and
- * music folder), the login's user name (null: none), and whether
- * Navidrome answers with it (connected; version; error says why not).
+ * music folder), the login's user name (null: none), whether Navidrome
+ * answers with it (connected; version; error says why not), and the latest
+ * 20 scans and refused checks around nylm's writes and moves (scans: id,
+ * reason, started, finished, state, note).
  */
 void music_navidrome(struct request *req, struct response *res)
 {
@@ -151,6 +153,23 @@ void music_navidrome(struct request *req, struct response *res)
         cJSON_AddBoolToObject(obj, "connected", r != NULL) == NULL ||
         add_text(obj, "version", r, "serverVersion") == NULL ||
         cJSON_AddStringToObject(obj, "error", err) == NULL) {
+        json_error(res, 500, "internal error");
+        return;
+    }
+    cJSON *scans = cJSON_AddArrayToObject(obj, "scans");
+    sqlite3_stmt *st = scans != NULL ? db_prepare(music_db,
+        "SELECT id, reason, started, finished, state, note FROM navidrome_scans"
+        " ORDER BY id DESC LIMIT 20") : NULL;
+    int rc = st != NULL ? SQLITE_ROW : SQLITE_ERROR;
+    while (rc == SQLITE_ROW && (rc = sqlite3_step(st)) == SQLITE_ROW) {
+        cJSON *row = json_row(st, 6);
+        if (row == NULL || !cJSON_AddItemToArray(scans, row))
+            rc = SQLITE_NOMEM;
+    }
+    if (rc != SQLITE_DONE)
+        db_log_error(music_db, "navidrome scans");
+    sqlite3_finalize(st);
+    if (rc != SQLITE_DONE) {
         json_error(res, 500, "internal error");
         return;
     }
