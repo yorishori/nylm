@@ -42,6 +42,7 @@ browser ── HTTPS ─> nylm ──> /api/*  router ──> handler ──> SQ
 | `src/musicbrainz*.c` | `nylm-musicbrainz`, album ids and genres from MusicBrainz |
 | `src/https.c`     | HTTP client: HTTPS (libssl) for the two services above, plain HTTP to Navidrome |
 | `src/navidrome.c` | Navidrome's Subsonic API: login, calls, song paths       |
+| `src/dap.c`       | DAPs: the USB drives with FAT or exFAT, from /sys and udev |
 | `src/tags.c`      | music file tags through TagLib: read, write, verify      |
 | `src/art.c`       | album art files, named by SHA-256; base64                |
 | `src/image.c`     | thumbnails (libjpeg-turbo, libpng), only in the services |
@@ -475,6 +476,19 @@ does not answer, the server refuses Write and Move (502; 409 without a
 login) and the services change nothing; a scan after the files changed
 that fails is recorded, and the Files and Changes tabs say to start one
 in Navidrome by hand. The Navidrome tab lists the last 20.
+
+DAP (`src/dap.c`, `src/api_dap.c`, API under `/api/music/dap`): a digital
+audio player plugged into the server as a USB drive (mass storage). The
+DAP tab lists the file systems that are FAT or exFAT on a disk below a USB
+port (`/sys/block`, udev's `/run/udev/data`, `/proc/self/mountinfo`; no
+root): label, maker, model, size, UUID. One at a time is mounted at
+`/mnt/nylm-dap` (`install.sh` makes the folder) by the root action
+`dap-mount UUID`, which checks it all again (a `/dev/sd*` disk on USB, FAT
+or exFAT, mounted nowhere, the mount point free) and mounts it for user
+`nylm` with `nosuid,nodev,noexec`; `dap-umount` writes out what is cached
+and unmounts it, so it can be unplugged. Both are recorded in the audit
+table. A DAP can be given a name (`daps`, by its UUID). The actions use
+`blkid`, `findmnt`, `mountpoint`, `mount` and `umount` (util-linux).
 
 ## Server
 

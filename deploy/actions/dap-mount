@@ -1,0 +1,34 @@
+#!/bin/sh
+# Mounts a DAP at /mnt/nylm-dap: the USB disk with this FAT or exFAT file
+# system, for user nylm, without device files, setuid or programs. Not if
+# it is mounted anywhere, or something is mounted there already.
+# Argument: the file system's UUID (XXXX-XXXX, as udev and blkid show it).
+set -eu
+. /usr/local/lib/nylm/lib.sh
+DAP_MOUNT=/mnt/nylm-dap
+[ "$#" -eq 1 ] || die "takes one file system UUID"
+valid_fat_uuid "$1" || die "not a FAT or exFAT file system UUID (XXXX-XXXX): $1"
+[ -L "/dev/disk/by-uuid/$1" ] || die "no drive has a file system with the UUID $1"
+dev=$(/usr/bin/readlink -f -- "/dev/disk/by-uuid/$1")
+# USB mass storage: a SCSI disk (sdX, or a partition of one) below a USB port.
+case $dev in /dev/sd[a-z]*) ;; *) die "not a USB disk: $dev" ;; esac
+name=${dev#/dev/}
+case $name in *[!a-z0-9]*) die "not a disk name nylm knows: $name" ;; esac
+[ -b "$dev" ] || die "not a block device: $dev"
+case $(/usr/bin/readlink -f -- "/sys/class/block/$name") in
+    */usb*) ;;
+    *) die "$dev is not on USB" ;;
+esac
+type=$(/usr/bin/blkid -p -o value -s TYPE -- "$dev") || die "can not read the file system of $dev"
+case $type in
+    vfat) options=utf8,flush ;;
+    exfat) options=iocharset=utf8 ;;
+    *) die "$dev has a $type file system, not FAT or exFAT" ;;
+esac
+if /usr/bin/findmnt -rn -S "$dev" >/dev/null; then die "$dev is mounted already"; fi
+if /usr/bin/mountpoint -q "$DAP_MOUNT"; then die "a drive is mounted at $DAP_MOUNT already"; fi
+if [ ! -d "$DAP_MOUNT" ] || [ -L "$DAP_MOUNT" ]; then die "$DAP_MOUNT is not a folder (run install.sh)"; fi
+uid=$(/usr/bin/id -u nylm)
+gid=$(/usr/bin/id -g nylm)
+exec /usr/bin/mount -t "$type" \
+    -o "nosuid,nodev,noexec,uid=$uid,gid=$gid,fmask=0133,dmask=0022,$options" -- "$dev" "$DAP_MOUNT"

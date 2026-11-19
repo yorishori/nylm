@@ -1,0 +1,11 @@
+#!/bin/sh
+# Unmounts the DAP at /mnt/nylm-dap, after writing out what is cached for
+# it: then it can be unplugged. Takes no arguments.
+set -eu
+. /usr/local/lib/nylm/lib.sh
+DAP_MOUNT=/mnt/nylm-dap
+[ "$#" -eq 0 ] || die "takes no arguments"
+/usr/bin/mountpoint -q "$DAP_MOUNT" || die "no drive is mounted at $DAP_MOUNT"
+# A drive pulled out already can not be written to: unmount it anyway.
+/usr/bin/sync -f "$DAP_MOUNT" || echo "dap-umount: writing out failed; unmounting anyway" >&2
+exec /usr/bin/umount -- "$DAP_MOUNT"

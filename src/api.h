@@ -70,6 +70,12 @@ void music_navidrome_starred(struct request *req, struct response *res);
 void music_navidrome_playlists(struct request *req, struct response *res);
 void music_navidrome_playlist(struct request *req, struct response *res);
 
+/* api_dap.c */
+void music_dap(struct request *req, struct response *res);
+void music_dap_mount(struct request *req, struct response *res);
+void music_dap_unmount(struct request *req, struct response *res);
+void music_dap_name(struct request *req, struct response *res);
+
 /* api_server.c */
 void server_overview(struct request *req, struct response *res);
 void server_audit(struct request *req, struct response *res);

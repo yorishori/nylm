@@ -20,6 +20,8 @@
  *   #/qobuz        connect to Qobuz, download albums into the library
  *   #/navidrome    the Navidrome login; its starred albums and songs and
  *                  its playlists, each matched to nylm's tracks
+ *   #/dap          the USB drives plugged into the server (a DAP): mount
+ *                  one, unmount it, name it
  *   #/info         library counts, genres and years charts, the rules,
  *                  the written changes
  *
@@ -223,7 +225,7 @@ function shell(active, overview, ...content) {
   const tabs = [["albums", "Albums"], ["changes", changesLabel(overview.pending)],
                 ["names", "Names"], ["duplicates", "Duplicates"], ["fixes", "Fixes"],
                 ["files", "Files"], ["qobuz", "Qobuz"], ["navidrome", "Navidrome"],
-                ["info", "Info"]];
+                ["dap", "DAP"], ["info", "Info"]];
   return el("section", { class: "page" },
     el("header", { class: "app-head" },
       el("h1", {}, "Music"),
@@ -1894,6 +1896,109 @@ async function navidromePage() {
       el("header", {}, el("h2", {}, nd.user ? "Change the login" : "Login")), login));
 }
 
+/* ---- dap ------------------------------------------------------------------- */
+
+/* A drive's name: the one given in nylm, else its label, else its device. */
+function driveName(d) {
+  return d.name || (d.label ? d.label.replaceAll("_", " ") : `USB drive ${d.dev}`);
+}
+
+/* What a drive is: maker, model, file system, size, UUID. */
+function driveFacts(d) {
+  return [[d.vendor, d.model].filter(Boolean).join(" ").replaceAll("_", " "),
+          d.fstype === "vfat" ? "FAT" : "exFAT", showSize(d.size), d.uuid]
+    .filter(Boolean).join(" · ");
+}
+
+/* A form that names the drive, hidden until opened. */
+function nameForm(d) {
+  const name = el("input", { type: "text", name: "name", required: true, maxlength: 64,
+                             value: d.name || "" });
+  const node = form({ class: "raised", hidden: true }, async () => {
+    await api("POST", "/api/music/dap/name", { uuid: d.uuid, name: name.value.trim() });
+    setStatus(`Named ${name.value.trim()}`);
+    refresh();
+  },
+    field("Name", name, "How nylm shows this DAP, plugged in or not."),
+    el("div", { class: "actions" },
+      el("button", { class: "btn go", type: "submit" }, "Save"),
+      el("button", { class: "btn", type: "button", onclick: () => { node.hidden = true; } },
+         "Cancel")));
+  node.open = () => {
+    node.hidden = false;
+    name.focus();
+  };
+  return node;
+}
+
+/* Runs a mount or unmount, then shows the page again. */
+async function dapAction(button, path, body, done) {
+  button.disabled = true;
+  try {
+    await api("POST", path, body);
+    setStatus(done);
+    refresh();
+  } catch (err) {
+    button.disabled = false;
+    handleError(err);
+  }
+}
+
+/* One USB drive: what it is, where it is mounted, Mount and Name. */
+function driveItem(d, dap) {
+  const naming = nameForm(d);
+  const here = dap.mounted && dap.mounted.uuid === d.uuid;
+  const canMount = !dap.mounted && !dap.other && !d.mounted;
+  const mount = el("button", { class: "btn go", type: "button",
+                               onclick: () => dapAction(mount, "/api/music/dap/mount",
+                                                        { uuid: d.uuid }, `Mounted ${driveName(d)}`) },
+                   "Mount");
+  return el("li", { class: "card stack" },
+    el("strong", {}, driveName(d)),
+    el("p", { class: "muted" }, driveFacts(d)),
+    here ? el("p", {}, `Mounted at ${dap.mount}.`)
+         : d.mounted ? el("p", { class: "warn" }, `Mounted at ${d.mounted} by something else: ` +
+                                                  "unmount it there to use it here.")
+         : null,
+    el("div", { class: "actions" },
+      canMount ? mount : null,
+      el("button", { class: "btn", type: "button", onclick: () => naming.open() },
+         d.name ? "Rename…" : "Name…")),
+    naming);
+}
+
+async function dapPage() {
+  const [o, dap] = await Promise.all([api("GET", "/api/music"), api("GET", "/api/music/dap")]);
+  musicRoot = o.root || "";
+  const m = dap.mounted;
+  const unmount = el("button", { class: "btn go", type: "button",
+                                 onclick: () => dapAction(unmount, "/api/music/dap/unmount", {},
+                                                          "Unmounted: it can be unplugged") },
+                     "Unmount");
+  const state = el("section", { class: "card stack" },
+    el("h2", {}, "DAP"),
+    m ? [el("p", {}, `${driveName(m)} is mounted at ${dap.mount}.`),
+         el("p", { class: "muted" }, driveFacts(m)),
+         m.free != null ? el("p", {}, `${showSize(m.free)} free of ${showSize(m.total)}.`) : null,
+         el("p", { class: "muted" }, "Unmount it before you unplug it: what is still to be " +
+                                     "written goes to it first.")]
+      : dap.other ? el("p", { class: "warn" }, `Something nylm does not know is mounted at ` +
+                                               `${dap.mount}: unmount it to mount a DAP.`)
+      : el("p", {}, "No DAP is mounted."),
+    el("div", { class: "actions" },
+      m || dap.other ? unmount : null,
+      el("button", { class: "btn", type: "button", onclick: () => refresh() }, "Look again")));
+  return shell("dap", o, state,
+    el("section", { class: "section" },
+      el("header", {}, el("h2", {}, "USB drives ", el("span", { class: "count" }, dap.drives.length))),
+      el("p", { class: "muted" }, "Plug the DAP into the server as a USB drive (mass storage). " +
+                                  "nylm lists the USB drives with a FAT or exFAT file system, and " +
+                                  `mounts one at a time at ${dap.mount}, without programs.`),
+      dap.drives.length ? el("ul", { class: "list cols" }, dap.drives.map((d) => driveItem(d, dap)))
+                        : el("p", { class: "empty" }, "No USB drive with a FAT or exFAT file " +
+                                                     "system is plugged in.")));
+}
+
 /* ---- names --------------------------------------------------------------- */
 
 /* The fields with a list of names. */
@@ -2783,6 +2888,7 @@ function route(parts) {
   if (section === "files" && rawId === undefined) return filesPage();
   if (section === "qobuz" && rawId === undefined) return qobuzPage();
   if (section === "navidrome" && rawId === undefined) return navidromePage();
+  if (section === "dap" && rawId === undefined) return dapPage();
   if (section === "info" && rawId === undefined) return infoPage();
   go("#/albums");
   return null;

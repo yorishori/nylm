@@ -60,6 +60,8 @@ install -d -m 700 -o nylm -g nylm "$HOME_DIR"
 # The jobs (root scripts run by systemd units) and lib.sh sit next to it,
 # where sudo does not reach.
 install -d -m 755 -o root -g root /usr/local/lib/nylm "$ACTIONS" "$JOBS"
+# Where the root action dap-mount mounts a DAP (left alone while one is).
+mountpoint -q /mnt/nylm-dap || install -d -m 755 -o root -g root /mnt/nylm-dap
 
 step "files"
 install -m 755 nylm /usr/local/bin/nylm

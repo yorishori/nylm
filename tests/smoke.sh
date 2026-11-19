@@ -761,7 +761,9 @@ for route in "GET /api/music" "GET /api/music/albums" "GET /api/music/album?trac
              "POST /api/music/fix/strays" "GET /api/music/musicbrainz" \
              "POST /api/music/musicbrainz/start" "GET /api/music/navidrome" \
              "POST /api/music/navidrome/login" "GET /api/music/navidrome/starred" \
-             "GET /api/music/navidrome/playlists" "GET /api/music/navidrome/playlist?id=x"; do
+             "GET /api/music/navidrome/playlists" "GET /api/music/navidrome/playlist?id=x" \
+             "GET /api/music/dap" "POST /api/music/dap/mount" "POST /api/music/dap/unmount" \
+             "POST /api/music/dap/name"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
@@ -2010,6 +2012,43 @@ stop
 unset NYLM_NAVIDROME NYLM_NAVIDROME_MUSIC
 start "http://127.0.0.1:$PORT/"
 
+# ---- DAPs --------------------------------------------------------------------
+
+# The USB drives with FAT or exFAT plugged into this machine: none here, and
+# nothing at the mount point. Mounting needs the root action, so only the
+# refusals are checked.
+DM=/api/music/dap/mount
+expect 200 "dap"               -b "$JAR" "$B/api/music/dap"
+expect_body '{"drives":[],"mount":"/mnt/nylm-dap","other":false,"mounted":null}' "no DAP"
+expect 415 "mount needs json"  -b "$JAR" -d '{"uuid":"0A1B-C2D3"}' "$B$DM"
+post "mount no uuid"           400 $DM '{}'
+expect_body "'uuid' must be a FAT or exFAT file system's UUID, like ABCD-1234" "uuid message"
+post "mount uuid lower case"   400 $DM '{"uuid":"0a1b-c2d3"}'
+post "mount uuid ext4"         400 $DM '{"uuid":"2f9c6a3e-1b2d-4c5e-8f90-a1b2c3d4e5f6"}'
+post "mount uuid 8"            400 $DM '{"uuid":"0A1BC2D3"}'
+post "mount uuid 10"           400 $DM '{"uuid":"0A1B-C2D34"}'
+post "mount uuid not text"     400 $DM '{"uuid":1}'
+post "mount uuid a path"       400 $DM '{"uuid":"../sda1"}'
+post "mount not plugged in"    404 $DM '{"uuid":"0A1B-C2D3"}'
+expect_body "no USB drive plugged in has a FAT or exFAT file system with this UUID" "404 message"
+post "unmount nothing"         409 /api/music/dap/unmount '{}'
+expect_body "no drive is mounted at /mnt/nylm-dap" "unmount message"
+expect 415 "unmount needs json" -b "$JAR" -d '{}' "$B/api/music/dap/unmount"
+query "0" "refused mounts call no root action" \
+    "SELECT count(*) FROM audit WHERE action LIKE 'dap-%'"
+DN=/api/music/dap/name
+post "name no uuid"            400 $DN '{"name":"FiiO"}'
+post "name bad uuid"           400 $DN '{"uuid":"x","name":"FiiO"}'
+post "name no name"            400 $DN '{"uuid":"0A1B-C2D3"}'
+expect_body "'name' must be 1 to 64 bytes of text" "name message"
+post "name empty"              400 $DN '{"uuid":"0A1B-C2D3","name":""}'
+post "name 65 bytes"           400 $DN "{\"uuid\":\"0A1B-C2D3\",\"name\":\"$(printf '%065d' 0)\"}"
+post "name newline"            400 $DN '{"uuid":"0A1B-C2D3","name":"a\nb"}'
+post "name 64 bytes"           200 $DN "{\"uuid\":\"0A1B-C2D3\",\"name\":\"$(printf '%064d' 0)\"}"
+post "name"                    200 $DN '{"uuid":"0A1B-C2D3","name":"FiiO M11 Plus"}'
+post "name again"              200 $DN '{"uuid":"0A1B-C2D3","name":"Car player"}'
+query "0A1B-C2D3|Car player" "the latest name is kept" "SELECT uuid, name FROM daps"
+
 # ---- server ------------------------------------------------------------------
 
 # Every route of the server app needs a login.
@@ -2249,6 +2288,14 @@ lib no "unit, slash"        'valid_unit a/b'
 lib no "unit, empty"        'valid_unit ""'
 lib ok "unit, 128"          "valid_unit $(printf '%0128d' 0)"
 lib no "unit, 129"          "valid_unit $(printf '%0129d' 0)"
+lib ok "fat uuid"           'valid_fat_uuid 0A1B-C2D3'
+lib no "fat uuid, lower"    'valid_fat_uuid 0a1b-c2d3'
+lib no "fat uuid, short"    'valid_fat_uuid 0A1B-C2D'
+lib no "fat uuid, long"     'valid_fat_uuid 0A1B-C2D34'
+lib no "fat uuid, no dash"  'valid_fat_uuid 0A1BXC2D3'
+lib no "fat uuid, ext4"     'valid_fat_uuid 2f9c6a3e-1b2d-4c5e-8f90-a1b2c3d4e5f6'
+lib no "fat uuid, option"   'valid_fat_uuid -A1B-C2D3'
+lib no "fat uuid, empty"    'valid_fat_uuid ""'
 lib ok "container"          'valid_container immich_server-1.x'
 lib no "container, option"  'valid_container -f'
 lib no "container, _ first" 'valid_container _x'
@@ -2289,6 +2336,31 @@ lib no "shown, other entry" 'unit_shown nylm-backup@other.service'
 lib ok "entry paths"        '[ "$(entry_paths immich)" = "$(printf "/srv/immich\n/srv/immich-db")" ]'
 lib no "entry paths, none"  'entry_paths other'
 lib no "entry paths, nylm"  'NYLM_BACKUP="nylm=/srv/x"; entry_paths nylm'
+
+# The DAP actions refuse what they do not take before they touch anything
+# (copies that read the test lib.sh and mount at a test folder).
+for a in dap-mount dap-umount; do
+    sed -e "s#/usr/local/lib/nylm/lib.sh#$TMP/lib.sh#" -e "s#^DAP_MOUNT=.*#DAP_MOUNT=$TMP/dap#" \
+        "deploy/actions/$a" >"$TMP/$a"
+done
+mkdir "$TMP/dap"
+# refused DESCRIPTION WHY SCRIPT ARGS...: the copy exits non-zero saying WHY.
+refused() {
+    desc=$1 why=$2
+    shift 2
+    if sh "$@" >"$TMP/lib.out" 2>&1; then
+        FAILED=$((FAILED + 1)); echo "FAIL: $desc: it ran"
+    elif grep -qF -- "$why" "$TMP/lib.out"; then PASSED=$((PASSED + 1))
+    else FAILED=$((FAILED + 1)); echo "FAIL: $desc: $(cat "$TMP/lib.out")"; fi
+}
+refused "dap-mount, nothing"   "takes one file system UUID" "$TMP/dap-mount"
+refused "dap-mount, two"       "takes one file system UUID" "$TMP/dap-mount" 0A1B-C2D3 x
+refused "dap-mount, lower"     "not a FAT or exFAT file system UUID" "$TMP/dap-mount" 0a1b-c2d3
+refused "dap-mount, a path"    "not a FAT or exFAT file system UUID" "$TMP/dap-mount" ../../sda1
+refused "dap-mount, no drive"  "no drive has a file system with the UUID 0000-0000" \
+    "$TMP/dap-mount" 0000-0000
+refused "dap-umount, argument" "takes no arguments" "$TMP/dap-umount" x
+refused "dap-umount, nothing"  "no drive is mounted at $TMP/dap" "$TMP/dap-umount"
 for bad in 'davis' 'davis=' 'davis=/srv/a,' 'davis=,/srv/a' 'davis=/srv/a,,/srv/b' \
            'davis=/srv/../etc' 'davis=srv' 'Davis=/srv/a'; do
     name=${bad%%=*}

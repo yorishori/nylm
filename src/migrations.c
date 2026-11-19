@@ -433,6 +433,14 @@ const char *const music_migrations[] = {
     "                     CHECK (state IN ('running', 'done', 'failed')),"
     "    note     TEXT    NOT NULL DEFAULT ''"
     ") STRICT;",
+
+    /* 12: DAPs (src/dap.h), by their file system's UUID: the name given to
+     * each in nylm. */
+    "CREATE TABLE daps ("
+    "    uuid  TEXT    PRIMARY KEY CHECK (length(uuid) = 9),"
+    "    name  TEXT    NOT NULL,"
+    "    added INTEGER NOT NULL DEFAULT (unixepoch())"
+    ") STRICT;",
 };
 
 const int music_migration_count = sizeof music_migrations / sizeof music_migrations[0];

@@ -58,6 +58,12 @@ valid_path() {
     [ "${#1}" -le 1024 ]
 }
 
+# A FAT or exFAT file system's UUID as udev and blkid show it: XXXX-XXXX,
+# X an upper-case hex digit (src/dap.c: dap_uuid_valid).
+valid_fat_uuid() {
+    case $1 in [0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F]) ;; *) return 1 ;; esac
+}
+
 # full_unit NAME: the unit's full name as systemd reads it, ".service"
 # added when it has no unit type.
 full_unit() {
