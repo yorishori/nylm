@@ -95,6 +95,11 @@ int music_qobuz_lock(int service);
  * it looks genres up while the library is edited. */
 int music_musicbrainz_lock(int service);
 
+/* The same for the DAP sync (<NYLM_DATA>/music/dap.lock, src/dapsync.h).
+ * While it copies it also holds the library lock shared: tags can be
+ * edited, but no service changes the files. */
+int music_dap_lock(int service);
+
 /*
  * The columns of a track's tags in a query on "tracks t": its pictures (a
  * JSON array of {hash, type, description}), the single-valued tags in

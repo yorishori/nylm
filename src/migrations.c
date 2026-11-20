@@ -410,6 +410,77 @@ const char *const music_migrations[] = {
     "CREATE UNIQUE INDEX changes_one_pending ON changes (track_id, field)"
     "    WHERE state = 'pending';"
     "CREATE INDEX changes_by_state ON changes (state, batch);",
+
+    /* 10: the Navidrome login (src/navidrome.h): the user name and its
+     * password, which the Subsonic API's token login needs as it is (a
+     * secret: never sent to the browser or logged). No row: no login. */
+    "CREATE TABLE navidrome_account ("
+    "    id       INTEGER PRIMARY KEY CHECK (id = 1),"
+    "    user     TEXT    NOT NULL,"
+    "    password TEXT    NOT NULL,"
+    "    saved    INTEGER NOT NULL DEFAULT (unixepoch())"
+    ") STRICT;",
+
+    /* 11: Navidrome's scans around nylm's writes and moves, and the checks
+     * that it answers before them (src/navidrome.h): why, how each went. */
+    "CREATE TABLE navidrome_scans ("
+    "    id       INTEGER PRIMARY KEY,"
+    "    reason   TEXT    NOT NULL CHECK (reason IN ('before-write', 'after-write',"
+    "                     'before-move', 'after-move', 'after-qobuz')),"
+    "    started  INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "    finished INTEGER,"
+    "    state    TEXT    NOT NULL DEFAULT 'running'"
+    "                     CHECK (state IN ('running', 'done', 'failed')),"
+    "    note     TEXT    NOT NULL DEFAULT ''"
+    ") STRICT;",
+
+    /* 12: DAPs (src/dap.h), by their file system's UUID: the name given to
+     * each in nylm. */
+    "CREATE TABLE daps ("
+    "    uuid  TEXT    PRIMARY KEY CHECK (length(uuid) = 9),"
+    "    name  TEXT    NOT NULL,"
+    "    added INTEGER NOT NULL DEFAULT (unixepoch())"
+    ") STRICT;",
+
+    /* 13: what goes on each DAP (src/dapsync.h), by its UUID: an album (by
+     * album and album artist), a track, or a Navidrome playlist (its id,
+     * and its name when it was added). Then each sync: the files planned,
+     * the selected ones the library does not have (missing), and what was
+     * copied, already there (kept), deleted and failed. */
+    "CREATE TABLE dap_items ("
+    "    id          INTEGER PRIMARY KEY,"
+    "    uuid        TEXT    NOT NULL CHECK (length(uuid) = 9),"
+    "    kind        TEXT    NOT NULL CHECK (kind IN ('album', 'track', 'playlist')),"
+    "    album       TEXT,"
+    "    albumartist TEXT,"
+    "    track_id    INTEGER,"
+    "    playlist    TEXT,"
+    "    name        TEXT,"
+    "    added       INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "    CHECK ((kind = 'track') = (track_id IS NOT NULL)),"
+    "    CHECK ((kind = 'playlist') = (playlist IS NOT NULL AND name IS NOT NULL)),"
+    "    CHECK (kind = 'album' OR (album IS NULL AND albumartist IS NULL))"
+    ") STRICT;"
+    "CREATE UNIQUE INDEX dap_items_once ON dap_items (uuid, kind, coalesce(album, ''),"
+    "    coalesce(albumartist, ''), coalesce(track_id, 0), coalesce(playlist, ''));"
+    "CREATE TABLE dap_syncs ("
+    "    id        INTEGER PRIMARY KEY,"
+    "    uuid      TEXT    NOT NULL CHECK (length(uuid) = 9),"
+    "    requested INTEGER NOT NULL DEFAULT (unixepoch()),"
+    "    started   INTEGER,"
+    "    finished  INTEGER,"
+    "    state     TEXT    NOT NULL DEFAULT 'queued' CHECK (state IN"
+    "                      ('queued', 'running', 'done', 'warning', 'failed')),"
+    "    files     INTEGER NOT NULL DEFAULT 0,"
+    "    missing   INTEGER NOT NULL DEFAULT 0,"
+    "    copied    INTEGER NOT NULL DEFAULT 0,"
+    "    kept      INTEGER NOT NULL DEFAULT 0,"
+    "    deleted   INTEGER NOT NULL DEFAULT 0,"
+    "    failed    INTEGER NOT NULL DEFAULT 0,"
+    "    bytes     INTEGER NOT NULL DEFAULT 0,"
+    "    total     INTEGER NOT NULL DEFAULT 0,"
+    "    note      TEXT    NOT NULL DEFAULT ''"
+    ") STRICT;",
 };
 
 const int music_migration_count = sizeof music_migrations / sizeof music_migrations[0];

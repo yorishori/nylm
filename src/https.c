@@ -1,10 +1,12 @@
 /*
- * A small HTTPS client for the Qobuz and MusicBrainz services (src/https.h).
+ * A small HTTP client (src/https.h): HTTPS for the Qobuz and MusicBrainz
+ * services, plain HTTP to this machine for Navidrome.
  */
 #define _POSIX_C_SOURCE 200809L
 
 #include "https.h"
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <netdb.h>
 #include <stdio.h>
@@ -19,6 +21,7 @@
 #include <openssl/ssl.h>
 
 #define TIMEOUT_SECONDS 30
+#define LOCAL_TIMEOUT   10 /* seconds, for a server on this machine */
 #define MAX_URL         4096
 
 int https_split(const char *url, char host[HTTPS_MAX_HOST + 1], int *port, const char **path)
@@ -50,6 +53,43 @@ int https_split(const char *url, char host[HTTPS_MAX_HOST + 1], int *port, const
         p = end;
     }
     if (*p == '#' || *p == '?')
+        return -1;
+    *path = *p == '\0' ? "/" : p;
+    for (const char *c = *path; *c != '\0'; c++)
+        if ((unsigned char)*c <= ' ' || (unsigned char)*c >= 0x7f || *c == '#')
+            return -1;
+    return 0;
+}
+
+int http_local_split(const char *url, char host[HTTPS_MAX_HOST + 1], int *port,
+                     const char **path)
+{
+    static const char scheme[] = "http://";
+    if (url == NULL || strncmp(url, scheme, sizeof scheme - 1) != 0 || strlen(url) > MAX_URL)
+        return -1;
+    const char *h = url + sizeof scheme - 1;
+    size_t n = strspn(h, "0123456789.");
+    struct in_addr a;
+    if (n == 0 || n >= INET_ADDRSTRLEN)
+        return -1;
+    memcpy(host, h, n);
+    host[n] = '\0';
+    /* 127.0.0.0/8 only: the request never leaves this machine. */
+    if (inet_pton(AF_INET, host, &a) != 1 || (ntohl(a.s_addr) >> 24) != 127)
+        return -1;
+    const char *p = h + n;
+    *port = 80;
+    if (*p == ':') {
+        char *end;
+        errno = 0;
+        long v = strtol(p + 1, &end, 10);
+        if (errno != 0 || end == p + 1 || p[1] == '+' || p[1] == '-' || v < 1 || v > 65535 ||
+            (*end != '/' && *end != '\0'))
+            return -1;
+        *port = (int)v;
+        p = end;
+    }
+    if (*p != '/' && *p != '\0')
         return -1;
     *path = *p == '\0' ? "/" : p;
     for (const char *c = *path; *c != '\0'; c++)
@@ -134,8 +174,9 @@ static SSL_CTX *tls(char *err, size_t errlen)
     return ctx;
 }
 
-/* A TCP connection to host:port with timeouts; the fd, or -1 (err set). */
-static int dial(const char *host, int port, char *err, size_t errlen)
+/* A TCP connection to host:port with timeouts (seconds); the fd, or -1
+ * (err set). */
+static int dial(const char *host, int port, int timeout, char *err, size_t errlen)
 {
     char service[8];
     snprintf(service, sizeof service, "%d", port);
@@ -147,7 +188,7 @@ static int dial(const char *host, int port, char *err, size_t errlen)
         return -1;
     }
     int fd = -1;
-    const struct timeval tv = { TIMEOUT_SECONDS, 0 };
+    const struct timeval tv = { timeout, 0 };
     for (struct addrinfo *a = res; a != NULL && fd < 0; a = a->ai_next) {
         fd = socket(a->ai_family, a->ai_socktype | SOCK_CLOEXEC, a->ai_protocol);
         if (fd < 0)
@@ -165,12 +206,24 @@ static int dial(const char *host, int port, char *err, size_t errlen)
     return fd;
 }
 
+/* A connection: through TLS (ssl), or plain on the socket (ssl NULL). */
+struct stream {
+    SSL *ssl;
+    int fd;
+};
+
 /* Writes all of data. 0, or -1. */
-static int send_all(SSL *ssl, const char *data, size_t len)
+static int send_all(const struct stream *s, const char *data, size_t len)
 {
     while (len > 0) {
         int chunk = len > 1 << 20 ? 1 << 20 : (int)len;
-        int n = SSL_write(ssl, data, chunk);
+        long n;
+        if (s->ssl != NULL)
+            n = SSL_write(s->ssl, data, chunk);
+        else
+            do
+                n = send(s->fd, data, (size_t)chunk, MSG_NOSIGNAL);
+            while (n < 0 && errno == EINTR);
         if (n <= 0)
             return -1;
         data += n;
@@ -180,12 +233,20 @@ static int send_all(SSL *ssl, const char *data, size_t len)
 }
 
 /* Reads up to len bytes: the number, 0 at the end, -1 on error. */
-static long receive(SSL *ssl, char *buf, size_t len)
+static long receive(const struct stream *s, char *buf, size_t len)
 {
-    int n = SSL_read(ssl, buf, len > 1 << 20 ? 1 << 20 : (int)len);
+    size_t want = len > 1 << 20 ? 1 << 20 : len;
+    if (s->ssl == NULL) {
+        ssize_t n;
+        do
+            n = recv(s->fd, buf, want, 0);
+        while (n < 0 && errno == EINTR);
+        return n;
+    }
+    int n = SSL_read(s->ssl, buf, (int)want);
     if (n > 0)
         return n;
-    return SSL_get_error(ssl, n) == SSL_ERROR_ZERO_RETURN ? 0 : -1;
+    return SSL_get_error(s->ssl, n) == SSL_ERROR_ZERO_RETURN ? 0 : -1;
 }
 
 /* The value of header name in the header block head (NUL-terminated), or
@@ -205,35 +266,18 @@ static const char *header(const char *head, const char *name)
     return NULL;
 }
 
-int https_request(const char *method, const char *url, const char *const *headers,
-                  const char *type, const char *body, size_t body_len, int fd, size_t max,
-                  struct https_response *out, char *err, size_t errlen)
+/*
+ * Sends the request on the connection s to host and reads the response, as
+ * https_request() says. 0, or -1 with what went wrong in err.
+ */
+static int exchange(const struct stream *s, const char *host, const char *method,
+                    const char *path, const char *const *headers, const char *type,
+                    const char *body, size_t body_len, int fd, size_t max,
+                    struct https_response *out, char *err, size_t errlen)
 {
-    memset(out, 0, sizeof *out);
-    char host[HTTPS_MAX_HOST + 1];
-    int port;
-    const char *path;
-    if (https_split(url, host, &port, &path) != 0) {
-        snprintf(err, errlen, "not an https URL nylm can use");
-        return -1;
-    }
-    SSL_CTX *c = tls(err, errlen);
-    int sock = c != NULL ? dial(host, port, err, errlen) : -1;
-    if (sock < 0)
-        return -1;
-    SSL *ssl = SSL_new(c);
     char *buf = NULL;
     size_t cap = 0, len = 0;
     int ok = 0;
-    if (ssl == NULL || SSL_set_fd(ssl, sock) != 1 || SSL_set_tlsext_host_name(ssl, host) != 1 ||
-        SSL_set1_host(ssl, host) != 1 || SSL_connect(ssl) != 1) {
-        long v = ssl != NULL ? SSL_get_verify_result(ssl) : X509_V_OK;
-        snprintf(err, errlen, "%s: TLS failed: %s", host,
-                 v != X509_V_OK ? X509_verify_cert_error_string(v)
-                                : ERR_reason_error_string(ERR_get_error()));
-        goto done;
-    }
-
     char head[8192];
     int n = snprintf(head, sizeof head,
                      "%s %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n"
@@ -249,7 +293,7 @@ int https_request(const char *method, const char *url, const char *const *header
         snprintf(err, errlen, "request too long");
         goto done;
     }
-    if (send_all(ssl, head, (size_t)n) != 0 || (body != NULL && send_all(ssl, body, body_len) != 0)) {
+    if (send_all(s, head, (size_t)n) != 0 || (body != NULL && send_all(s, body, body_len) != 0)) {
         snprintf(err, errlen, "%s: sending failed", host);
         goto done;
     }
@@ -259,7 +303,7 @@ int https_request(const char *method, const char *url, const char *const *header
     buf = malloc(cap);
     char *end = NULL;
     while (buf != NULL && end == NULL) {
-        long r = len < HTTPS_MAX_HEAD ? receive(ssl, buf + len, HTTPS_MAX_HEAD - len) : -1;
+        long r = len < HTTPS_MAX_HEAD ? receive(s, buf + len, HTTPS_MAX_HEAD - len) : -1;
         if (r <= 0) {
             snprintf(err, errlen, "%s: %s", host, r == 0 ? "the answer ended early"
                                                          : "no valid answer");
@@ -317,7 +361,7 @@ int https_request(const char *method, const char *url, const char *const *header
                     w += (size_t)k;
                 }
             }
-            long r = receive(ssl, buf, HTTPS_MAX_HEAD);
+            long r = receive(s, buf, HTTPS_MAX_HEAD);
             if (r < 0) {
                 snprintf(err, errlen, "%s: the download broke off", host);
                 goto done;
@@ -351,7 +395,7 @@ int https_request(const char *method, const char *url, const char *const *header
             buf = grown;
             cap = next;
         }
-        long r = receive(ssl, buf + len, cap - 1 - len);
+        long r = receive(s, buf + len, cap - 1 - len);
         if (r < 0) {
             snprintf(err, errlen, "%s: the answer broke off", host);
             goto done;
@@ -381,6 +425,38 @@ int https_request(const char *method, const char *url, const char *const *header
     ok = 1;
 done:
     free(buf);
+    return ok ? 0 : -1;
+}
+
+int https_request(const char *method, const char *url, const char *const *headers,
+                  const char *type, const char *body, size_t body_len, int fd, size_t max,
+                  struct https_response *out, char *err, size_t errlen)
+{
+    memset(out, 0, sizeof *out);
+    char host[HTTPS_MAX_HOST + 1];
+    int port;
+    const char *path;
+    if (https_split(url, host, &port, &path) != 0) {
+        snprintf(err, errlen, "not an https URL nylm can use");
+        return -1;
+    }
+    SSL_CTX *c = tls(err, errlen);
+    int sock = c != NULL ? dial(host, port, TIMEOUT_SECONDS, err, errlen) : -1;
+    if (sock < 0)
+        return -1;
+    SSL *ssl = SSL_new(c);
+    int ok = 0;
+    if (ssl == NULL || SSL_set_fd(ssl, sock) != 1 || SSL_set_tlsext_host_name(ssl, host) != 1 ||
+        SSL_set1_host(ssl, host) != 1 || SSL_connect(ssl) != 1) {
+        long v = ssl != NULL ? SSL_get_verify_result(ssl) : X509_V_OK;
+        snprintf(err, errlen, "%s: TLS failed: %s", host,
+                 v != X509_V_OK ? X509_verify_cert_error_string(v)
+                                : ERR_reason_error_string(ERR_get_error()));
+    } else {
+        const struct stream s = { ssl, sock };
+        ok = exchange(&s, host, method, path, headers, type, body, body_len, fd, max, out, err,
+                      errlen) == 0;
+    }
     if (ssl != NULL) {
         if (ok)
             SSL_shutdown(ssl);
@@ -389,4 +465,24 @@ done:
     close(sock);
     ERR_clear_error();
     return ok ? 0 : -1;
+}
+
+int http_local_request(const char *method, const char *url, const char *const *headers,
+                       size_t max, struct https_response *out, char *err, size_t errlen)
+{
+    memset(out, 0, sizeof *out);
+    char host[HTTPS_MAX_HOST + 1];
+    int port;
+    const char *path;
+    if (http_local_split(url, host, &port, &path) != 0) {
+        snprintf(err, errlen, "not an http URL on this machine (127.x.x.x)");
+        return -1;
+    }
+    int sock = dial(host, port, LOCAL_TIMEOUT, err, errlen);
+    if (sock < 0)
+        return -1;
+    const struct stream s = { NULL, sock };
+    int rc = exchange(&s, host, method, path, headers, NULL, NULL, 0, -1, max, out, err, errlen);
+    close(sock);
+    return rc;
 }

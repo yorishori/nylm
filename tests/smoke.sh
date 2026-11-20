@@ -759,7 +759,13 @@ for route in "GET /api/music" "GET /api/music/albums" "GET /api/music/album?trac
              "POST /api/music/remove" "POST /api/music/fix/split-genres" \
              "POST /api/music/fix/composers" "GET /api/music/strays" \
              "POST /api/music/fix/strays" "GET /api/music/musicbrainz" \
-             "POST /api/music/musicbrainz/start"; do
+             "POST /api/music/musicbrainz/start" "GET /api/music/navidrome" \
+             "POST /api/music/navidrome/login" "GET /api/music/navidrome/starred" \
+             "GET /api/music/navidrome/playlists" "GET /api/music/navidrome/playlist?id=x" \
+             "GET /api/music/dap" "POST /api/music/dap/mount" "POST /api/music/dap/unmount" \
+             "POST /api/music/dap/name" "GET /api/music/dap/items?uuid=0A1B-C2D3" \
+             "POST /api/music/dap/items/add" "POST /api/music/dap/items/remove" \
+             "POST /api/music/dap/sync"; do
     expect 401 "${route#* } needs login" -X "${route%% *}" -H "$J" "$B${route#* }"
 done
 
@@ -1733,6 +1739,411 @@ query "2" "B keeps its change, A gets its clean-up" \
 post "discard the clean-up"    200 /api/music/discard '{"all":true}'
 sqlite3 "$MDB" "PRAGMA foreign_keys = ON; DELETE FROM tracks WHERE album GLOB 'Stray ?'"
 
+# ---- navidrome ---------------------------------------------------------------
+
+# Not set up: the page says so, the rest answers 503.
+NL=/api/music/navidrome/login
+expect 200 "navidrome, not set up" -b "$JAR" "$B/api/music/navidrome"
+expect_body '{"configured":false,"url":null,"music":null,"user":null,"connected":false,"version":null,"error":"","scans":[]}' "navidrome off"
+expect 200 "overview, navidrome not set up" -b "$JAR" "$B/api/music"
+expect_body '"navidrome":false,"navidrome_scan":null}' "overview: no Navidrome"
+post "navidrome login, not set up" 503 $NL "{$PW,\"user\":\"admin\",\"navidrome_password\":\"x\"}"
+expect_body "set NYLM_NAVIDROME in /etc/nylm.conf" "not set up message"
+for route in starred playlists "playlist?id=x"; do
+    expect 503 "navidrome $route, not set up" -b "$JAR" "$B/api/music/navidrome/$route"
+done
+# Its settings are checked at start, by every command.
+for bad in http://10.0.0.1:4533 https://127.0.0.1:4533 http://localhost:4533 \
+           "http://127.0.0.1:4533/a/../b" "http://127.0.0.1:4533/?x=1"; do
+    service 1 "NYLM_NAVIDROME=$bad" music-scan NYLM_NAVIDROME="$bad"
+    logged "NYLM_NAVIDROME must be Navidrome's address on this machine" "$bad: why"
+done
+service 1 "NYLM_NAVIDROME without NYLM_MUSIC" music-scan NYLM_MUSIC= \
+    NYLM_NAVIDROME=http://127.0.0.1:4533
+logged "NYLM_NAVIDROME needs NYLM_MUSIC" "without NYLM_MUSIC: why"
+service 1 "NYLM_NAVIDROME_MUSIC relative" music-scan NYLM_NAVIDROME=http://127.0.0.1:4533 \
+    NYLM_NAVIDROME_MUSIC=music
+logged "NYLM_NAVIDROME_MUSIC must be the absolute path" "relative music folder: why"
+
+# A stand-in Navidrome (tests/fake_navidrome.c) on another port: its
+# password, and its answers. Its music folder is /music.
+ND="$TMP/navidrome"
+NDPORT=18090
+mkdir "$ND"
+printf 'nd secret\n' > "$ND/password"
+NDOK='"status":"ok","version":"1.16.1","type":"navidrome","serverVersion":"0.64.2","openSubsonic":true'
+printf '{"subsonic-response":{%s}}' "$NDOK" > "$ND/ping.json"
+printf '{"subsonic-response":{%s,"user":{"username":"admin","adminRole":false}}}' "$NDOK" \
+    > "$ND/getUser.1.json"
+printf '{"subsonic-response":{%s,"user":{"username":"admin","adminRole":true}}}' "$NDOK" \
+    > "$ND/getUser.json"
+NT1=$(sqlite3 "$MDB" "SELECT id FROM tracks WHERE path LIKE '%/01 - Song One.mp3'")
+NT2=$(sqlite3 "$MDB" "SELECT id FROM tracks WHERE path LIKE '%/02 - Song Two.flac'")
+NALBUM=$(sqlite3 "$MDB" "SELECT album FROM tracks WHERE id = $NT1")
+NARTIST=$(sqlite3 "$MDB" "SELECT albumartist FROM tracks WHERE id = $NT1")
+NREL=$(sqlite3 "$MDB" "SELECT substr(path, length('$M') + 2) FROM tracks WHERE id = $NT1")
+NALBUMT=$(sqlite3 "$MDB" "SELECT id FROM tracks WHERE album = '$NALBUM'
+                          AND albumartist = '$NARTIST' ORDER BY path LIMIT 1")
+NREL2=$(sqlite3 "$MDB" "SELECT substr(path, length('$M') + 2) FROM tracks WHERE id = $NT2")
+cat > "$ND/getStarred2.json" <<EOF
+{"subsonic-response":{$NDOK,"starred2":{
+ "album":[{"id":"al-1","name":"$NALBUM","artist":"$NARTIST","year":2001,"songCount":3,"starred":"2026-01-01T00:00:00Z"},
+          {"id":"al-2","name":"Gone","artist":"Nobody","songCount":1}],
+ "song":[{"id":"so-1","title":"Song One","artist":"Some Artist","album":"$NALBUM","duration":180,"path":"/music/$NREL"},
+         {"id":"so-2","title":"Two","album":"$NALBUM","path":"$NREL2"},
+         {"id":"so-3","title":"Gone","path":"/music/Nobody/x.mp3"},
+         {"id":"so-4","title":"Fake","path":"Some Artist/Some Album/01 - Song One.mp3/../../../x"},
+         {"id":"so-5","title":"Elsewhere","path":"/other/$NREL"}]}}}
+EOF
+printf '{"subsonic-response":{%s,"playlists":{"playlist":[{"id":"pl-1","name":"Road","songCount":2,"duration":400,"owner":"admin","public":false},{"id":"pl-2","name":"Empty","songCount":0,"duration":0,"owner":"admin"}]}}}' "$NDOK" > "$ND/getPlaylists.json"
+printf '{"subsonic-response":{%s,"playlist":{"id":"pl-1","name":"Road","entry":[{"id":"so-2","title":"Two","path":"/music/%s"},{"id":"so-9","title":"Nine","path":"/music/x/9.mp3"}]}}}' "$NDOK" "$NREL2" > "$ND/getPlaylist.json"
+NDBIN=build/tests/fake_navidrome
+"$NDBIN" $NDPORT "$ND" 2>"$TMP/navidrome.log" &
+NDPID=$!
+stop
+export NYLM_NAVIDROME="http://127.0.0.1:$NDPORT/" NYLM_NAVIDROME_MUSIC=/music
+start "http://127.0.0.1:$PORT/"
+expect 200 "navidrome, no login" -b "$JAR" "$B/api/music/navidrome"
+expect_body "{\"configured\":true,\"url\":\"http://127.0.0.1:$NDPORT\",\"music\":\"/music\",\"user\":null,\"connected\":false,\"version\":null,\"error\":\"\",\"scans\":[]}" "navidrome set up, no login"
+for route in starred playlists "playlist?id=x"; do
+    expect 409 "navidrome $route, no login" -b "$JAR" "$B/api/music/navidrome/$route"
+    expect_body "nylm has no Navidrome login yet" "$route: no login message"
+done
+# Writes and moves need Navidrome to answer: without a login they do not start.
+Q=/api/music/queue
+post "queue a change"          200 $Q "{\"album\":$NT1,\"set\":{\"mood\":\"calm\"}}"
+post "write, navidrome no login" 409 /api/music/write "{$PW}"
+expect_body "Navidrome is set up but nylm has no login for it: add it in the Navidrome tab (nothing was written)" "write refused"
+post "discard it"              200 /api/music/discard '{"all":true}'
+sqlite3 "$MDB" "UPDATE tracks SET title = 'Song Uno' WHERE id = $NT1"
+post "move, navidrome no login" 409 /api/music/move "{$PW}"
+expect_body "(nothing was moved)" "move refused"
+sqlite3 "$MDB" "UPDATE tracks SET title = 'Song One' WHERE id = $NT1"
+
+# The login: the password again, then Navidrome must accept it, as an admin.
+NLB='"user":"admin","navidrome_password":"nd secret"'
+post "login no password"       400 $NL "{$NLB}"
+post "login wrong password"    403 $NL "{\"password\":\"nope\",$NLB}"
+expect 415 "login needs json"  -b "$JAR" -d "{$PW,$NLB}" "$B$NL"
+post "login no user"           400 $NL "{$PW,\"navidrome_password\":\"x\"}"
+expect_body "'user' must be Navidrome's user name" "user message"
+post "login user not text"     400 $NL "{$PW,\"user\":1,\"navidrome_password\":\"x\"}"
+post "login user empty"        400 $NL "{$PW,\"user\":\"\",\"navidrome_password\":\"x\"}"
+post "login user 65 bytes"     400 $NL "{$PW,\"user\":\"$(printf '%065d' 0)\",\"navidrome_password\":\"x\"}"
+post "login user newline"      400 $NL "{$PW,\"user\":\"a\\nb\",\"navidrome_password\":\"x\"}"
+post "login no nd password"    400 $NL "{$PW,\"user\":\"admin\"}"
+expect_body "'navidrome_password' must be the user's password in Navidrome" "nd password message"
+post "login nd password empty" 400 $NL "{$PW,\"user\":\"admin\",\"navidrome_password\":\"\"}"
+post "login nd password 257"   400 $NL "{$PW,\"user\":\"admin\",\"navidrome_password\":\"$(printf '%0257d' 0)\"}"
+post "login wrong nd password" 400 $NL "{$PW,\"user\":\"admin\",\"navidrome_password\":\"wrong\"}"
+expect_body "Navidrome says: Wrong username or password (code 40)" "Navidrome's refusal"
+post "login not an admin"      400 $NL "{$PW,$NLB}"
+expect_body "admin is not an admin in Navidrome" "admin needed"
+query "0" "refused logins keep nothing" "SELECT count(*) FROM navidrome_account"
+kill "$NDPID"; wait "$NDPID" 2>/dev/null
+post "login, navidrome down"   502 $NL "{$PW,$NLB}"
+expect_body "Navidrome does not answer at http://127.0.0.1:$NDPORT: " "down message"
+rm "$ND/getUser.1.json"
+"$NDBIN" $NDPORT "$ND" 2>>"$TMP/navidrome.log" &
+NDPID=$!
+sleep 0.2
+flock "$LOCK" sleep 2 &
+LOCKER=$!
+sleep 0.3
+post "login while busy"        409 $NL "{$PW,$NLB}"
+wait "$LOCKER"
+post "login"                   200 $NL "{$PW,$NLB}"
+expect_body '{"user":"admin"}' "login kept"
+query "admin|nd secret" "the login is kept" "SELECT user, password FROM navidrome_account"
+query "navidrome-login|{\"user\":\"admin\"}|ok" "the login is audited, without the password" \
+    "SELECT action, detail, result FROM audit ORDER BY id DESC LIMIT 1"
+expect 200 "navidrome, connected" -b "$JAR" "$B/api/music/navidrome"
+expect_body '"user":"admin","connected":true,"version":"0.64.2","error":"",' "connected"
+# Never the password: not to the browser, not to Navidrome (a token), not in the log.
+if grep -q "nd secret" "$TMP/body" "$ND/requests.log" "$TMP/log"; then
+    FAILED=$((FAILED + 1)); echo "FAIL: the Navidrome password was sent or logged"
+else PASSED=$((PASSED + 1)); fi
+if grep -q '^ping u=admin&t=[0-9a-f]\{32\}&s=[0-9a-f]\{16\}&v=1.16.1&c=nylm&f=json$' "$ND/requests.log"
+then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: the call's address: $(tail -1 "$ND/requests.log")"; fi
+grep -o 's=[0-9a-f]*' "$ND/requests.log" | sort | uniq -d > "$TMP/salts"
+if [ -s "$TMP/salts" ]; then FAILED=$((FAILED + 1)); echo "FAIL: a salt was used twice"
+else PASSED=$((PASSED + 1)); fi
+
+# Starred albums and songs, each matched to nylm's tracks: by name and album
+# artist, by path below Navidrome's folder (or relative to it).
+expect 200 "starred"           -b "$JAR" "$B/api/music/navidrome/starred"
+expect_body "{\"albums\":[{\"id\":\"al-1\",\"name\":\"$NALBUM\",\"artist\":\"$NARTIST\",\"year\":2001,\"songs\":3,\"track\":$NALBUMT},{\"id\":\"al-2\",\"name\":\"Gone\",\"artist\":\"Nobody\",\"year\":null,\"songs\":1,\"track\":null}]" "starred albums"
+expect_body "\"songs\":[{\"id\":\"so-1\",\"title\":\"Song One\",\"artist\":\"Some Artist\",\"album\":\"$NALBUM\",\"duration\":180,\"track\":$NT1},{\"id\":\"so-2\",\"title\":\"Two\",\"artist\":null,\"album\":\"$NALBUM\",\"duration\":null,\"track\":$NT2}," "starred songs found"
+expect_body '{"id":"so-3","title":"Gone","artist":null,"album":null,"duration":null,"track":null},{"id":"so-4","title":"Fake","artist":null,"album":null,"duration":null,"track":null},{"id":"so-5","title":"Elsewhere","artist":null,"album":null,"duration":null,"track":null}]}' "songs nylm does not have, or outside the folder"
+expect 200 "playlists"         -b "$JAR" "$B/api/music/navidrome/playlists"
+expect_body '{"playlists":[{"id":"pl-1","name":"Road","songs":2,"duration":400,"owner":"admin"},{"id":"pl-2","name":"Empty","songs":0,"duration":0,"owner":"admin"}]}' "playlists"
+expect 200 "playlist"          -b "$JAR" "$B/api/music/navidrome/playlist?id=pl-1"
+expect_body "{\"id\":\"pl-1\",\"name\":\"Road\",\"songs\":[{\"id\":\"so-2\",\"title\":\"Two\",\"artist\":null,\"album\":null,\"duration\":null,\"track\":$NT2},{\"id\":\"so-9\",\"title\":\"Nine\",\"artist\":null,\"album\":null,\"duration\":null,\"track\":null}]}" "a playlist's songs"
+if grep -q '^getPlaylist .*&f=json&id=pl-1$' "$ND/requests.log"; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: the playlist's id was not sent"; fi
+expect 400 "playlist no id"    -b "$JAR" "$B/api/music/navidrome/playlist"
+expect_body "query parameter 'id' must be a Navidrome playlist id" "id message"
+expect 400 "playlist id empty" -b "$JAR" "$B/api/music/navidrome/playlist?id="
+expect 400 "playlist id &"     -b "$JAR" "$B/api/music/navidrome/playlist?id=a%26u%3Dx"
+expect 400 "playlist id /"     -b "$JAR" "$B/api/music/navidrome/playlist?id=a/b"
+expect 400 "playlist id 65"    -b "$JAR" "$B/api/music/navidrome/playlist?id=$(printf '%065d' 0)"
+expect 200 "playlist id 64"    -b "$JAR" "$B/api/music/navidrome/playlist?id=$(printf '%064d' 0)"
+# Navidrome refuses (a playlist it does not have), or does not answer.
+printf '{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":70,"message":"playlist not found"}}}' > "$ND/getPlaylist.json"
+expect 502 "playlist navidrome refuses" -b "$JAR" "$B/api/music/navidrome/playlist?id=pl-3"
+expect_body "Navidrome says: playlist not found (code 70)" "refusal passed on"
+printf 'not json' > "$ND/getPlaylists.json"
+expect 502 "playlists not json" -b "$JAR" "$B/api/music/navidrome/playlists"
+expect_body "Navidrome's answer is not one nylm can read" "garbage answer"
+rm "$ND/getPlaylists.json"
+expect 502 "playlists 404"     -b "$JAR" "$B/api/music/navidrome/playlists"
+expect_body "Navidrome answered HTTP 404" "wrong address"
+# Scans around writes and moves (src/navidrome.h). nd_answers starts the
+# stand-in again (its counts of calls start again) with the scan statuses
+# it gives, one per getScanStatus call, then the last one for every
+# later call; nd_calls lists the methods it was called with.
+nd_scan_status() { printf '{"subsonic-response":{%s,"scanStatus":{"scanning":%s,"count":3%s}}}' "$NDOK" "$1" "${2:+,\"lastScan\":\"$2\"}"; }
+nd_answers() {
+    kill "$NDPID" 2>/dev/null; wait "$NDPID" 2>/dev/null
+    rm -f "$ND"/getScanStatus*.json "$ND"/startScan*.json "$ND/requests.log"
+    nd_scan_status true > "$ND/startScan.json"
+    i=0
+    for st in "$@"; do
+        i=$((i + 1))
+        nd_scan_status ${st%%@*} "$(echo "$st" | sed -n 's/^[^@]*@//p')" > "$ND/getScanStatus.$i.json"
+    done
+    cp "$ND/getScanStatus.$i.json" "$ND/getScanStatus.json"
+    "$NDBIN" $NDPORT "$ND" 2>>"$TMP/navidrome.log" &
+    NDPID=$!
+    sleep 0.2
+}
+nd_calls() { sed 's/ .*//' "$ND/requests.log" | tr '\n' ' '; }
+# expect_calls WANT DESCRIPTION: the stand-in was called with these methods.
+expect_calls() {
+    if [ "$(nd_calls)" = "$1" ]; then PASSED=$((PASSED + 1)); else
+        FAILED=$((FAILED + 1)); echo "FAIL: $2: calls '$(nd_calls)', want '$1'"; fi
+}
+NS() { sqlite3 "$MDB" "SELECT reason, state, note FROM navidrome_scans ORDER BY id DESC LIMIT 1"; }
+
+# The server checks that Navidrome answers before it starts a write.
+post "queue for a write"       200 $Q "{\"album\":$NT1,\"set\":{\"mood\":\"calm\"}}"
+kill "$NDPID"; wait "$NDPID" 2>/dev/null
+post "write, navidrome down"   502 /api/music/write "{$PW}"
+expect_body "Navidrome does not answer at http://127.0.0.1:$NDPORT: " "write refused, why"
+expect_body ": nothing was written" "write refused, what"
+# The write service checks too: nothing is written, the changes wait.
+service 1 "music-write, navidrome down" music-write
+logged "nothing written: Navidrome does not answer" "write service refuses"
+query "1" "the changes still wait" "SELECT count(*) > 0 FROM changes WHERE state = 'pending'"
+if [ "$(NS | cut -d'|' -f1,2)" = "before-write|failed" ] &&
+   NS | grep -q "Navidrome does not answer at .*: nothing was written$"; then
+    PASSED=$((PASSED + 1)); else FAILED=$((FAILED + 1)); echo "FAIL: refusal recorded: $(NS)"; fi
+# Navidrome up: the write, then a scan that it is seen running.
+nd_answers false@T0 true false@T1
+service 0 "music-write, then a scan" music-write
+logged "navidrome: after-write: scanned in" "scanned after the write"
+expect_calls "ping getScanStatus startScan getScanStatus getScanStatus " "write: check, then scan"
+query "after-write|done|" "the scan after the write" \
+    "SELECT reason, state, note FROM navidrome_scans ORDER BY id DESC LIMIT 1"
+query "0" "the change is written" "SELECT count(*) FROM changes WHERE state = 'pending'"
+expect 200 "overview, the latest scan" -b "$JAR" "$B/api/music"
+expect_body '"navidrome":true,"navidrome_scan":{"id":' "overview shows Navidrome's scan"
+expect_body '"reason":"after-write",' "overview: which scan"
+expect_body '"state":"done","note":""}' "overview: how it went"
+
+# A move: Navidrome scans before (after the scan it runs already ends,
+# then until its lastScan changes) and after. The write read the files
+# again: first the cache has their tags, then one track gets a new title.
+service 0 "scan before the moves" music-scan
+sqlite3 "$MDB" "UPDATE tracks SET title = 'Song Uno' WHERE id = $NT1"
+NPATH() { sqlite3 "$MDB" "SELECT path FROM tracks WHERE id = $NT1"; }
+NFROM=$(NPATH)
+nd_answers true false@T2 false@T3 false@T3 true false@T4
+sed 's/"scanning":true/"scanning":false/' "$ND/startScan.json" > "$ND/startScan.1.json"
+service 0 "music-move, scans around" music-move
+logged "tracks moved, 0 failed" "moved"
+logged "navidrome: after-move: scanned in" "scanned after the move"
+expect_calls "getScanStatus getScanStatus startScan getScanStatus getScanStatus startScan getScanStatus getScanStatus " "move: scans before and after"
+NTO=$(NPATH)
+case "$NTO" in */"01 - Song Uno.mp3") PASSED=$((PASSED + 1)) ;;
+    *) FAILED=$((FAILED + 1)); echo "FAIL: the track's new path: $NTO" ;; esac
+if [ -f "$NTO" ] && [ ! -e "$NFROM" ]; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: the file was not moved to $NTO"; fi
+query "after-move|done" "the scan after" \
+    "SELECT reason, state FROM navidrome_scans ORDER BY id DESC LIMIT 1"
+query "before-move|done" "the scan before" \
+    "SELECT reason, state FROM navidrome_scans ORDER BY id DESC LIMIT 1 OFFSET 1"
+# The scan after fails: the file moved all the same (back to its tag's
+# title); it says so.
+service 0 "scan the moved file" music-scan
+nd_answers false@T5
+printf '{"subsonic-response":{"status":"failed","version":"1.16.1","error":{"code":0,"message":"scan already queued"}}}' > "$ND/startScan.2.json"
+service 1 "music-move, scan after fails" music-move
+logged "tracks moved, 0 failed" "moved back"
+logged "navidrome: after-move: Navidrome says: scan already queued (code 0)" "why the scan failed"
+query "after-move|failed|Navidrome says: scan already queued (code 0)" "the failed scan recorded" \
+    "SELECT reason, state, note FROM navidrome_scans ORDER BY id DESC LIMIT 1"
+NBACK=$(NPATH)
+if [ -f "$NBACK" ] && [ "$NBACK" != "$NTO" ] && [ ! -e "$NTO" ]; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: the file did not move back ($NBACK)"; fi
+# Navidrome down: the move does not start, nothing moves.
+sqlite3 "$MDB" "UPDATE tracks SET title = 'Song Dos' WHERE id = $NT1"
+kill "$NDPID"; wait "$NDPID" 2>/dev/null
+post "move, navidrome down"    502 /api/music/move "{$PW}"
+expect_body ": nothing was moved" "move refused"
+service 1 "music-move, navidrome down" music-move
+logged "nothing moved: Navidrome's scan before the move failed" "move service refuses"
+if [ -f "$NBACK" ] && [ "$(NPATH)" = "$NBACK" ]; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: a file moved while Navidrome was down"; fi
+query "before-move|failed" "the refusal recorded" \
+    "SELECT reason, state FROM navidrome_scans ORDER BY id DESC LIMIT 1"
+service 0 "scan back to the file's tags" music-scan
+query "0" "the cache has the file's title again" \
+    "SELECT count(*) FROM tracks WHERE title = 'Song Dos'"
+nd_answers false@T6
+expect 200 "navidrome, its scans" -b "$JAR" "$B/api/music/navidrome"
+expect_body '"scans":[{"id":' "the scans are listed"
+expect_body '"reason":"before-move","started":' "newest first"
+kill "$NDPID"; wait "$NDPID" 2>/dev/null
+expect 502 "starred, navidrome down" -b "$JAR" "$B/api/music/navidrome/starred"
+expect_body "Navidrome does not answer at" "down message"
+expect 200 "navidrome, down"   -b "$JAR" "$B/api/music/navidrome"
+expect_body '"user":"admin","connected":false,"version":null,"error":"Navidrome does not answer at' "down shown"
+stop
+unset NYLM_NAVIDROME NYLM_NAVIDROME_MUSIC
+start "http://127.0.0.1:$PORT/"
+
+# ---- DAPs --------------------------------------------------------------------
+
+# The USB drives with FAT or exFAT plugged into this machine: none here, and
+# nothing at the mount point. Mounting needs the root action, so only the
+# refusals are checked.
+DM=/api/music/dap/mount
+expect 200 "dap"               -b "$JAR" "$B/api/music/dap"
+expect_body '{"drives":[],"mount":"/mnt/nylm-dap","other":false,"mounted":null,"syncing":false,"syncs":[]}' "no DAP"
+expect 415 "mount needs json"  -b "$JAR" -d '{"uuid":"0A1B-C2D3"}' "$B$DM"
+post "mount no uuid"           400 $DM '{}'
+expect_body "'uuid' must be a FAT or exFAT file system's UUID, like ABCD-1234" "uuid message"
+post "mount uuid lower case"   400 $DM '{"uuid":"0a1b-c2d3"}'
+post "mount uuid ext4"         400 $DM '{"uuid":"2f9c6a3e-1b2d-4c5e-8f90-a1b2c3d4e5f6"}'
+post "mount uuid 8"            400 $DM '{"uuid":"0A1BC2D3"}'
+post "mount uuid 10"           400 $DM '{"uuid":"0A1B-C2D34"}'
+post "mount uuid not text"     400 $DM '{"uuid":1}'
+post "mount uuid a path"       400 $DM '{"uuid":"../sda1"}'
+post "mount not plugged in"    404 $DM '{"uuid":"0A1B-C2D3"}'
+expect_body "no USB drive plugged in has a FAT or exFAT file system with this UUID" "404 message"
+post "unmount nothing"         409 /api/music/dap/unmount '{}'
+expect_body "no drive is mounted at /mnt/nylm-dap" "unmount message"
+expect 415 "unmount needs json" -b "$JAR" -d '{}' "$B/api/music/dap/unmount"
+query "0" "refused mounts call no root action" \
+    "SELECT count(*) FROM audit WHERE action LIKE 'dap-%'"
+DN=/api/music/dap/name
+post "name no uuid"            400 $DN '{"name":"FiiO"}'
+post "name bad uuid"           400 $DN '{"uuid":"x","name":"FiiO"}'
+post "name no name"            400 $DN '{"uuid":"0A1B-C2D3"}'
+expect_body "'name' must be 1 to 64 bytes of text" "name message"
+post "name empty"              400 $DN '{"uuid":"0A1B-C2D3","name":""}'
+post "name 65 bytes"           400 $DN "{\"uuid\":\"0A1B-C2D3\",\"name\":\"$(printf '%065d' 0)\"}"
+post "name newline"            400 $DN '{"uuid":"0A1B-C2D3","name":"a\nb"}'
+post "name 64 bytes"           200 $DN "{\"uuid\":\"0A1B-C2D3\",\"name\":\"$(printf '%064d' 0)\"}"
+post "name"                    200 $DN '{"uuid":"0A1B-C2D3","name":"FiiO M11 Plus"}'
+post "name again"              200 $DN '{"uuid":"0A1B-C2D3","name":"Car player"}'
+query "0A1B-C2D3|Car player" "the latest name is kept" "SELECT uuid, name FROM daps"
+
+# What goes on a DAP: albums (by one of their tracks), tracks, playlists.
+DI=/api/music/dap/items
+DA=/api/music/dap/items/add
+DU=0A1B-C2D3
+DT=$(sqlite3 "$MDB" "SELECT min(id) FROM tracks")
+DALBUM=$(sqlite3 "$MDB" "SELECT count(*) || '|' || sum(size) FROM tracks
+                         WHERE album IS (SELECT album FROM tracks WHERE id = $DT)
+                         AND albumartist IS (SELECT albumartist FROM tracks WHERE id = $DT)")
+expect 200 "items, none"       -b "$JAR" "$B$DI?uuid=$DU"
+expect_body '{"items":[],"tracks":0,"size":0}' "nothing on the DAP yet"
+expect 400 "items no uuid"     -b "$JAR" "$B$DI"
+expect_body "query parameter 'uuid' must be a FAT or exFAT file system's UUID" "uuid message"
+expect 400 "items bad uuid"    -b "$JAR" "$B$DI?uuid=0a1b-c2d3"
+expect 415 "add needs json"    -b "$JAR" -d "{\"uuid\":\"$DU\",\"track\":$DT}" "$B$DA"
+post "add no uuid"             400 $DA "{\"track\":$DT}"
+post "add nothing"             400 $DA "{\"uuid\":\"$DU\"}"
+expect_body "give one of 'album' (a track of it), 'track' or 'playlist'" "add message"
+post "add two things"          400 $DA "{\"uuid\":\"$DU\",\"track\":$DT,\"album\":$DT}"
+post "add album text"          400 $DA "{\"uuid\":\"$DU\",\"album\":\"Some Album\"}"
+expect_body "'album' must be the id of one of its tracks" "album message"
+post "add track 0"             400 $DA "{\"uuid\":\"$DU\",\"track\":0}"
+post "add track missing"       404 $DA "{\"uuid\":\"$DU\",\"track\":999999}"
+post "add album missing"       404 $DA "{\"uuid\":\"$DU\",\"album\":999999}"
+post "add playlist bad id"     400 $DA "{\"uuid\":\"$DU\",\"playlist\":\"a/b\",\"name\":\"x\"}"
+post "add playlist no name"    400 $DA "{\"uuid\":\"$DU\",\"playlist\":\"pl-1\"}"
+expect_body "'name' must be the playlist's name" "playlist name message"
+post "add playlist, no navidrome" 503 $DA "{\"uuid\":\"$DU\",\"playlist\":\"pl-1\",\"name\":\"Road\"}"
+post "add album"               200 $DA "{\"uuid\":\"$DU\",\"album\":$DT}"
+expect_body '{"added":true}' "album added"
+post "add album again"         200 $DA "{\"uuid\":\"$DU\",\"album\":$DT}"
+expect_body '{"added":false}' "an album once"
+post "add a track of it"       200 $DA "{\"uuid\":\"$DU\",\"track\":$DT}"
+post "add to another DAP"      200 $DA "{\"uuid\":\"1234-ABCD\",\"track\":$DT}"
+query "album|track" "what goes on the DAP" \
+    "SELECT group_concat(kind, '|') FROM dap_items WHERE uuid = '$DU' ORDER BY id"
+expect 200 "items"             -b "$JAR" "$B$DI?uuid=$DU"
+expect_body "\"kind\":\"album\"," "the album is listed"
+expect_body "\"kind\":\"track\"," "the track is listed"
+expect_body "\"track\":$DT,\"tracks\":${DALBUM%|*},\"size\":${DALBUM#*|}}" "the album's tracks and size"
+expect_body "\"tracks\":${DALBUM%|*},\"size\":${DALBUM#*|}}" "a track in a selected album counts once"
+DR=/api/music/dap/items/remove
+DID=$(sqlite3 "$MDB" "SELECT id FROM dap_items WHERE uuid = '$DU' AND kind = 'track'")
+post "remove no id"            400 $DR '{}'
+post "remove bad id"           400 $DR '{"id":"x"}'
+post "remove missing"          404 $DR '{"id":999999}'
+post "remove"                  200 $DR "{\"id\":$DID}"
+query "1" "removed" "SELECT count(*) FROM dap_items WHERE uuid = '$DU'"
+
+# A sync: the password again, a DAP mounted, nothing else running.
+DS=/api/music/dap/sync
+post "sync no password"        400 $DS '{}'
+post "sync wrong password"     403 $DS '{"password":"nope"}'
+expect 415 "sync needs json"   -b "$JAR" -d "{$PW}" "$B$DS"
+post "sync, nothing mounted"   409 $DS "{$PW}"
+expect_body "mount the DAP first" "sync message"
+query "0" "a refused sync queues nothing" "SELECT count(*) FROM dap_syncs"
+# The service: nothing queued; a queued sync with no DAP mounted fails, says why.
+service 0 "dap-sync, nothing queued" dap-sync
+logged "no sync is queued" "nothing to do"
+sqlite3 "$MDB" "INSERT INTO dap_syncs (uuid) VALUES ('$DU')"
+service 1 "dap-sync, no DAP mounted" dap-sync
+logged "no DAP is mounted at /mnt/nylm-dap" "why it failed"
+query "failed|no DAP is mounted at /mnt/nylm-dap" "the sync recorded" \
+    "SELECT state, note FROM dap_syncs ORDER BY id DESC LIMIT 1"
+expect 200 "dap, its syncs"    -b "$JAR" "$B/api/music/dap"
+expect_body "\"syncing\":false,\"syncs\":[{\"id\":1,\"uuid\":\"$DU\"," "the sync is listed"
+# While a sync runs: no library service, no unmount, no second sync.
+flock "$TMP/data/music/dap.lock" sleep 8 &
+LOCKER=$!
+sleep 0.3
+expect 200 "dap while syncing" -b "$JAR" "$B/api/music/dap"
+expect_body '"syncing":true,' "a sync runs"
+post "write while syncing"     409 /api/music/write "{$PW}"
+expect_body "a DAP sync is copying the library" "write refused"
+post "move while syncing"      409 /api/music/move "{$PW}"
+post "scan while syncing"      409 /api/music/scan "{$PW}"
+post "qobuz while syncing"     409 /api/music/qobuz/start "{$PW,\"login\":\"http://localhost/?code=abc\"}"
+post "unmount while syncing"   409 /api/music/dap/unmount '{}'
+expect_body "a DAP sync is running" "unmount refused"
+service 1 "dap-sync while one runs" dap-sync
+logged "the DAP sync: the service already runs" "a second sync refuses"
+wait "$LOCKER"
+# And none while a library service runs.
+flock "$LOCK" sleep 2 &
+LOCKER=$!
+sleep 0.3
+sqlite3 "$MDB" "INSERT INTO dap_syncs (uuid) VALUES ('$DU')"
+service 1 "dap-sync while the library is busy" dap-sync
+logged "the library is busy" "sync refuses"
+query "queued" "the sync still waits" "SELECT state FROM dap_syncs ORDER BY id DESC LIMIT 1"
+wait "$LOCKER"
+sqlite3 "$MDB" "DELETE FROM dap_syncs WHERE state = 'queued'"
+
 # ---- server ------------------------------------------------------------------
 
 # Every route of the server app needs a login.
@@ -1972,6 +2383,14 @@ lib no "unit, slash"        'valid_unit a/b'
 lib no "unit, empty"        'valid_unit ""'
 lib ok "unit, 128"          "valid_unit $(printf '%0128d' 0)"
 lib no "unit, 129"          "valid_unit $(printf '%0129d' 0)"
+lib ok "fat uuid"           'valid_fat_uuid 0A1B-C2D3'
+lib no "fat uuid, lower"    'valid_fat_uuid 0a1b-c2d3'
+lib no "fat uuid, short"    'valid_fat_uuid 0A1B-C2D'
+lib no "fat uuid, long"     'valid_fat_uuid 0A1B-C2D34'
+lib no "fat uuid, no dash"  'valid_fat_uuid 0A1BXC2D3'
+lib no "fat uuid, ext4"     'valid_fat_uuid 2f9c6a3e-1b2d-4c5e-8f90-a1b2c3d4e5f6'
+lib no "fat uuid, option"   'valid_fat_uuid -A1B-C2D3'
+lib no "fat uuid, empty"    'valid_fat_uuid ""'
 lib ok "container"          'valid_container immich_server-1.x'
 lib no "container, option"  'valid_container -f'
 lib no "container, _ first" 'valid_container _x'
@@ -2012,6 +2431,32 @@ lib no "shown, other entry" 'unit_shown nylm-backup@other.service'
 lib ok "entry paths"        '[ "$(entry_paths immich)" = "$(printf "/srv/immich\n/srv/immich-db")" ]'
 lib no "entry paths, none"  'entry_paths other'
 lib no "entry paths, nylm"  'NYLM_BACKUP="nylm=/srv/x"; entry_paths nylm'
+
+# The DAP actions refuse what they do not take before they touch anything
+# (copies that read the test lib.sh and mount at a test folder).
+for a in dap-mount dap-umount; do
+    sed -e "s#/usr/local/lib/nylm/lib.sh#$TMP/lib.sh#" -e "s#^DAP_MOUNT=.*#DAP_MOUNT=$TMP/dap#" \
+        "deploy/actions/$a" >"$TMP/$a"
+done
+mkdir "$TMP/dap"
+# refused DESCRIPTION WHY SCRIPT ARGS...: the copy exits non-zero saying WHY.
+refused() {
+    desc=$1 why=$2
+    shift 2
+    if sh "$@" >"$TMP/lib.out" 2>&1; then
+        FAILED=$((FAILED + 1)); echo "FAIL: $desc: it ran"
+    elif grep -qF -- "$why" "$TMP/lib.out"; then PASSED=$((PASSED + 1))
+    else FAILED=$((FAILED + 1)); echo "FAIL: $desc: $(cat "$TMP/lib.out")"; fi
+}
+refused "dap-mount, nothing"   "takes one file system UUID" "$TMP/dap-mount"
+refused "dap-mount, two"       "takes one file system UUID" "$TMP/dap-mount" 0A1B-C2D3 x
+refused "dap-mount, lower"     "not a FAT or exFAT file system UUID" "$TMP/dap-mount" 0a1b-c2d3
+refused "dap-mount, a path"    "not a FAT or exFAT file system UUID" "$TMP/dap-mount" ../../sda1
+refused "dap-mount, no drive"  "no drive has a file system with the UUID 0000-0000" \
+    "$TMP/dap-mount" 0000-0000
+refused "dap-umount, argument" "takes no arguments" "$TMP/dap-umount" x
+refused "dap-umount, nothing"  "no drive is mounted at $TMP/dap" "$TMP/dap-umount"
+refused "dap-sync, argument"   "takes no arguments" deploy/actions/dap-sync x
 for bad in 'davis' 'davis=' 'davis=/srv/a,' 'davis=,/srv/a' 'davis=/srv/a,,/srv/b' \
            'davis=/srv/../etc' 'davis=srv' 'Davis=/srv/a'; do
     name=${bad%%=*}

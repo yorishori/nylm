@@ -32,6 +32,7 @@
 #include "image.h"
 #include "move.h"
 #include "music.h"
+#include "navidrome.h"
 #include "qobuz.h"
 #include "tags.h"
 
@@ -747,8 +748,14 @@ int qobuz_run(void)
     music_unlock(lock);
     if (albums > 0)
         printf("qobuz: %d albums downloaded, %d with tracks saved\n", albums, scans);
-    /* Reads what was saved into the cache. */
+    /* Reads what was saved into the cache, then Navidrome does. */
     if (rc == 0 && scans > 0 && music_scan(NULL) != 0)
         rc = 1;
+    if (scans > 0 && navidrome_url() != NULL) {
+        int library = music_start_service("qobuz");
+        if (library < 0 || navidrome_scan("after-qobuz") != 0)
+            rc = 1;
+        music_unlock(library);
+    }
     return rc == 0 ? 0 : 1;
 }

@@ -23,6 +23,7 @@
 #include "arena.h"
 #include "db.h"
 #include "music.h"
+#include "navidrome.h"
 #include "tags.h"
 
 #define MOVE_MAX_OTHERS 10000 /* entries of one folder that go along with its tracks */
@@ -36,11 +37,7 @@ static int unsafe(unsigned char c)
     return c < 0x20 || c == 0x7f || (c != '\0' && strchr("/\\:*?\"<>|", c) != NULL);
 }
 
-/*
- * s made safe as one name of at most max bytes (see move_target), into out
- * (room for max + 1). Its length.
- */
-static size_t safe_name(const char *s, char *out, size_t max)
+size_t move_safe_name(const char *s, char *out, size_t max)
 {
     while (*s == ' ')
         s++;
@@ -105,9 +102,9 @@ const char *move_target(const char *albumartist, const char *album, const char *
 
     char artist_part[MOVE_MAX_NAME + 1], album_part[MOVE_MAX_NAME + 1];
     char title_part[MOVE_MAX_NAME + 1];
-    safe_name(albumartist, artist_part, MOVE_MAX_NAME);
-    safe_name(album, album_part, MOVE_MAX_NAME);
-    safe_name(title, title_part, MOVE_MAX_NAME - fixed);
+    move_safe_name(albumartist, artist_part, MOVE_MAX_NAME);
+    move_safe_name(album, album_part, MOVE_MAX_NAME);
+    move_safe_name(title, title_part, MOVE_MAX_NAME - fixed);
     int len = snprintf(out, outlen, "%s/%s/%s%s.%s", artist_part, album_part, number,
                        title_part, ext);
     if (len < 0 || (size_t)len >= outlen)
@@ -478,6 +475,13 @@ int music_move(void)
     struct move_plan plan;
     struct move_counts n = { 0 };
     int rc = move_plan(&plan);
+    /* Navidrome has read every file's tags as they are before any moves:
+     * it matches a moved file by them (navidrome.h). */
+    if (rc == 0 && plan.moves > 0 && navidrome_scan("before-move") != 0) {
+        fprintf(stderr, "music: nothing moved: Navidrome's scan before the move failed\n");
+        close(lock);
+        return 1;
+    }
     struct source *sources = rc == 0 ? arena_alloc((plan.moves + 1) * sizeof *sources) : NULL;
     if (rc == 0 && sources == NULL) {
         fprintf(stderr, "move: out of memory\n");
@@ -532,6 +536,7 @@ int music_move(void)
                n.moved, n.failed, plan.problems, n.others, n.kept, n.folders);
     else
         fprintf(stderr, "music: move stopped (database error)\n");
+    int scanned = n.moved + n.others == 0 || navidrome_scan("after-move") == 0;
     close(lock);
-    return rc == 0 ? 0 : 1;
+    return rc == 0 && scanned ? 0 : 1;
 }

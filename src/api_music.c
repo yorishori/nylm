@@ -32,6 +32,7 @@
 #include "json.h"
 #include "move.h"
 #include "music.h"
+#include "navidrome.h"
 #include "qobuz.h"
 #include "tags.h"
 
@@ -358,7 +359,9 @@ static int add_last_scan(cJSON *obj)
  * GET /api/music: whether music is set up, the folder, which service runs
  * (busy: "scan", "write", "busy" or null), the scan running now (path null:
  * the whole library) and how many wait, pending changes, the last scan of
- * the whole library, and counts of the library.
+ * the whole library, counts of the library, whether Navidrome is set up
+ * (navidrome) and its latest scan or check (navidrome_scan: id, reason,
+ * started, finished, state, note; null if none or not set up).
  */
 void music_overview(struct request *req, struct response *res)
 {
@@ -402,6 +405,18 @@ void music_overview(struct request *req, struct response *res)
     sqlite3_finalize(st);
     if (!ok || (rc != SQLITE_ROW && rc != SQLITE_DONE) || running == NULL ||
         !cJSON_AddItemToObject(obj, "running", running))
+        goto fail;
+    st = navidrome_url() != NULL ? db_prepare(music_db,
+        "SELECT id, reason, started, finished, state, note FROM navidrome_scans"
+        " ORDER BY id DESC LIMIT 1") : NULL;
+    rc = st != NULL ? sqlite3_step(st) : navidrome_url() != NULL ? SQLITE_ERROR : SQLITE_DONE;
+    cJSON *nd = rc == SQLITE_ROW ? json_row(st, 6) : cJSON_CreateNull();
+    if (rc != SQLITE_ROW && rc != SQLITE_DONE)
+        db_log_error(music_db, "navidrome scan");
+    sqlite3_finalize(st);
+    if ((rc != SQLITE_ROW && rc != SQLITE_DONE) || nd == NULL ||
+        cJSON_AddBoolToObject(obj, "navidrome", navidrome_url() != NULL) == NULL ||
+        !cJSON_AddItemToObject(obj, "navidrome_scan", nd))
         goto fail;
     json_reply(res, 200, obj);
     return;
@@ -2634,6 +2649,50 @@ static cJSON *password_checked(struct request *req, struct response *res)
     return audit_password_ok(body, res) ? body : NULL;
 }
 
+/* 1 if no DAP sync runs (it copies the library's files: nothing may change
+ * them meanwhile); else replies 409 (500) and returns 0. */
+static int dap_idle(struct response *res)
+{
+    int lock = music_dap_lock(0);
+    if (lock >= 0) {
+        music_unlock(lock);
+        return 1;
+    }
+    json_error(res, lock == MUSIC_BUSY ? 409 : 500,
+               lock == MUSIC_BUSY ? "a DAP sync is copying the library: try again when it is "
+                                    "done"
+                                  : "internal error");
+    return 0;
+}
+
+/*
+ * With Navidrome set up, a write or a move starts only when it answers with
+ * the kept login (src/navidrome.h; the service checks again). 1 if it may
+ * start; else replies (409 no login, 502, 500) and returns 0. what: what
+ * would not happen ("written", "moved").
+ */
+static int navidrome_answers(struct response *res, const char *what)
+{
+    if (navidrome_url() == NULL)
+        return 1;
+    const char *user;
+    int found = navidrome_login(&user);
+    if (found <= 0) {
+        json_error(res, found == 0 ? 409 : 500,
+                   found == 0 ? message("Navidrome is set up but nylm has no login for it: add "
+                                        "it in the Navidrome tab (nothing was %s)%s", what, "")
+                              : "internal error");
+        return 0;
+    }
+    char err[400];
+    if (navidrome_call("ping", "", NULL, NULL, NULL, err, sizeof err) == NULL) {
+        fprintf(stderr, "music: Navidrome: %s\n", err);
+        json_error(res, 502, message("%s: nothing was %s", err, what));
+        return 0;
+    }
+    return 1;
+}
+
 /*
  * Records the start in the audit table and runs the root action, which
  * starts the service; the caller holds the lock, so no service can start
@@ -2678,7 +2737,7 @@ static void start_action(struct request *req, struct response *res, int lock, in
 void music_scan_start(struct request *req, struct response *res)
 {
     cJSON *body = password_checked(req, res);
-    if (body == NULL)
+    if (body == NULL || !dap_idle(res))
         return;
     long long track = 0;
     if (cJSON_GetObjectItemCaseSensitive(body, "track") != NULL) {
@@ -2769,7 +2828,7 @@ void music_moves(struct request *req, struct response *res)
  * has to move. -> 202 */
 void music_move_start(struct request *req, struct response *res)
 {
-    if (password_checked(req, res) == NULL)
+    if (password_checked(req, res) == NULL || !dap_idle(res))
         return;
     int lock = lock_for_write(res);
     if (lock < 0)
@@ -2789,6 +2848,10 @@ void music_move_start(struct request *req, struct response *res)
     if (refused != NULL) {
         music_unlock(lock);
         json_error(res, 409, refused);
+        return;
+    }
+    if (!navidrome_answers(res, "moved")) {
+        music_unlock(lock);
         return;
     }
     start_action(req, res, lock, 0, "music-move", NULL, "{}");
@@ -2861,7 +2924,7 @@ void music_qobuz(struct request *req, struct response *res)
 void music_qobuz_start(struct request *req, struct response *res)
 {
     cJSON *body = password_checked(req, res);
-    if (body == NULL)
+    if (body == NULL || !dap_idle(res))
         return;
     const cJSON *login = cJSON_GetObjectItemCaseSensitive(body, "login");
     const cJSON *urls = cJSON_GetObjectItemCaseSensitive(body, "urls");
@@ -3017,7 +3080,7 @@ void music_musicbrainz_start(struct request *req, struct response *res)
 /* POST /api/music/write {password}: starts nylm-music-write.service. -> 202 */
 void music_write_start(struct request *req, struct response *res)
 {
-    if (password_checked(req, res) == NULL)
+    if (password_checked(req, res) == NULL || !dap_idle(res))
         return;
     int lock = lock_for_write(res);
     if (lock < 0)
@@ -3027,6 +3090,10 @@ void music_write_start(struct request *req, struct response *res)
         music_unlock(lock);
         json_error(res, pending == 0 ? 409 : 500,
                    pending == 0 ? "there are no pending changes to write" : "internal error");
+        return;
+    }
+    if (!navidrome_answers(res, "written")) {
+        music_unlock(lock);
         return;
     }
     start_action(req, res, lock, 0, "music-write", NULL, "{}");

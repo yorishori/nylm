@@ -40,7 +40,10 @@ browser ── HTTPS ─> nylm ──> /api/*  router ──> handler ──> SQ
 | `src/qobuz.c`     | Qobuz without the network: links, login, bundle, tags    |
 | `src/qobuz_*.c`   | `nylm-qobuz`, the Qobuz service (its own binary)         |
 | `src/musicbrainz*.c` | `nylm-musicbrainz`, album ids and genres from MusicBrainz |
-| `src/https.c`     | HTTPS client (libssl), only in the two services above    |
+| `src/https.c`     | HTTP client: HTTPS (libssl) for the two services above, plain HTTP to Navidrome |
+| `src/navidrome.c` | Navidrome's Subsonic API: login, calls, song paths       |
+| `src/dap.c`       | DAPs: the USB drives with FAT or exFAT, from /sys and udev |
+| `src/dapsync.c`   | `nylm dap-sync`: the selection copied to the DAP         |
 | `src/tags.c`      | music file tags through TagLib: read, write, verify      |
 | `src/art.c`       | album art files, named by SHA-256; base64                |
 | `src/image.c`     | thumbnails (libjpeg-turbo, libpng), only in the services |
@@ -72,7 +75,7 @@ $NYLM_DATA/plants/plants.db   plant care
 $NYLM_DATA/plants/photos/     journal photos: each once, and its thumbnail
 $NYLM_DATA/music/music.db     music tags cache, changes, scans, audit log
 $NYLM_DATA/music/art/         album art: each picture once, and its thumbnail
-$NYLM_DATA/music/*.lock       the library's lock, the Qobuz and MusicBrainz services
+$NYLM_DATA/music/*.lock       the library's lock, the Qobuz, MusicBrainz and DAP services
 $NYLM_DATA/server/server.db   server app: audit log, WireGuard peer names
 $NYLM_DATA/notes/notes.db     reminders, notes and their tags
 ```
@@ -341,7 +344,9 @@ A track without album artist, album, title or an `X/Y` track number (or
 with a disc number that is not `X/Y`) stays, and so do two tracks that
 would get the same name. When all the tracks of a folder went to one
 folder, the folder's other files go there too; emptied folders are
-removed. Navidrome sees a moved file as a new one.
+removed. Navidrome keeps a moved file's plays, stars and playlists when it
+has read the file's tags before the move and they did not change in the
+same scan (see Navidrome below).
 
 TagLib writes in place. It saves MP3 tags as ID3v2.4 (upgrading ID3v2.3)
 and adds an ID3v1 tag; both stay as TagLib writes them.
@@ -440,6 +445,85 @@ skipped are.
 The service holds `$NYLM_DATA/music/musicbrainz.lock` while it runs (one
 job at a time), so the library can be edited meanwhile; it does not need
 `NYLM_MUSIC`.
+
+Navidrome (`src/navidrome.c`, `src/api_navidrome.c`, API under
+`/api/music/navidrome`), optional: the music server on this machine that
+reads the same music folder. Set `NYLM_NAVIDROME` to its address, an
+address in 127.0.0.0/8 (`http://127.0.0.1:4533`, a path after it if it
+has one), and `NYLM_NAVIDROME_MUSIC` to the music folder as its container
+sees it when that is not the path of `NYLM_MUSIC` (`/music`). nylm uses its
+Subsonic API over plain HTTP, never off the machine (10 s timeouts), as
+the player `nylm`, with a login of a Navidrome admin: the Navidrome tab
+keeps it (`POST /api/music/navidrome/login`, nylm's password again,
+audited) once Navidrome accepts it, in `music.db` (`navidrome_account`),
+as the token login needs the password itself; it never goes to the
+browser, the log or Navidrome (each call sends MD5(password + a new
+salt)). The tab lists Navidrome's starred albums and songs and its
+playlists (`GET /api/music/navidrome/starred`, `.../playlists`,
+`.../playlist?id=`), each matched to nylm's library: a song by its path
+(turn on Report Real Path for the player `nylm` in Navidrome: Settings,
+Players), an album by its name and album artist.
+
+Navidrome's scans (`navidrome_scans`): Navidrome matches a moved file to
+the one it knew by its tags (its persistent id: the MusicBrainz track id,
+else album, disc, track number and title), so it must read new tags
+before the files move, and a move needs a scan of its own. With
+Navidrome set up, the write service first checks that it answers, and
+has it scan after writing; the move service has it scan before and after
+moving; nylm-qobuz after saving downloads. Each scan waits for one
+Navidrome runs already, then asks for its own (`startScan`) and waits
+until `getScanStatus` says it ended (at most an hour). When Navidrome
+does not answer, the server refuses Write and Move (502; 409 without a
+login) and the services change nothing; a scan after the files changed
+that fails is recorded, and the Files and Changes tabs say to start one
+in Navidrome by hand. The Navidrome tab lists the last 20.
+
+DAP (`src/dap.c`, `src/api_dap.c`, API under `/api/music/dap`): a digital
+audio player plugged into the server as a USB drive (mass storage). The
+DAP tab lists the file systems that are FAT or exFAT on a disk below a USB
+port (`/sys/block`, udev's `/run/udev/data`, `/proc/self/mountinfo`; no
+root): label, maker, model, size, UUID. One at a time is mounted at
+`/mnt/nylm-dap` (`install.sh` makes the folder) by the root action
+`dap-mount UUID`, which checks it all again (a `/dev/sd*` disk on USB, FAT
+or exFAT, mounted nowhere, the mount point free) and mounts it for user
+`nylm` with `nosuid,nodev,noexec`; `dap-umount` writes out what is cached
+and unmounts it, so it can be unplugged. Both are recorded in the audit
+table. A DAP can be given a name (`daps`, by its UUID). The actions use
+`blkid`, `findmnt`, `mountpoint`, `mount` and `umount` (util-linux).
+
+What goes on a DAP (`dap_items`, by its UUID): albums (by album and album
+artist), tracks and Navidrome playlists, added on the DAP tab from the
+library's albums or Navidrome's starred albums and songs and playlists
+(`GET /api/music/dap/items?uuid=`, `POST .../items/add`,
+`.../items/remove`). Sync (`POST /api/music/dap/sync`, the password
+again, audited; root action `dap-sync`) starts `nylm dap-sync`
+(`nylm-dap-sync.service`), which brings the folder `Music` on the DAP
+to the selection (`dap_syncs` records each, with its progress):
+
+- the files of the selected albums and tracks, each playlist's songs
+  that the library has, and the JPEG and PNG pictures of their folders,
+  at their paths in the library with each name made safe for FAT (as
+  the naming rule does); each playlist as `Music/NAME.m3u8`, paths
+  relative to `Music`;
+- a file already there with the same size and time (2 s) stays; one
+  that is not is copied to `.nylm-part` in its folder, given the
+  source's time, and renamed; what is in `Music` but not selected is
+  deleted, and the folders left empty;
+- it stops before changing anything when a playlist can not be read
+  (Navidrome), when the DAP has no room for the copies (after the
+  deletions), or when the drive mounted is not the DAP the sync is for;
+  a file that fails (4 GiB or more on FAT, two names FAT can not tell
+  apart, a source it can not read) is listed and the rest goes on.
+
+Nothing outside `Music` is touched, and the sync can write nowhere else:
+its unit lets it write only to `/mnt/nylm-dap` and nylm's music data
+(`install.sh` writes that path in `nylm-dap-sync.service.d/data.conf`;
+the music folder is read-only for it); it checks that `/mnt/nylm-dap`
+is a FAT or exFAT mount of that DAP and not the music folder's file
+system; and it copies and deletes only through folder handles opened
+below `Music` without following links. While it runs it holds
+`$NYLM_DATA/music/dap.lock` and the library lock shared: tags can be
+edited, but scans, writes, moves, Qobuz and unmounting wait (409).
 
 ## Server
 
@@ -610,12 +694,13 @@ sudo systemctl start nylm-music-scan   # scan the music folder (or what is queue
 sudo systemctl start nylm-music-write  # write the pending tag changes
 sudo systemctl start nylm-music-move   # move the files where their tags put them
 sudo systemctl start nylm-qobuz        # Qobuz: what the web app queued
+sudo systemctl start nylm-dap-sync     # copy the queued selection to the mounted DAP
 sudo systemctl start nylm-musicbrainz@ids     # MusicBrainz album ids, 10 albums
 sudo systemctl start nylm-musicbrainz@genres  # genres from MusicBrainz, 10 albums
 sudo -u nylm env NYLM_DATA=/mnt/data/nylm NYLM_MUSIC=/mnt/data/music \
     nylm music-scan /mnt/data/music/Some/Album   # scan one folder or file
 journalctl -u nylm-music-scan -u nylm-music-write -u nylm-music-move -u nylm-qobuz \
-    -u 'nylm-musicbrainz@*'
+    -u nylm-dap-sync -u 'nylm-musicbrainz@*'
 sudo systemctl start nylm-disk-usage    # measure the folders (see the System tab)
 journalctl -u nylm-disk-usage
 sudo systemctl start nylm-updates-check # list the package updates
@@ -637,6 +722,7 @@ NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-debug music-scan
 NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-debug music-write
 NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-debug music-move
 NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-qobuz-debug
+NYLM_DATA=dev-data NYLM_MUSIC=/path/to/music ./nylm-debug dap-sync  # a DAP at /mnt/nylm-dap
 NYLM_DATA=dev-data ./nylm-musicbrainz-debug ids      # or genres
 ```
 

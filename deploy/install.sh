@@ -60,6 +60,8 @@ install -d -m 700 -o nylm -g nylm "$HOME_DIR"
 # The jobs (root scripts run by systemd units) and lib.sh sit next to it,
 # where sudo does not reach.
 install -d -m 755 -o root -g root /usr/local/lib/nylm "$ACTIONS" "$JOBS"
+# Where the root action dap-mount mounts a DAP (left alone while one is).
+mountpoint -q /mnt/nylm-dap || install -d -m 755 -o root -g root /mnt/nylm-dap
 
 step "files"
 install -m 755 nylm /usr/local/bin/nylm
@@ -135,6 +137,10 @@ NYLM_PORT=$PORT
 # Music library folder for the music app; user nylm must be able to read
 # and write it. Leave it commented out to not use the music app.
 #NYLM_MUSIC=/mnt/data/music
+# Navidrome on this machine (127.x.x.x), optional; and its music folder
+# inside its container when that is not the same path as NYLM_MUSIC.
+#NYLM_NAVIDROME=http://127.0.0.1:4533
+#NYLM_NAVIDROME_MUSIC=/music
 # Addresses to listen on: WireGuard and LAN only, never 0.0.0.0.
 NYLM_LISTEN="${wg%/*} ${lan%/*}"
 # HTTPS: the certificate install.sh makes for the NYLM_LISTEN addresses.
@@ -154,6 +160,16 @@ EOF
     echo "wrote $CONF:"
     sed 's/^/    /' "$CONF"
 fi
+
+step "DAP sync"
+# nylm-dap-sync.service writes only to the DAP and to nylm's music data,
+# whose path is in the configuration.
+data=$(. "$CONF" && printf '%s' "${NYLM_DATA:-}")
+case $data in /?* ) ;; *) die "NYLM_DATA in $CONF must be an absolute path" ;; esac
+case $data in *[!A-Za-z0-9/._-]*) die "NYLM_DATA must be A-Z a-z 0-9 / . _ - only" ;; esac
+install -d -m 755 /etc/systemd/system/nylm-dap-sync.service.d
+printf '%s\n' "[Service]" "# Written by install.sh: nylm's music data (its database)." \
+    "ReadWritePaths=$data/music" > /etc/systemd/system/nylm-dap-sync.service.d/data.conf
 
 step "HTTPS certificate"
 if ! grep -q '^NYLM_TLS_CERT=' "$CONF"; then

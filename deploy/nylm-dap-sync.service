@@ -1,0 +1,33 @@
+[Unit]
+Description=nylm DAP sync
+Documentation=file:///usr/local/share/nylm/README.md
+
+# Started from the web app (action dap-sync) or by hand:
+#   sudo systemctl start nylm-dap-sync
+# Copies the queued selection to Music/ on the DAP mounted at /mnt/nylm-dap
+# and deletes from Music/ what is not in it. Never runs together with a
+# scan, write or move.
+[Service]
+Type=oneshot
+User=nylm
+Group=nylm
+EnvironmentFile=/etc/nylm.conf
+ExecStart=/usr/local/bin/nylm dap-sync
+WorkingDirectory=/var/lib/nylm
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=infinity
+
+# It may write only to the DAP, and to nylm's music data (its database:
+# install.sh adds that folder in nylm-dap-sync.service.d/data.conf).
+# Everything else, the music folder included, is read-only for it.
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/mnt/nylm-dap
+PrivateTmp=yes
+PrivateDevices=yes
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes

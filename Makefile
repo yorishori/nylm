@@ -9,7 +9,7 @@ LDLIBS  = -lsqlite3 -lcjson -lcrypto -ltag_c -ljpeg -lpng16
 SSLLIBS = -lssl
 
 # Their own files: only in their binary, never in the server.
-QOBUZ_SRC = src/https.c src/qobuz_service.c src/qobuz_main.c
+QOBUZ_SRC = src/qobuz_service.c src/qobuz_main.c
 MB_SRC    = src/musicbrainz.c src/musicbrainz_main.c
 SRC       = $(filter-out $(QOBUZ_SRC) $(MB_SRC),$(wildcard src/*.c))
 
@@ -20,10 +20,8 @@ REL_OBJ  = $(SRC:src/%.c=build/release/%.o)
 DBG_OBJ  = $(SRC:src/%.c=build/debug/%.o)
 QREL_OBJ = $(filter-out build/release/main.o,$(REL_OBJ)) $(QOBUZ_SRC:src/%.c=build/release/%.o)
 QDBG_OBJ = $(filter-out build/debug/main.o,$(DBG_OBJ)) $(QOBUZ_SRC:src/%.c=build/debug/%.o)
-MREL_OBJ = $(filter-out build/release/main.o,$(REL_OBJ)) build/release/https.o \
-           $(MB_SRC:src/%.c=build/release/%.o)
-MDBG_OBJ = $(filter-out build/debug/main.o,$(DBG_OBJ)) build/debug/https.o \
-           $(MB_SRC:src/%.c=build/debug/%.o)
+MREL_OBJ = $(filter-out build/release/main.o,$(REL_OBJ)) $(MB_SRC:src/%.c=build/release/%.o)
+MDBG_OBJ = $(filter-out build/debug/main.o,$(DBG_OBJ)) $(MB_SRC:src/%.c=build/debug/%.o)
 SAN      = -fsanitize=address,undefined
 
 release: nylm nylm-qobuz nylm-musicbrainz
@@ -64,7 +62,12 @@ build/tests/%: tests/%.c tests/test.h $(TEST_OBJ)
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -O0 -g $(SAN) -o $@ $< $(TEST_OBJ) $(LDLIBS) $(SSLLIBS)
 
-test: nylm-debug nylm-qobuz-debug nylm-musicbrainz-debug $(TEST_BIN)
+# A stand-in for Navidrome that tests/smoke.sh runs.
+build/tests/fake_navidrome: tests/fake_navidrome.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -O0 -g $(SAN) -o $@ $< -lcrypto
+
+test: nylm-debug nylm-qobuz-debug nylm-musicbrainz-debug $(TEST_BIN) build/tests/fake_navidrome
 	@for t in $(TEST_BIN); do $$t || exit 1; done
 	tests/smoke.sh ./nylm-debug
 

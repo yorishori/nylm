@@ -27,6 +27,12 @@ const char *move_target(const char *albumartist, const char *album, const char *
                         const char *tracknumber, const char *discnumber, const char *ext,
                         char *out, size_t outlen);
 
+/*
+ * s made safe as one name of at most max bytes, as move_target() makes each
+ * part, into out (room for max + 1). Its length.
+ */
+size_t move_safe_name(const char *s, char *out, size_t max);
+
 /* One track of the plan. to is NULL when it stays: it is where it should
  * be, or it can not move (problem says why). */
 struct move_item {

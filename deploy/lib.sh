@@ -17,7 +17,7 @@ JOBS_LOCK=/usr/local/lib/nylm/jobs
 
 # nylm's own units: their logs are always shown.
 NYLM_OWN_UNITS="nylm.service nylm-music-scan.service nylm-music-write.service
-nylm-music-move.service nylm-qobuz.service nylm-musicbrainz@ids.service
+nylm-music-move.service nylm-dap-sync.service nylm-qobuz.service nylm-musicbrainz@ids.service
 nylm-musicbrainz@genres.service nylm-disk-usage.service nylm-updates-check.service
 nylm-update.service nylm-backup@nylm.service"
 
@@ -56,6 +56,12 @@ valid_path() {
     case $1 in /?*) ;; *) return 1 ;; esac
     case $1 in *[!A-Za-z0-9/._-]* | *//* | */ | */./* | */. | */../* | */..) return 1 ;; esac
     [ "${#1}" -le 1024 ]
+}
+
+# A FAT or exFAT file system's UUID as udev and blkid show it: XXXX-XXXX,
+# X an upper-case hex digit (src/dap.c: dap_uuid_valid).
+valid_fat_uuid() {
+    case $1 in [0-9A-F][0-9A-F][0-9A-F][0-9A-F]-[0-9A-F][0-9A-F][0-9A-F][0-9A-F]) ;; *) return 1 ;; esac
 }
 
 # full_unit NAME: the unit's full name as systemd reads it, ".service"

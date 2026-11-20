@@ -27,12 +27,14 @@
 #include "db.h"
 #include "image.h"
 #include "json.h"
+#include "navidrome.h"
 
 static char root[MUSIC_MAX_ROOT + 1];
 static size_t root_len;
 static char lock_path[DB_MAX_PATH];
 static char qobuz_lock_path[DB_MAX_PATH];
 static char musicbrainz_lock_path[DB_MAX_PATH];
+static char dap_lock_path[DB_MAX_PATH];
 
 int music_configure(const char *dir, const char *data_dir)
 {
@@ -42,8 +44,10 @@ int music_configure(const char *dir, const char *data_dir)
     int q = snprintf(qobuz_lock_path, sizeof qobuz_lock_path, "%s/music/qobuz.lock", data_dir);
     int b = snprintf(musicbrainz_lock_path, sizeof musicbrainz_lock_path,
                      "%s/music/musicbrainz.lock", data_dir);
+    int d = snprintf(dap_lock_path, sizeof dap_lock_path, "%s/music/dap.lock", data_dir);
     if (n < 0 || (size_t)n >= sizeof lock_path || q < 0 || (size_t)q >= sizeof qobuz_lock_path ||
-        b < 0 || (size_t)b >= sizeof musicbrainz_lock_path || art_configure(data_dir) != 0) {
+        b < 0 || (size_t)b >= sizeof musicbrainz_lock_path || d < 0 ||
+        (size_t)d >= sizeof dap_lock_path || art_configure(data_dir) != 0) {
         fprintf(stderr, "music: data folder path is too long\n");
         return -1;
     }
@@ -906,6 +910,11 @@ int music_musicbrainz_lock(int service)
     return own_lock(musicbrainz_lock_path, "MusicBrainz", service);
 }
 
+int music_dap_lock(int service)
+{
+    return own_lock(dap_lock_path, "the DAP sync", service);
+}
+
 void music_unlock(int fd)
 {
     if (fd >= 0)
@@ -1274,6 +1283,12 @@ int music_write(void)
     int lock = music_start_service("write");
     if (lock < 0)
         return 1; /* the changes stay pending */
+    /* Navidrome must be there to read what changes (navidrome.h). */
+    if (navidrome_ready("before-write") != 0) {
+        fprintf(stderr, "music: nothing written: Navidrome does not answer\n");
+        close(lock);
+        return 1;
+    }
 
     struct write_counts n = { 0 };
     /* Changes still "running" were cut off (the lock says none runs now):
@@ -1313,6 +1328,8 @@ int music_write(void)
                n.tracks, n.done, n.warnings, n.failed);
     else
         fprintf(stderr, "music: write stopped (database error)\n");
+    /* Navidrome reads the new tags before anything moves. */
+    int scanned = n.tracks == 0 || navidrome_scan("after-write") == 0;
     close(lock);
-    return rc == 0 ? 0 : 1;
+    return rc == 0 && scanned ? 0 : 1;
 }

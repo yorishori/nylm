@@ -18,6 +18,12 @@
  *   #/files        where the move service puts each file (its plan, its
  *                  problems, what it did), and starting it
  *   #/qobuz        connect to Qobuz, download albums into the library
+ *   #/navidrome    the Navidrome login; its starred albums and songs and
+ *                  its playlists, each matched to nylm's tracks
+ *   #/dap          the USB drives plugged into the server (a DAP): mount
+ *                  one, unmount it, name it; what goes on it (albums,
+ *                  tracks, Navidrome playlists; starred ones first), sync
+ *                  it, and how the syncs went
  *   #/info         library counts, genres and years charts, the rules,
  *                  the written changes
  *
@@ -220,7 +226,8 @@ function shell(active, overview, ...content) {
   musicRoot = overview.root || "";
   const tabs = [["albums", "Albums"], ["changes", changesLabel(overview.pending)],
                 ["names", "Names"], ["duplicates", "Duplicates"], ["fixes", "Fixes"],
-                ["files", "Files"], ["qobuz", "Qobuz"], ["info", "Info"]];
+                ["files", "Files"], ["qobuz", "Qobuz"], ["navidrome", "Navidrome"],
+                ["dap", "DAP"], ["info", "Info"]];
   return el("section", { class: "page" },
     el("header", { class: "app-head" },
       el("h1", {}, "Music"),
@@ -254,7 +261,16 @@ async function queue(body) {
 
 /* ---- services ------------------------------------------------------------ */
 
+/* What each of Navidrome's scans (or checks) is for. */
+const NAVIDROME_REASON = { "before-write": "before the write", "after-write": "after the write",
+                           "before-move": "before the move", "after-move": "after the move",
+                           "after-qobuz": "after the Qobuz downloads" };
+
 function busyText(o) {
+  const nd = o.navidrome_scan;
+  if (o.busy && nd && nd.state === "running") {
+    return `Waiting for Navidrome's scan ${NAVIDROME_REASON[nd.reason] || ""}…`;
+  }
   if (o.busy === "scan") {
     const r = o.running;
     return r ? `Scanning ${r.path ? relative(r.path) : "the library"}… ` +
@@ -1460,12 +1476,14 @@ async function changesPage() {
     `Writes ${plural(ch.count, "change", "changes")} into the files, track by track. Each ` +
     "file is checked first (it must still be as scanned, and every tag the write sets valid; " +
     "the others are left as they are), then written and read back; each result is listed in " +
-    "Info.",
+    "Info." + (o.navidrome ? " Navidrome must answer first; it scans the library after the " +
+                             "write, so that it knows the new tags before a move." : ""),
     "Write changes", "Writing started");
   const text = el("p", {}, busyText(o));
   const panel = el("section", { class: "card stack" },
     el("h2", {}, "Pending ", el("span", { class: "count" }, ch.count)),
     o.busy ? text : null,
+    navidromeWarning(o),
     !o.available ? el("p", { class: "warn" },
                       "The music folder is not available (is the drive mounted?): nothing can " +
                       "be written now.") : null,
@@ -1517,6 +1535,19 @@ async function changesPage() {
                el("section", { class: "card" }, list, empty));
 }
 
+/* The latest of Navidrome's scans when it failed: what it means. */
+function navidromeWarning(o) {
+  const nd = o.navidrome_scan;
+  if (!nd || nd.state !== "failed") return null;
+  const before = nd.reason.startsWith("before-");
+  return el("p", { class: "warn" },
+    before ? `Navidrome did not answer ${NAVIDROME_REASON[nd.reason]}, so nothing happened ` +
+             `(${showTime(nd.started)}): ${nd.note}`
+           : `Navidrome's scan ${NAVIDROME_REASON[nd.reason]} failed (${showTime(nd.started)}): ` +
+             `${nd.note}. Start a scan in Navidrome by hand before anything else changes, so ` +
+             "that it sees the files as they are now.");
+}
+
 /* ---- files --------------------------------------------------------------- */
 
 const MOVE_STATE = { done: "Moved", failed: "Not moved", kept: "Stayed" };
@@ -1559,7 +1590,9 @@ async function filesPage() {
   musicRoot = o.root || "";
   const start = passwordForm("/api/music/move", {},
     `Moves ${plural(mv.count, "file", "files")} to where their tags put them. A file is ` +
-    "never moved over another; each move is listed below.",
+    "never moved over another; each move is listed below." +
+    (o.navidrome ? " Navidrome scans the library before and after, so that it keeps the " +
+                   "plays, stars and playlists of the files that move." : ""),
     "Move files", "Moving started");
   const text = el("p", {}, busyText(o));
   const canStart = mv.count > 0 && !mv.pending && !o.busy && o.available;
@@ -1573,6 +1606,7 @@ async function filesPage() {
                                 "files (covers, logs, ...) go with them; emptied folders are " +
                                 "removed."),
     o.busy ? text : null,
+    navidromeWarning(o),
     !o.available ? el("p", { class: "warn" }, "The music folder is not available (is the " +
                                               "drive mounted?): nothing can be moved now.") : null,
     mv.pending ? el("p", { class: "warn" },
@@ -1705,6 +1739,477 @@ async function qobuzPage() {
       qb.downloads.length
         ? el("ul", { class: "list cols" }, qb.downloads.map(downloadItem))
         : el("p", { class: "empty" }, "Nothing downloaded yet.")));
+}
+
+/* ---- navidrome ----------------------------------------------------------- */
+
+const REAL_PATH_HINT = "nylm finds Navidrome's songs in the library by their paths: turn on " +
+  "Report Real Path for the player nylm in Navidrome (Settings → Players).";
+
+const SCAN_STATE_TEXT = { running: "Scanning", done: "Done", failed: "Failed" };
+
+/* One of Navidrome's scans (or a refused check). Rose: failed. */
+function navidromeScan(sc) {
+  const check = sc.reason.startsWith("before-") && sc.state === "failed" &&
+                sc.note.includes("nothing was");
+  return el("li", { class: "card stack history" },
+    el("header", {},
+      el("span", { class: sc.state === "failed" ? "due late" : "muted" },
+         SCAN_STATE_TEXT[sc.state] || sc.state),
+      el("span", { class: "muted" }, showTime(sc.finished || sc.started))),
+    el("strong", {}, `${check ? "Check" : "Scan"} ${NAVIDROME_REASON[sc.reason] || sc.reason}`),
+    sc.finished && sc.state === "done"
+      ? el("p", { class: "muted" }, `Took ${Math.max(0, sc.finished - sc.started)} s`) : null,
+    sc.note ? el("p", { class: "note" }, sc.note) : null);
+}
+
+/* A song Navidrome has: title, artist · album, and Open album when nylm
+ * has it. */
+function navidromeSong(s) {
+  const facts = [s.artist, s.album].filter(Boolean).join(" · ");
+  return el("li", { class: "card stack" },
+    el("strong", {}, s.title || "No title"),
+    facts ? el("p", { class: "muted" }, facts) : null,
+    s.track != null ? el("div", { class: "actions" }, navButton("Open album", `#/album/${s.track}`))
+                    : el("p", { class: "differs-text" }, "Not found in nylm's library"));
+}
+
+/* How many of songs nylm has, when it does not have them all. */
+function missingSongs(songs) {
+  const missing = songs.filter((s) => s.track == null).length;
+  if (!missing) return null;
+  return el("p", { class: missing === songs.length ? "warn" : "muted" },
+            `${plural(missing, "song is", "songs are")} not in nylm's library. ` +
+            (missing === songs.length ? REAL_PATH_HINT : ""));
+}
+
+/* One playlist that shows its songs when opened. */
+function playlistGroup(p) {
+  const label = [el("strong", {}, p.name || "No name"),
+                 el("span", { class: "muted" },
+                    ` ${plural(p.songs ?? 0, "song", "songs")}` +
+                    (p.duration ? ` · ${showDuration(p.duration)}` : ""))];
+  return foldGroup(label, () => {
+    const body = el("div", { class: "stack" }, el("p", { class: "muted" }, "Loading…"));
+    api("GET", `/api/music/navidrome/playlist?id=${encodeURIComponent(p.id)}`)
+      .then((pl) => body.replaceChildren(...[
+        missingSongs(pl.songs),
+        pl.songs.length ? el("ul", { class: "list cols" }, pl.songs.map(navidromeSong))
+                        : el("p", { class: "empty" }, "This playlist is empty.")].filter(Boolean)))
+      .catch((err) => body.replaceChildren(el("p", { class: "differs-text" }, err.message)));
+    return body;
+  });
+}
+
+/* Starred albums and songs, and playlists; an error shows in their place. */
+async function navidromeLists() {
+  let starred, playlists;
+  try {
+    [starred, playlists] = await Promise.all([api("GET", "/api/music/navidrome/starred"),
+                                              api("GET", "/api/music/navidrome/playlists")]);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 401) throw err;
+    return [el("p", { class: "differs-text" }, err.message)];
+  }
+  const count = (n) => el("span", { class: "count" }, n);
+  return [
+    el("section", { class: "section" },
+      el("header", {}, el("h2", {}, "Starred albums ", count(starred.albums.length))),
+      starred.albums.length
+        ? el("ul", { class: "list cols" }, starred.albums.map((a) => el("li", { class: "card stack" },
+            el("strong", {}, a.name || "No name"),
+            el("p", { class: "muted" }, [a.artist, a.year, a.songs != null ? plural(a.songs, "song", "songs") : null]
+                                          .filter((x) => x != null && x !== "").join(" · ")),
+            a.track != null ? el("div", { class: "actions" }, navButton("Open album", `#/album/${a.track}`))
+                            : el("p", { class: "differs-text" },
+                                 "No album in nylm's library has this name and album artist"))))
+        : el("p", { class: "empty" }, "No starred albums.")),
+    el("section", { class: "section" },
+      el("header", {}, el("h2", {}, "Starred songs ", count(starred.songs.length))),
+      missingSongs(starred.songs),
+      starred.songs.length ? el("ul", { class: "list cols" }, starred.songs.map(navidromeSong))
+                           : el("p", { class: "empty" }, "No starred songs.")),
+    el("section", { class: "section" },
+      el("header", {}, el("h2", {}, "Playlists ", count(playlists.playlists.length))),
+      playlists.playlists.length ? el("ul", { class: "fold-list" }, playlists.playlists.map(playlistGroup))
+                                 : el("p", { class: "empty" }, "No playlists.")),
+  ];
+}
+
+async function navidromePage() {
+  const [o, nd] = await Promise.all([api("GET", "/api/music"), api("GET", "/api/music/navidrome")]);
+  musicRoot = o.root || "";
+  if (!nd.configured) {
+    return shell("navidrome", o, el("section", { class: "card stack" },
+      el("h2", {}, "Navidrome"),
+      el("p", {}, "Navidrome is not set up. To use it, set its address on this machine in " +
+                  "/etc/nylm.conf, like NYLM_NAVIDROME=http://127.0.0.1:4533, and, when its " +
+                  "container sees the music folder at another path, that path, like " +
+                  "NYLM_NAVIDROME_MUSIC=/music. Then restart nylm."),
+      el("p", { class: "muted" }, "With Navidrome set up, nylm has it scan the library after " +
+                                  "a write and before and after a move, so that it keeps its " +
+                                  "plays, stars and playlists when files move.")));
+  }
+  const user = el("input", { type: "text", name: "user", required: true, autocomplete: "off",
+                             maxlength: 64, value: nd.user || "" });
+  const ndPassword = el("input", { type: "password", name: "navidrome_password", required: true,
+                                   autocomplete: "off", maxlength: 256 });
+  const password = el("input", { type: "password", name: "password", required: true,
+                                 autocomplete: "current-password" });
+  const login = form({ class: "raised" }, async () => {
+    try {
+      const r = await api("POST", "/api/music/navidrome/login",
+                          { user: user.value, navidrome_password: ndPassword.value,
+                            password: password.value });
+      setStatus(`Navidrome login kept: ${r.user}`);
+    } finally {
+      ndPassword.value = "";
+      password.value = "";
+    }
+    refresh();
+  },
+    el("p", {}, "An admin of Navidrome: starting its scans needs one. nylm checks the login " +
+                "with Navidrome before it keeps it; the password stays on the server."),
+    field("Navidrome user", user),
+    field("Navidrome password", ndPassword),
+    field("Password", password, "Changing the login needs your nylm password again."),
+    el("div", { class: "actions" }, el("button", { class: "btn go", type: "submit" }, "Keep login")));
+  const state = el("section", { class: "card stack" },
+    el("h2", {}, "Navidrome"),
+    el("p", {}, `At ${nd.url}, its music folder ${nd.music}.`),
+    el("p", {}, !nd.user ? "No login yet: add one below."
+                : nd.connected ? `Connected as ${nd.user}` +
+                                 (nd.version ? ` (Navidrome ${nd.version}).` : ".")
+                : `Not connected as ${nd.user}.`),
+    nd.error ? el("p", { class: "differs-text" }, nd.error) : null,
+    el("p", { class: "muted" }, REAL_PATH_HINT));
+  const scans = el("section", { class: "section" },
+    el("header", {}, el("h2", {}, "Scans ", el("span", { class: "count" }, nd.scans.length))),
+    el("p", { class: "muted" }, "Navidrome scans the library after a write and before and " +
+                                "after a move: it matches a moved file to the one it knew by " +
+                                "its tags, and keeps its plays, stars and playlists. With " +
+                                "Navidrome not answering, nothing is written or moved."),
+    nd.scans.length ? el("ul", { class: "list cols" }, nd.scans.map(navidromeScan))
+                    : el("p", { class: "empty" }, "No scans yet."));
+  return shell("navidrome", o, state,
+    nd.connected ? await navidromeLists() : null,
+    scans,
+    el("section", { class: "section" },
+      el("header", {}, el("h2", {}, nd.user ? "Change the login" : "Login")), login));
+}
+
+/* ---- dap ------------------------------------------------------------------- */
+
+/* A drive's name: the one given in nylm, else its label, else its device. */
+function driveName(d) {
+  return d.name || (d.label ? d.label.replaceAll("_", " ") : `USB drive ${d.dev}`);
+}
+
+/* What a drive is: maker, model, file system, size, UUID. */
+function driveFacts(d) {
+  return [[d.vendor, d.model].filter(Boolean).join(" ").replaceAll("_", " "),
+          d.fstype === "vfat" ? "FAT" : "exFAT", showSize(d.size), d.uuid]
+    .filter(Boolean).join(" · ");
+}
+
+/* A form that names the drive, hidden until opened. */
+function nameForm(d) {
+  const name = el("input", { type: "text", name: "name", required: true, maxlength: 64,
+                             value: d.name || "" });
+  const node = form({ class: "raised", hidden: true }, async () => {
+    await api("POST", "/api/music/dap/name", { uuid: d.uuid, name: name.value.trim() });
+    setStatus(`Named ${name.value.trim()}`);
+    refresh();
+  },
+    field("Name", name, "How nylm shows this DAP, plugged in or not."),
+    el("div", { class: "actions" },
+      el("button", { class: "btn go", type: "submit" }, "Save"),
+      el("button", { class: "btn", type: "button", onclick: () => { node.hidden = true; } },
+         "Cancel")));
+  node.open = () => {
+    node.hidden = false;
+    name.focus();
+  };
+  return node;
+}
+
+/* Runs a mount or unmount, then shows the page again. */
+async function dapAction(button, path, body, done) {
+  button.disabled = true;
+  try {
+    await api("POST", path, body);
+    setStatus(done);
+    refresh();
+  } catch (err) {
+    button.disabled = false;
+    handleError(err);
+  }
+}
+
+/* One USB drive: what it is, where it is mounted, Mount and Name. */
+function driveItem(d, dap) {
+  const naming = nameForm(d);
+  const here = dap.mounted && dap.mounted.uuid === d.uuid;
+  const canMount = !dap.mounted && !dap.other && !d.mounted;
+  const mount = el("button", { class: "btn go", type: "button",
+                               onclick: () => dapAction(mount, "/api/music/dap/mount",
+                                                        { uuid: d.uuid }, `Mounted ${driveName(d)}`) },
+                   "Mount");
+  return el("li", { class: "card stack" },
+    el("strong", {}, driveName(d)),
+    el("p", { class: "muted" }, driveFacts(d)),
+    here ? el("p", {}, `Mounted at ${dap.mount}.`)
+         : d.mounted ? el("p", { class: "warn" }, `Mounted at ${d.mounted} by something else: ` +
+                                                  "unmount it there to use it here.")
+         : null,
+    el("div", { class: "actions" },
+      canMount ? mount : null,
+      el("button", { class: "btn", type: "button", onclick: () => naming.open() },
+         d.name ? "Rename…" : "Name…")),
+    naming);
+}
+
+const SYNC_STATE = { queued: "Waiting", running: "Copying", done: "Done",
+                     warning: "Done, with problems", failed: "Failed" };
+const ADD_SHOWN = 20; /* library albums listed for a search */
+
+/* One sync: how it went. Rose failed, peach problems. */
+function syncItem(sy, drives) {
+  const tone = sy.state === "failed" ? "late" : sy.state === "warning" ? "today" : "";
+  const drive = drives.find((d) => d.uuid === sy.uuid);
+  const counts = [
+    sy.copied ? `${plural(sy.copied, "file", "files")} copied (${showSize(sy.bytes)})` : null,
+    sy.kept ? `${plural(sy.kept, "was", "were")} there already` : null,
+    sy.deleted ? `${sy.deleted} deleted` : null,
+    sy.failed ? `${sy.failed} failed` : null,
+    sy.missing ? `${plural(sy.missing, "selected file is", "selected files are")} not in the library` : null,
+  ].filter(Boolean);
+  return el("li", { class: "card stack history" },
+    el("header", {},
+      el("span", { class: tone ? `due ${tone}` : "muted" }, SYNC_STATE[sy.state] || sy.state),
+      el("span", { class: "muted" }, showTime(sy.finished || sy.started || sy.requested))),
+    el("strong", {}, drive ? driveName(drive) : sy.uuid),
+    sy.state === "running" && sy.total
+      ? el("p", {}, `${showSize(sy.bytes)} of ${showSize(sy.total)} copied…`) : null,
+    counts.length ? el("p", { class: "muted" }, counts.join(" · ")) : null,
+    sy.note ? el("p", { class: "note" }, sy.note) : null);
+}
+
+/* Adds something to what goes on the DAP uuid, then shows the page again. */
+async function addItem(button, uuid, what, label) {
+  button.disabled = true;
+  try {
+    const r = await api("POST", "/api/music/dap/items/add", { uuid, ...what });
+    setStatus(r.added ? `On the DAP: ${label}` : `${label} is on the DAP already`);
+    refresh();
+  } catch (err) {
+    button.disabled = false;
+    handleError(err);
+  }
+}
+
+/* One thing that goes on the DAP, with Remove. */
+function selectedItem(it) {
+  const remove = el("button", { class: "btn", type: "button", onclick: async () => {
+    remove.disabled = true;
+    try {
+      await api("POST", "/api/music/dap/items/remove", { id: it.id });
+      setStatus("Taken off the DAP's selection: the next sync deletes it there");
+      refresh();
+    } catch (err) {
+      remove.disabled = false;
+      handleError(err);
+    }
+  } }, "Remove");
+  const kind = { album: "Album", track: "Track", playlist: "Playlist" }[it.kind];
+  const gone = it.kind !== "playlist" && it.track == null;
+  const title = it.kind === "playlist" ? it.name : it.kind === "album" ? it.album : it.title;
+  const facts = it.kind === "playlist" ? "From Navidrome: its songs that the library has"
+    : [it.kind === "track" ? it.artist : it.albumartist,
+       it.kind === "album" && !gone ? plural(it.tracks, "track", "tracks") : null,
+       !gone ? showSize(it.size) : null].filter(Boolean).join(" · ");
+  return el("li", { class: "card stack" },
+    el("span", { class: "muted small" }, kind),
+    el("strong", {}, title || "No name"),
+    facts ? el("p", { class: "muted" }, facts) : null,
+    gone ? el("p", { class: "differs-text" }, "No longer in the library: nothing of it is copied") : null,
+    el("div", { class: "actions" },
+      !gone && it.kind !== "playlist" ? navButton("Open album", `#/album/${it.track}`) : null,
+      remove));
+}
+
+/* What can be added: library albums by search, and with Navidrome its
+ * starred albums and songs and its playlists. */
+async function addSection(uuid, items, navidrome) {
+  const have = new Set(items.map((it) => it.kind === "album" ? `a${it.album}\u0000${it.albumartist}`
+                                     : it.kind === "track" ? `t${it.track}` : `p${it.playlist}`));
+  const [albums, nd] = await Promise.all([
+    api("GET", "/api/music/albums"),
+    navidrome ? api("GET", "/api/music/navidrome").catch(() => null) : null]);
+  let starred = null, playlists = null, ndError = null;
+  if (nd && nd.connected) {
+    try {
+      [starred, playlists] = await Promise.all([api("GET", "/api/music/navidrome/starred"),
+                                                api("GET", "/api/music/navidrome/playlists")]);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) throw err;
+      ndError = err.message;
+    }
+  } else if (nd) {
+    ndError = nd.error || "Navidrome is not connected: see the Navidrome tab.";
+  }
+  const addButton = (key, what, label) => {
+    if (have.has(key)) return el("span", { class: "muted" }, "On the DAP");
+    const b = el("button", { class: "btn go", type: "button",
+                             onclick: () => addItem(b, uuid, what, label) }, "Add");
+    return b;
+  };
+  const albumCard = (title, facts, key, what) => el("li", { class: "card stack" },
+    el("strong", {}, title), facts ? el("p", { class: "muted" }, facts) : null,
+    el("div", { class: "actions" }, addButton(key, what, title)));
+
+  /* Library albums, by what is typed. */
+  const search = el("input", { type: "search", placeholder: "Album or album artist",
+                               autocomplete: "off", spellcheck: "false" });
+  const found = el("ul", { class: "list cols" });
+  const showFound = () => {
+    const q = search.value.trim().toLowerCase();
+    const hits = albums.filter((a) => !q || `${a.album ?? ""} ${a.albumartist ?? ""}`.toLowerCase().includes(q));
+    const cards = hits.slice(0, ADD_SHOWN).map((a) =>
+      albumCard(a.album || "No album name",
+                `${a.albumartist || "No album artist"} · ${plural(a.tracks, "track", "tracks")}`,
+                `a${a.album}\u0000${a.albumartist}`, { album: a.track }));
+    if (hits.length > ADD_SHOWN) {
+      cards.push(el("li", { class: "muted" }, `${hits.length - ADD_SHOWN} more: type more of the name.`));
+    }
+    if (!hits.length) cards.push(el("li", { class: "empty" }, "No album has that name."));
+    found.replaceChildren(...cards);
+  };
+  search.addEventListener("input", showFound);
+  showFound();
+
+  const sections = [
+    el("section", { class: "section" },
+      el("header", {}, el("h2", {}, "Add albums from the library")),
+      field("Search", search), found),
+  ];
+  if (ndError) sections.push(el("p", { class: "differs-text" }, `Navidrome: ${ndError}`));
+  if (starred) {
+    const albumsHere = starred.albums.filter((a) => a.track != null);
+    const songsHere = starred.songs.filter((x) => x.track != null);
+    sections.push(
+      el("section", { class: "section" },
+        el("header", {}, el("h2", {}, "Starred albums ", el("span", { class: "count" }, albumsHere.length))),
+        albumsHere.length < starred.albums.length
+          ? el("p", { class: "muted" }, `${plural(starred.albums.length - albumsHere.length, "more is",
+                                                 "more are")} not in nylm's library.`) : null,
+        albumsHere.length
+          ? el("ul", { class: "list cols" }, albumsHere.map((a) =>
+              albumCard(a.name, [a.artist, a.year].filter(Boolean).join(" · "),
+                        `a${a.name}\u0000${a.artist}`, { album: a.track })))
+          : el("p", { class: "empty" }, "No starred album is in the library.")),
+      el("section", { class: "section" },
+        el("header", {}, el("h2", {}, "Starred songs ", el("span", { class: "count" }, songsHere.length))),
+        songsHere.length
+          ? el("ul", { class: "list cols" }, songsHere.map((x) =>
+              albumCard(x.title || "No title", [x.artist, x.album].filter(Boolean).join(" · "),
+                        `t${x.track}`, { track: x.track })))
+          : el("p", { class: "empty" }, "No starred song is in the library.")));
+  }
+  if (playlists) {
+    sections.push(el("section", { class: "section" },
+      el("header", {}, el("h2", {}, "Playlists ", el("span", { class: "count" }, playlists.playlists.length))),
+      playlists.playlists.length
+        ? el("ul", { class: "list cols" }, playlists.playlists.map((pl) =>
+            albumCard(pl.name || "No name", plural(pl.songs ?? 0, "song", "songs"), `p${pl.id}`,
+                      { playlist: pl.id, name: pl.name || pl.id })))
+        : el("p", { class: "empty" }, "Navidrome has no playlists.")));
+  }
+  return sections;
+}
+
+/* While a sync runs, checks back every few seconds: the syncs list shows
+ * its progress; when it ends the page is shown again. */
+function watchSync(node, list, drives) {
+  const poll = async () => {
+    if (!node.isConnected) return;
+    try {
+      const now = await api("GET", "/api/music/dap");
+      if (!node.isConnected) return;
+      list.replaceChildren(...now.syncs.map((sy) => syncItem(sy, drives)));
+      if (now.syncing) setTimeout(poll, POLL_MS);
+      else {
+        setStatus("The sync finished: see how it went below");
+        refresh();
+      }
+    } catch (err) {
+      handleError(err);
+    }
+  };
+  setTimeout(poll, POLL_MS);
+}
+
+async function dapPage() {
+  const [o, dap] = await Promise.all([api("GET", "/api/music"), api("GET", "/api/music/dap")]);
+  musicRoot = o.root || "";
+  const m = dap.mounted;
+  const unmount = el("button", { class: "btn go", type: "button",
+                                 onclick: () => dapAction(unmount, "/api/music/dap/unmount", {},
+                                                          "Unmounted: it can be unplugged") },
+                     "Unmount");
+  const sel = m ? await api("GET", `/api/music/dap/items?uuid=${encodeURIComponent(m.uuid)}`) : null;
+  const playlistsOn = sel ? sel.items.filter((it) => it.kind === "playlist").length : 0;
+  const sync = passwordForm("/api/music/dap/sync", {},
+    "Copies what goes on the DAP into its Music folder: what is missing or changed is copied, " +
+    "and what is in Music but not chosen here is deleted from it. Nothing outside Music " +
+    "changes, and the library is only read. Scans, writes and moves wait until it is done.",
+    "Sync", "Sync started");
+  const state = el("section", { class: "card stack" },
+    el("h2", {}, "DAP"),
+    m ? [el("p", {}, `${driveName(m)} is mounted at ${dap.mount}.`),
+         el("p", { class: "muted" }, driveFacts(m)),
+         m.free != null ? el("p", {}, `${showSize(m.free)} free of ${showSize(m.total)}.`) : null,
+         el("p", { class: "muted" }, "Unmount it before you unplug it: what is still to be " +
+                                     "written goes to it first.")]
+      : dap.other ? el("p", { class: "warn" }, `Something nylm does not know is mounted at ` +
+                                               `${dap.mount}: unmount it to mount a DAP.`)
+      : el("p", {}, "No DAP is mounted."),
+    dap.syncing ? el("p", { class: "warn" }, "A sync is running: unmount it when it is done.") : null,
+    el("div", { class: "actions" },
+      (m || dap.other) && !dap.syncing ? unmount : null,
+      el("button", { class: "btn", type: "button", onclick: () => refresh() }, "Look again")));
+
+  const syncList = el("ul", { class: "list cols" }, dap.syncs.map((sy) => syncItem(sy, dap.drives)));
+  const syncs = el("section", { class: "section" },
+    el("header", {}, el("h2", {}, "Syncs ", el("span", { class: "count" }, dap.syncs.length))),
+    dap.syncs.length ? syncList : el("p", { class: "empty" }, "No syncs yet."));
+  if (dap.syncing) watchSync(syncs, syncList, dap.drives);
+
+  const selection = m ? el("section", { class: "section" },
+    el("header", {}, el("h2", {}, `On ${driveName(m)} `, el("span", { class: "count" }, sel.items.length))),
+    el("p", {}, `${plural(sel.tracks, "track", "tracks")}, ${showSize(sel.size)}` +
+                (playlistsOn ? `, and the songs of ${plural(playlistsOn, "playlist", "playlists")}` : "") +
+                (m.free != null ? `; the DAP has ${showSize(m.free)} free.` : ".")),
+    sel.items.length ? el("ul", { class: "list cols" }, sel.items.map(selectedItem))
+                     : el("p", { class: "empty" }, "Nothing yet: add albums, songs or playlists below. " +
+                                                   "A sync with nothing chosen empties the Music folder."),
+    el("div", { class: "actions" },
+      el("button", { class: "btn go", type: "button", disabled: dap.syncing || Boolean(o.busy),
+                     onclick: () => sync.open() }, "Sync…")),
+    o.busy ? el("p", { class: "muted" }, "The library is busy: sync when it is done.") : null,
+    sync) : null;
+
+  return shell("dap", o, state, selection,
+    m ? await addSection(m.uuid, sel.items, o.navidrome) : null,
+    syncs,
+    el("section", { class: "section" },
+      el("header", {}, el("h2", {}, "USB drives ", el("span", { class: "count" }, dap.drives.length))),
+      el("p", { class: "muted" }, "Plug the DAP into the server as a USB drive (mass storage). " +
+                                  "nylm lists the USB drives with a FAT or exFAT file system, and " +
+                                  `mounts one at a time at ${dap.mount}, without programs.`),
+      dap.drives.length ? el("ul", { class: "list cols" }, dap.drives.map((d) => driveItem(d, dap)))
+                        : el("p", { class: "empty" }, "No USB drive with a FAT or exFAT file " +
+                                                     "system is plugged in.")));
 }
 
 /* ---- names --------------------------------------------------------------- */
@@ -2595,6 +3100,8 @@ function route(parts) {
   if (section === "fixes" && rawId === undefined) return fixesPage();
   if (section === "files" && rawId === undefined) return filesPage();
   if (section === "qobuz" && rawId === undefined) return qobuzPage();
+  if (section === "navidrome" && rawId === undefined) return navidromePage();
+  if (section === "dap" && rawId === undefined) return dapPage();
   if (section === "info" && rawId === undefined) return infoPage();
   go("#/albums");
   return null;
