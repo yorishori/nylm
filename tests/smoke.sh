@@ -1876,6 +1876,19 @@ expect 200 "starred"           -b "$JAR" "$B/api/music/navidrome/starred"
 expect_body "{\"albums\":[{\"id\":\"al-1\",\"name\":\"$NALBUM\",\"artist\":\"$NARTIST\",\"year\":2001,\"songs\":3,\"track\":$NALBUMT},{\"id\":\"al-2\",\"name\":\"Gone\",\"artist\":\"Nobody\",\"year\":null,\"songs\":1,\"track\":null}]" "starred albums"
 expect_body "\"songs\":[{\"id\":\"so-1\",\"title\":\"Song One\",\"artist\":\"Some Artist\",\"album\":\"$NALBUM\",\"duration\":180,\"track\":$NT1},{\"id\":\"so-2\",\"title\":\"Two\",\"artist\":null,\"album\":\"$NALBUM\",\"duration\":null,\"track\":$NT2}," "starred songs found"
 expect_body '{"id":"so-3","title":"Gone","artist":null,"album":null,"duration":null,"track":null},{"id":"so-4","title":"Fake","artist":null,"album":null,"duration":null,"track":null},{"id":"so-5","title":"Elsewhere","artist":null,"album":null,"duration":null,"track":null}]}' "songs nylm does not have, or outside the folder"
+# A big starred list (Navidrome sends it whole): 3000 songs, over 2 MiB.
+cp "$ND/getStarred2.json" "$TMP/starred.json"
+awk -v ok="$NDOK" -v pad="$(printf '%01000d' 0)" 'BEGIN {
+    printf "{\"subsonic-response\":{%s,\"starred2\":{\"song\":[", ok
+    for (i = 1; i <= 3000; i++)
+        printf "%s{\"id\":\"s%d\",\"title\":\"Song %d\",\"comment\":\"%s\",\"path\":\"/music/x/%d.flac\"}",
+               (i > 1 ? "," : ""), i, i, pad, i
+    printf "]}}}"
+}' > "$ND/getStarred2.json"
+expect 200 "a big starred list" -b "$JAR" "$B/api/music/navidrome/starred"
+if [ "$(grep -o '"id":"s[0-9]*"' "$TMP/body" | wc -l)" = 3000 ]; then PASSED=$((PASSED + 1)); else
+    FAILED=$((FAILED + 1)); echo "FAIL: not every starred song: $(head -c 200 "$TMP/body")"; fi
+cp "$TMP/starred.json" "$ND/getStarred2.json"
 expect 200 "playlists"         -b "$JAR" "$B/api/music/navidrome/playlists"
 expect_body '{"playlists":[{"id":"pl-1","name":"Road","songs":2,"duration":400,"owner":"admin"},{"id":"pl-2","name":"Empty","songs":0,"duration":0,"owner":"admin"}]}' "playlists"
 expect 200 "playlist"          -b "$JAR" "$B/api/music/navidrome/playlist?id=pl-1"

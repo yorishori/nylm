@@ -19,8 +19,11 @@
 #include "navidrome.h"
 #include "server.h"
 
-#define ARENA_SIZE     (16 * 1024 * 1024)
-#define DAP_ARENA_SIZE (64 * 1024 * 1024) /* a DAP's whole selection, planned at once */
+/* Memory for one request (or one run of a service). Only the pages a request
+ * uses are ever touched: the room is for Navidrome's largest answers
+ * (NAVIDROME_MAX_ANSWER), read whole. */
+#define ARENA_SIZE     (128 * 1024 * 1024)
+#define DAP_ARENA_SIZE (192 * 1024 * 1024) /* a DAP's whole selection, planned at once */
 
 /* Port from an env var value; fallback if unset, -1 if invalid. */
 static int parse_port(const char *s, int fallback)

@@ -19,7 +19,8 @@
 #define NAVIDROME_MAX_USER     64   /* bytes in a user name */
 #define NAVIDROME_MAX_PASSWORD 256  /* bytes in a password */
 #define NAVIDROME_MAX_ID       64   /* bytes in a Navidrome id */
-#define NAVIDROME_MAX_ANSWER   (2 * 1024 * 1024) /* bytes in one answer */
+#define NAVIDROME_MAX_ANSWER   (32 * 1024 * 1024) /* bytes in one answer: getStarred2
+                                                   * sends every starred song at once */
 
 /*
  * Checks and keeps the settings: url "http://127.x.x.x[:port][/prefix]"

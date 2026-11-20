@@ -47,8 +47,8 @@ static char *slurp(const char *name, size_t *len)
     FILE *f = fopen(path, "rb");
     if (f == NULL)
         return NULL;
-    char *buf = malloc(1 << 22);
-    *len = buf != NULL ? fread(buf, 1, (1 << 22) - 1, f) : 0;
+    char *buf = malloc(1 << 24);
+    *len = buf != NULL ? fread(buf, 1, (1 << 24) - 1, f) : 0;
     fclose(f);
     if (buf != NULL)
         buf[*len] = '\0';

@@ -1571,6 +1571,22 @@ function steppedTable(head, rows) {
           el("div", { class: "actions" }, more)];
 }
 
+/* A list (class: the ul's) of what render() makes of each of items,
+ * SHOW_STEP at a time, with Show more. */
+function steppedList(cls, items, render) {
+  const list = el("ul", { class: cls });
+  const more = el("button", { class: "btn", type: "button" }, "Show more");
+  let shown = 0;
+  const show = () => {
+    list.append(...items.slice(shown, shown + SHOW_STEP).map(render));
+    shown += SHOW_STEP;
+    more.hidden = items.length <= shown;
+  };
+  more.addEventListener("click", show);
+  show();
+  return [list, el("div", { class: "actions" }, more)];
+}
+
 /* One thing the move service did. Rose: not moved; peach: stayed. */
 function moveItem(m) {
   const tone = m.state === "failed" ? "late" : m.state === "kept" ? "today" : "";
@@ -1816,22 +1832,22 @@ async function navidromeLists() {
     el("section", { class: "section" },
       el("header", {}, el("h2", {}, "Starred albums ", count(starred.albums.length))),
       starred.albums.length
-        ? el("ul", { class: "list cols" }, starred.albums.map((a) => el("li", { class: "card stack" },
+        ? steppedList("list cols", starred.albums, (a) => el("li", { class: "card stack" },
             el("strong", {}, a.name || "No name"),
             el("p", { class: "muted" }, [a.artist, a.year, a.songs != null ? plural(a.songs, "song", "songs") : null]
                                           .filter((x) => x != null && x !== "").join(" · ")),
             a.track != null ? el("div", { class: "actions" }, navButton("Open album", `#/album/${a.track}`))
                             : el("p", { class: "differs-text" },
-                                 "No album in nylm's library has this name and album artist"))))
+                                 "No album in nylm's library has this name and album artist")))
         : el("p", { class: "empty" }, "No starred albums.")),
     el("section", { class: "section" },
       el("header", {}, el("h2", {}, "Starred songs ", count(starred.songs.length))),
       missingSongs(starred.songs),
-      starred.songs.length ? el("ul", { class: "list cols" }, starred.songs.map(navidromeSong))
+      starred.songs.length ? steppedList("list cols", starred.songs, navidromeSong)
                            : el("p", { class: "empty" }, "No starred songs.")),
     el("section", { class: "section" },
       el("header", {}, el("h2", {}, "Playlists ", count(playlists.playlists.length))),
-      playlists.playlists.length ? el("ul", { class: "fold-list" }, playlists.playlists.map(playlistGroup))
+      playlists.playlists.length ? steppedList("fold-list", playlists.playlists, playlistGroup)
                                  : el("p", { class: "empty" }, "No playlists.")),
   ];
 }
@@ -2104,25 +2120,25 @@ async function addSection(uuid, items, navidrome) {
           ? el("p", { class: "muted" }, `${plural(starred.albums.length - albumsHere.length, "more is",
                                                  "more are")} not in nylm's library.`) : null,
         albumsHere.length
-          ? el("ul", { class: "list cols" }, albumsHere.map((a) =>
+          ? steppedList("list cols", albumsHere, (a) =>
               albumCard(a.name, [a.artist, a.year].filter(Boolean).join(" · "),
-                        `a${a.name}\u0000${a.artist}`, { album: a.track })))
+                        `a${a.name}\u0000${a.artist}`, { album: a.track }))
           : el("p", { class: "empty" }, "No starred album is in the library.")),
       el("section", { class: "section" },
         el("header", {}, el("h2", {}, "Starred songs ", el("span", { class: "count" }, songsHere.length))),
         songsHere.length
-          ? el("ul", { class: "list cols" }, songsHere.map((x) =>
+          ? steppedList("list cols", songsHere, (x) =>
               albumCard(x.title || "No title", [x.artist, x.album].filter(Boolean).join(" · "),
-                        `t${x.track}`, { track: x.track })))
+                        `t${x.track}`, { track: x.track }))
           : el("p", { class: "empty" }, "No starred song is in the library.")));
   }
   if (playlists) {
     sections.push(el("section", { class: "section" },
       el("header", {}, el("h2", {}, "Playlists ", el("span", { class: "count" }, playlists.playlists.length))),
       playlists.playlists.length
-        ? el("ul", { class: "list cols" }, playlists.playlists.map((pl) =>
+        ? steppedList("list cols", playlists.playlists, (pl) =>
             albumCard(pl.name || "No name", plural(pl.songs ?? 0, "song", "songs"), `p${pl.id}`,
-                      { playlist: pl.id, name: pl.name || pl.id })))
+                      { playlist: pl.id, name: pl.name || pl.id }))
         : el("p", { class: "empty" }, "Navidrome has no playlists.")));
   }
   return sections;
