@@ -18,7 +18,7 @@
 #include "navidrome.h"
 #include "tags.h"
 
-#define MAX_ROWS 5000 /* albums, songs or playlists in one answer */
+#define MAX_ROWS 20000 /* albums, songs or playlists in one answer */
 
 /* Replies 503 and returns 0 unless Navidrome is set up. */
 static int ready(struct response *res)
@@ -247,7 +247,7 @@ void music_navidrome_login(struct request *req, struct response *res)
 
 /*
  * GET /api/music/navidrome/starred: the albums and songs starred in
- * Navidrome (at most 5000 each). An album: id, name, artist, year, songs
+ * Navidrome (at most 20000 each). An album: id, name, artist, year, songs
  * and the track of nylm's album with that name and album artist; a song
  * as in add_songs().
  */
@@ -292,7 +292,7 @@ void music_navidrome_starred(struct request *req, struct response *res)
 }
 
 /* GET /api/music/navidrome/playlists: Navidrome's playlists (at most
- * 5000): id, name, songs, duration, owner. */
+ * 20000): id, name, songs, duration, owner. */
 void music_navidrome_playlists(struct request *req, struct response *res)
 {
     (void)req;
@@ -324,7 +324,7 @@ void music_navidrome_playlists(struct request *req, struct response *res)
 }
 
 /* GET /api/music/navidrome/playlist?id=ID: one playlist: id, name and its
- * songs (at most 5000), as in add_songs(). */
+ * songs (at most 20000), as in add_songs(). */
 void music_navidrome_playlist(struct request *req, struct response *res)
 {
     const char *id = NULL;

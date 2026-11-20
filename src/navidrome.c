@@ -283,7 +283,11 @@ cJSON *navidrome_call(const char *method, const char *extra, const char *user,
     char why[256];
     if (http_local_request("GET", url, NULL, NAVIDROME_MAX_ANSWER, &r, why, sizeof why) != 0) {
         /* The address has the token: say only where it went. */
-        snprintf(err, errlen, "Navidrome does not answer at %s: %s", base_url, why);
+        if (strstr(why, "too big") != NULL)
+            snprintf(err, errlen, "Navidrome at %s answered with more than %d MiB, more than "
+                                  "nylm reads", base_url, NAVIDROME_MAX_ANSWER / (1024 * 1024));
+        else
+            snprintf(err, errlen, "Navidrome does not answer at %s: %s", base_url, why);
         return NULL;
     }
     cJSON *answer = NULL;
